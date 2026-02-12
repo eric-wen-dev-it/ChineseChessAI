@@ -1,0 +1,13 @@
+﻿<Window x:Class="ChineseChessAI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="ChineseChess AlphaZero Trainer" Height="450" Width="800">
+    <Grid>
+        <StackPanel Margin="10">
+            <Button x:Name="StartBtn" Content="开始自我进化训练" Height="40" Click="OnStartTrainingClick"/>
+            <TextBlock Text="实时日志:" Margin="0,10,0,5"/>
+            <TextBox x:Name="LogBox" Height="300" VerticalScrollBarVisibility="Auto" 
+                     IsReadOnly="True" TextWrapping="Wrap" Background="Black" Foreground="Lime"/>
+        </StackPanel>
+    </Grid>
+</Window>
