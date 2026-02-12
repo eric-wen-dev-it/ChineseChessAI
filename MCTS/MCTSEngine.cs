@@ -112,7 +112,7 @@ namespace ChineseChessAI.MCTS
                 piData[moveIdx] = (float)(child.Value.N / totalVisits);
             }
 
-            var piTensor = torch.tensor(piData, new long[] { 2086 });
+            var piTensor = torch.tensor(piData, new long[] { 8100 });
 
             // 3. 选择访问次数最多的走法作为实际执行的动作
             var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;

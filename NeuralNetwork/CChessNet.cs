@@ -31,12 +31,13 @@ namespace ChineseChessAI.NeuralNetwork
             }
 
             // 策略头：输出 2 个平面
+            
             policyHead = Sequential(
                 Conv2d(numFilters, 2, 1, 1, 0, bias: false),
                 BatchNorm2d(2),
                 ReLU(),
                 Flatten(),
-                Linear(2 * 10 * 9, 2086)
+                Linear(2 * 10 * 9, 8100) // 2086 修改为 8100
             );
 
             // 价值头：输出 1 个平面
