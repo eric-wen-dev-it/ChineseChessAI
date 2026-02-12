@@ -139,10 +139,12 @@ namespace ChineseChessAI.MCTS
             return probs.Select(x => (x.Item1, x.Item2 / sum));
         }
 
+        
         private Board CloneBoard(Board original)
         {
             var newBoard = new Board();
-            // 这里需要在 Board 类中实现一个深拷贝方法或从状态恢复的方法
+            // 必须要将原始棋盘的棋子位置复制过去，否则 Search 会报错
+            newBoard.LoadState(original.GetState(), original.IsRedTurn);
             return newBoard;
         }
     }
