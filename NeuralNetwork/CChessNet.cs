@@ -6,10 +6,11 @@ using static TorchSharp.torch.nn;
 namespace ChineseChessAI.NeuralNetwork
 {
     /// <summary>
-    /// 基于 ResNet 的中国象棋双头神经网络
+    /// 基于 ResNet 的中国象棋双头神经网络 (优化注册版)
     /// </summary>
     public class CChessNet : Module<Tensor, (Tensor, Tensor)>
     {
+        // 组件声明
         private readonly Module<Tensor, Tensor> convBlock;
         private readonly ModuleList<ResBlock> resBlocks;
         private readonly Module<Tensor, Tensor> policyHead;
@@ -17,30 +18,30 @@ namespace ChineseChessAI.NeuralNetwork
 
         public CChessNet(int numResBlocks = 10, int numFilters = 256) : base("CChessNet")
         {
-            // 参数含义：(输入通道, 输出通道, 卷积核大小, 步长, 填充)
+            // 1. 卷积块：特征提取
             convBlock = Sequential(
                 Conv2d(14, numFilters, 3, 1, 1, bias: false),
                 BatchNorm2d(numFilters),
                 ReLU()
             );
 
+            // 2. 残差块组
             resBlocks = new ModuleList<ResBlock>();
             for (int i = 0; i < numResBlocks; i++)
             {
                 resBlocks.Add(new ResBlock(numFilters));
             }
 
-            // 策略头：输出 2 个平面
-            
+            // 3. 策略头 (Policy Head)：输出所有可能走法的概率分布 (8100维)
             policyHead = Sequential(
                 Conv2d(numFilters, 2, 1, 1, 0, bias: false),
                 BatchNorm2d(2),
                 ReLU(),
                 Flatten(),
-                Linear(2 * 10 * 9, 8100) // 2086 修改为 8100
+                Linear(2 * 10 * 9, 8100)
             );
 
-            // 价值头：输出 1 个平面
+            // 4. 价值头 (Value Head)：输出当前局面的胜率评估 (-1 到 1)
             valueHead = Sequential(
                 Conv2d(numFilters, 1, 1, 1, 0, bias: false),
                 BatchNorm2d(1),
@@ -52,28 +53,43 @@ namespace ChineseChessAI.NeuralNetwork
                 Tanh()
             );
 
+            // 【修复核心】将 RegisterModule 改为 register_module
+            register_module("convBlock", convBlock);
+            register_module("resBlocks", resBlocks);
+            register_module("policyHead", policyHead);
+            register_module("valueHead", valueHead);
+
+            // 这一行通常会自动扫描并注册类中的所有 Module 字段
             RegisterComponents();
 
             if (cuda.is_available())
                 this.to(DeviceType.CUDA);
         }
 
+        /// <summary>
+        /// 前向传播逻辑
+        /// </summary>
+        /// <param name="x">输入张量 [Batch, 14, 10, 9]</param>
+        /// <returns>(策略对数概率, 价值预测)</returns>
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 确保输入在正确的设备上
+            // 确保输入张量与模型处于同一设备
             var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
-            x = x.to(device);
+            if (x.device.type != device)
+            {
+                x = x.to(device);
+            }
 
-            // 基础特征提取
+            // A. 通过基础卷积块提取特征
             var outTensor = convBlock.forward(x);
 
-            // 通过残差层
+            // B. 通过残差层链条
             foreach (var block in resBlocks)
             {
                 outTensor = block.forward(outTensor);
             }
 
-            // 返回双头输出
+            // C. 分别计算策略分布和价值评估
             var policy = policyHead.forward(outTensor);
             var value = valueHead.forward(outTensor);
 
