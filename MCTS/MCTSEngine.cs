@@ -21,26 +21,25 @@ namespace ChineseChessAI.MCTS
             _model = model;
             _generator = new MoveGenerator();
 
-            // 优化 1: 移除强制 Float16，使用默认 Float32
-            // 具体的混合精度计算将由 Trainer 和 BatchInference 中的 AMP (autocast) 接管
+            // 保持 FP32，由 Trainer 决定是否使用 AMP (目前 Trainer 已回退到 FP32，保持一致)
             _model.to(DeviceType.CUDA);
             _model.eval();
 
             _batchInference = new BatchInference(_model, batchSize);
         }
 
-        /// <summary>
-        /// 异步执行 MCTS 搜索。并行化模拟是大幅提速的关键。
-        /// </summary>
         public async Task<Move> GetBestMoveAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
 
-            // 将模拟任务分组并行处理
+            // 动态调整并行度，避免小模拟次数下线程开销过大
             int parallelTasks = 16;
             int simsPerTask = simulations / parallelTasks;
-            if (simsPerTask == 0)
+            if (simsPerTask < 1)
+            {
+                parallelTasks = simulations;
                 simsPerTask = 1;
+            }
 
             var tasks = new List<Task>();
             for (int t = 0; t < parallelTasks; t++)
@@ -49,7 +48,6 @@ namespace ChineseChessAI.MCTS
                 {
                     for (int i = 0; i < simsPerTask; i++)
                     {
-                        // 必须克隆 Board，因为 MCTS 在不同线程中会修改棋盘状态
                         Board tempBoard = CloneBoard(board);
                         await SearchAsync(root, tempBoard);
                     }
@@ -58,7 +56,6 @@ namespace ChineseChessAI.MCTS
 
             await Task.WhenAll(tasks);
 
-            // 兼容 ConcurrentDictionary 的判空方式 (IsEmpty 性能优于 Count)
             if (root.Children.IsEmpty)
             {
                 var legalMoves = _generator.GenerateLegalMoves(board);
@@ -68,14 +65,10 @@ namespace ChineseChessAI.MCTS
             return root.Children.OrderByDescending(x => x.Value.N).First().Key;
         }
 
-        /// <summary>
-        /// 异步搜索逻辑：这是优化的核心，将 GPU 推理请求发送给 BatchInference
-        /// </summary>
         private async Task SearchAsync(MCTSNode node, Board board)
         {
             try
             {
-                // A. 选择阶段 (同步执行，树操作极快)
                 if (!node.IsLeaf)
                 {
                     if (node.Children.IsEmpty)
@@ -90,14 +83,23 @@ namespace ChineseChessAI.MCTS
                     return;
                 }
 
-                // B. 扩展与评估阶段 (异步调用 GPU 批量推理)
                 using (var scope = torch.NewDisposeScope())
                 {
-                    // 优化 2: 保持 FP32 输入，不要手动转 Float16
+                    // 1. 记录当前是否为红方，因为 Encode 内部会翻转棋盘
+                    bool isRed = board.IsRedTurn;
+
+                    // 2. 编码 (StateEncoder 会自动处理 FlipBoard)
                     var inputTensor = StateEncoder.Encode(board).to(DeviceType.CUDA);
 
-                    // 调用批量推理器，直接获取 float[] 数组，无需处理 Tensor 句柄
+                    // 3. 推理 (得到的是 "红方视角" 的 Logits)
                     var (policyLogits, value) = await _batchInference.PredictAsync(inputTensor);
+
+                    // 4. 【核心修复】如果是黑方，必须将 Policy 翻转回真实坐标系
+                    // 这样神经网络输出的 "红方兵7进1" 才能正确对应到物理棋盘的 "黑方卒3进1"
+                    if (!isRed)
+                    {
+                        policyLogits = FlipPolicy(policyLogits);
+                    }
 
                     var legalMoves = _generator.GenerateLegalMoves(board);
                     if (legalMoves.Count == 0)
@@ -106,11 +108,8 @@ namespace ChineseChessAI.MCTS
                         return;
                     }
 
-                    // 优化 3: 传递 float[] 进行策略过滤
                     var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
                     node.Expand(filteredPolicy);
-
-                    // C. 反向传播
                     node.Update(value);
                 }
             }
@@ -120,14 +119,10 @@ namespace ChineseChessAI.MCTS
             }
         }
 
-        /// <summary>
-        /// 针对 SelfPlay 优化的数组返回方法，同样改为异步批量化
-        /// </summary>
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
 
-            // 并行模拟
             var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(async () => {
                 for (int i = 0; i < simulations / 8; i++)
                 {
@@ -156,7 +151,6 @@ namespace ChineseChessAI.MCTS
             return (bestMove, piData);
         }
 
-        // 优化 4: 参数改为 float[] logits，直接操作数组提升性能
         private IEnumerable<(Move move, double prob)> GetFilteredPolicy(float[] logits, List<Move> legalMoves)
         {
             var probs = new List<(Move, double)>();
@@ -168,14 +162,13 @@ namespace ChineseChessAI.MCTS
                 int idx = move.ToNetworkIndex();
                 if (idx >= 0 && idx < 8100)
                 {
-                    float val = logits[idx]; // 直接数组访问，比 Tensor.item<float> 快得多
+                    float val = logits[idx];
                     if (val > maxLogit)
                         maxLogit = val;
                     validMoves.Add((move, val));
                 }
             }
 
-            // Stable Softmax
             double sum = 0;
             foreach (var (move, val) in validMoves)
             {
@@ -185,6 +178,37 @@ namespace ChineseChessAI.MCTS
             }
 
             return probs.Select(x => (x.Item1, x.Item2 / (sum > 0 ? sum : 1)));
+        }
+
+        // 复用翻转逻辑 (将 180 度旋转应用于 Policy 索引)
+        private float[] FlipPolicy(float[] originalPi)
+        {
+            float[] flippedPi = new float[8100];
+            for (int i = 0; i < 8100; i++)
+            {
+                if (originalPi[i] == 0)
+                    continue;
+
+                int from = i / 90;
+                int to = i % 90;
+
+                int r1 = from / 9;
+                int c1 = from % 9;
+                int r2 = to / 9;
+                int c2 = to % 9;
+
+                int r1_flip = 9 - r1;
+                int c1_flip = 8 - c1;
+                int r2_flip = 9 - r2;
+                int c2_flip = 8 - c2;
+
+                int from_flip = r1_flip * 9 + c1_flip;
+                int to_flip = r2_flip * 9 + c2_flip;
+                int idx_flip = from_flip * 90 + to_flip;
+
+                flippedPi[idx_flip] = originalPi[i];
+            }
+            return flippedPi;
         }
 
         private Board CloneBoard(Board original)
