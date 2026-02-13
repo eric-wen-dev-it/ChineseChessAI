@@ -1,4 +1,5 @@
-﻿using TorchSharp;
+﻿using System;
+using TorchSharp;
 using TorchSharp.Modules;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -6,33 +7,35 @@ using static TorchSharp.torch.nn;
 namespace ChineseChessAI.NeuralNetwork
 {
     /// <summary>
-    /// 基于 ResNet 的中国象棋双头神经网络 (优化注册版)
+    /// 基于 ResNet 的中国象棋双头神经网络
+    /// 修复了参数注册失效导致的梯度丢失问题
     /// </summary>
     public class CChessNet : Module<Tensor, (Tensor, Tensor)>
     {
-        // 组件声明
-        private readonly Module<Tensor, Tensor> convBlock;
-        private readonly ModuleList<ResBlock> resBlocks;
-        private readonly Module<Tensor, Tensor> policyHead;
-        private readonly Module<Tensor, Tensor> valueHead;
+        // 核心：移除 readonly，确保 RegisterComponents 或 register_module 能生效
+        private Module<Tensor, Tensor> convBlock;
+        private ModuleList<ResBlock> resBlocks;
+        private Module<Tensor, Tensor> policyHead;
+        private Module<Tensor, Tensor> valueHead;
 
-        public CChessNet(int numResBlocks = 10, int numFilters = 256) : base("CChessNet")
+        public CChessNet(int numResBlocks = 10, int numFilters = 128) : base("CChessNet")
         {
-            // 1. 卷积块：特征提取
+            // 1. 卷积块定义
             convBlock = Sequential(
                 Conv2d(14, numFilters, 3, 1, 1, bias: false),
                 BatchNorm2d(numFilters),
                 ReLU()
             );
 
-            // 2. 残差块组
+            // 2. 残差块组定义
             resBlocks = new ModuleList<ResBlock>();
             for (int i = 0; i < numResBlocks; i++)
             {
+                // 注意：ResBlock 内部也必须包含 RegisterComponents 或显式注册
                 resBlocks.Add(new ResBlock(numFilters));
             }
 
-            // 3. 策略头 (Policy Head)：输出所有可能走法的概率分布 (8100维)
+            // 3. 策略头定义
             policyHead = Sequential(
                 Conv2d(numFilters, 2, 1, 1, 0, bias: false),
                 BatchNorm2d(2),
@@ -41,7 +44,7 @@ namespace ChineseChessAI.NeuralNetwork
                 Linear(2 * 10 * 9, 8100)
             );
 
-            // 4. 价值头 (Value Head)：输出当前局面的胜率评估 (-1 到 1)
+            // 4. 价值头定义
             valueHead = Sequential(
                 Conv2d(numFilters, 1, 1, 1, 0, bias: false),
                 BatchNorm2d(1),
@@ -53,43 +56,37 @@ namespace ChineseChessAI.NeuralNetwork
                 Tanh()
             );
 
-            // 【修复核心】将 RegisterModule 改为 register_module
+            // 【核心修复步骤】
+            // 在某些 TorchSharp 版本中，RegisterComponents 对 private 字段支持不佳
+            // 必须显式调用 register_module 建立父子模块的参数关联
             register_module("convBlock", convBlock);
             register_module("resBlocks", resBlocks);
             register_module("policyHead", policyHead);
             register_module("valueHead", valueHead);
 
-            // 这一行通常会自动扫描并注册类中的所有 Module 字段
+            // 最后调用这个确保所有通过 register_module 挂载的参数都被提取
             RegisterComponents();
 
-            if (cuda.is_available())
-                this.to(DeviceType.CUDA);
+            // 移动到设备
+            var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
+            this.to(device);
         }
 
-        /// <summary>
-        /// 前向传播逻辑
-        /// </summary>
-        /// <param name="x">输入张量 [Batch, 14, 10, 9]</param>
-        /// <returns>(策略对数概率, 价值预测)</returns>
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 确保输入张量与模型处于同一设备
-            var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
-            if (x.device.type != device)
+            // 自动处理输入设备的转换
+            if (x.device.type != this.convBlock.parameters().First().device.type)
             {
-                x = x.to(device);
+                x = x.to(this.convBlock.parameters().First().device);
             }
 
-            // A. 通过基础卷积块提取特征
             var outTensor = convBlock.forward(x);
 
-            // B. 通过残差层链条
             foreach (var block in resBlocks)
             {
                 outTensor = block.forward(outTensor);
             }
 
-            // C. 分别计算策略分布和价值评估
             var policy = policyHead.forward(outTensor);
             var value = valueHead.forward(outTensor);
 
