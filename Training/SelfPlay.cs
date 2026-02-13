@@ -25,46 +25,43 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        /// <summary>
-        /// 异步运行单局自我对弈。
-        /// 配合异步 MCTSEngine，能够释放 CPU 线程以支持更高并发。
-        /// </summary>
         public async Task<List<TrainingExample>> RunGameAsync(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
 
-            var gameHistory = new List<(float[] state, float[] policy)>();
+            // 记录原始数据：(规范化Input, 原始Policy, 玩家)
+            var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             int moveCount = 0;
 
-            // 限制最大步数防止死循环
             while (moveCount < 400)
             {
                 try
                 {
-                    // 使用异步作用域管理内存
                     using (var moveScope = torch.NewDisposeScope())
                     {
-                        // 1. 获取当前盘面编码数组
-                        // 直接通过 Encode 获取 Tensor 并转为数组存储，用于后续训练
+                        bool isRed = board.IsRedTurn;
+
+                        // 1. 获取 State (StateEncoder 内部已经处理了 FlipBoard，所以这里拿到的是规范化后的数据)
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).data<float>().ToArray();
 
-                        // 2. 异步调用 MCTS 引擎获取走法和概率分布 (π)
-                        // 这里使用的是之前优化过的异步批量推理方法
+                        // 2. MCTS 搜索 (得到的是基于真实棋盘的绝对坐标 Policy)
                         (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
 
-                        // 3. 记录历史数据
-                        gameHistory.Add((stateData, piData));
+                        // 3. 关键修复：如果当前是黑方，Input 已经被翻转了，Output (Policy) 也必须对应翻转
+                        // 否则神经网络会学习到“看着红方的棋盘，却走出黑方的坐标”，导致逻辑错乱
+                        if (!isRed)
+                        {
+                            piData = FlipPolicy(piData);
+                        }
 
-                        // 4. 执行走法
+                        gameHistory.Add((stateData, piData, isRed));
+
                         board.Push(bestMove.From, bestMove.To);
-
-                        // 5. 触发 UI 更新回调（如果有）
                         onMovePerformed?.Invoke(board);
                         moveCount++;
 
-                        // 6. 检查胜负（无合法走法即为困毙/绝杀）
                         if (_generator.GenerateLegalMoves(board).Count == 0)
                             break;
                     }
@@ -76,23 +73,60 @@ namespace ChineseChessAI.Training
                 }
             }
 
-            // 根据游戏结束时的回合方确定胜负结果 (1: 红胜, -1: 黑胜)
-            float gameResult = board.IsRedTurn ? -1.0f : 1.0f;
-            return FinalizeData(gameHistory, gameResult);
+            // 最终胜负 (1: 红胜, -1: 黑胜)
+            float finalResult = board.IsRedTurn ? -1.0f : 1.0f;
+            return FinalizeData(gameHistory, finalResult);
         }
 
         /// <summary>
-        /// 整理训练数据，根据每一步的回合方转换胜负视角。
+        /// 将 8100 维的策略向量进行中心对称翻转 (用于黑方视角规范化)
         /// </summary>
-        private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy)> history, float result)
+        private float[] FlipPolicy(float[] originalPi)
+        {
+            float[] flippedPi = new float[8100];
+
+            // 遍历所有可能的动作索引
+            for (int i = 0; i < 8100; i++)
+            {
+                if (originalPi[i] == 0)
+                    continue;
+
+                // 解码索引 -> 坐标
+                int from = i / 90;
+                int to = i % 90;
+
+                int r1 = from / 9;
+                int c1 = from % 9;
+                int r2 = to / 9;
+                int c2 = to % 9;
+
+                // 执行中心对称翻转 (9-r, 8-c)
+                int r1_flip = 9 - r1;
+                int c1_flip = 8 - c1;
+                int r2_flip = 9 - r2;
+                int c2_flip = 8 - c2;
+
+                // 重新编码为索引
+                int from_flip = r1_flip * 9 + c1_flip;
+                int to_flip = r2_flip * 9 + c2_flip;
+                int idx_flip = from_flip * 90 + to_flip;
+
+                flippedPi[idx_flip] = originalPi[i];
+            }
+            return flippedPi;
+        }
+
+        private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult)
         {
             var examples = new List<TrainingExample>();
-            for (int i = 0; i < history.Count; i++)
+            foreach (var step in history)
             {
-                // 如果是第 0, 2, 4... 步（红方走），结果保持 result
-                // 如果是第 1, 3, 5... 步（黑方走），结果取反 -result
-                float perspectiveResult = (i % 2 == 0) ? result : -result;
-                examples.Add(new TrainingExample(history[i].state, history[i].policy, perspectiveResult));
+                // AlphaZero 标准：Value 始终是针对“当前行动方”的收益
+                // 如果最终结果是 红胜(1)，而当前步是红方(isRedTurn=true)，则 Value = 1
+                // 如果最终结果是 红胜(1)，而当前步是黑方(isRedTurn=false)，则 Value = -1
+                float valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
+
+                examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
             }
             return examples;
         }
