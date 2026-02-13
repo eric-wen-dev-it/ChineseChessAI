@@ -22,6 +22,7 @@ namespace ChineseChessAI
         public MainWindow()
         {
             InitializeComponent();
+            InitBoardUi();
             CheckGpuStatus(); // 修复：确保构造函数调用此方法
         }
 
