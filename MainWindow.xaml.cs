@@ -186,10 +186,11 @@ namespace ChineseChessAI
                             UpdateUI("[同步] 等待所有对弈完成...");
                             Debug.WriteLine("[同步] 等待所有对弈完成...");
                             var allGameResults = await Task.WhenAll(gameTasks);
-
                             foreach (var gameData in allGameResults)
                             {
-                                if (gameData != null && gameData.Count > 0)
+                                // 此时 gameData 的类型是 List<TrainingExample>
+                                // 调用的 buffer.AddExamples 也是接收 List<TrainingExample>
+                                if (gameData != null)
                                     buffer.AddExamples(gameData);
                             }
                             UpdateUI($"[缓存] 对弈结束，当前 Buffer 总数: {buffer.Count}");

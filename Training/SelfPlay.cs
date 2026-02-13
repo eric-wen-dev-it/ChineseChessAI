@@ -7,10 +7,12 @@ using ChineseChessAI.NeuralNetwork;
 
 namespace ChineseChessAI.Training
 {
-    /// <summary>
-    /// 自我对弈数据记录
-    /// </summary>
-    public record TrainingExample(torch.Tensor State, torch.Tensor Policy, float Value);
+    // TrainingExample 保持数组形式是正确的
+    public record TrainingExample(
+        float[] State,
+        float[] Policy,
+        float Value
+    );
 
     public class SelfPlay
     {
@@ -23,16 +25,10 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        /// <summary>
-        /// 执行一局完整的自我对弈并返回训练数据，支持 UI 实时回调
-        /// </summary>
-        /// <param name="onMovePerformed">每一步走完后的回调函数，用于更新 UI</param>
         public List<TrainingExample> RunGame(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
-
-            // 初始状态回调一次，显示开局棋盘
             onMovePerformed?.Invoke(board);
 
             var gameHistory = new List<(torch.Tensor state, torch.Tensor policy)>();
@@ -40,18 +36,15 @@ namespace ChineseChessAI.Training
 
             while (moveCount < 400)
             {
+                // 注意：这里产生的 Tensor 仍在 DisposeScope 管理下
                 var stateTensor = StateEncoder.Encode(board);
 
-                // MCTS 搜索逻辑
                 (Move bestMove, torch.Tensor pi) = _engine.GetMoveWithProbabilities(board, 800);
 
-                // 记录数据
+                // 记录数据时，使用 squeeze 确保维度正确
                 gameHistory.Add((stateTensor.squeeze(0), pi));
 
-                // 执行走子
                 board.Push(bestMove.From, bestMove.To);
-
-                // 关键修改：执行回调，通知 UI 更新棋盘
                 onMovePerformed?.Invoke(board);
 
                 moveCount++;
@@ -60,21 +53,31 @@ namespace ChineseChessAI.Training
                     break;
             }
 
-            // 胜负判断逻辑
             float gameResult = board.IsRedTurn ? -1.0f : 1.0f;
-
             return FinalizeData(gameHistory, gameResult);
         }
 
-        private List<TrainingExample> FinalizeData(List<(torch.Tensor, torch.Tensor)> history, float result)
+        private List<TrainingExample> FinalizeData(List<(torch.Tensor state, torch.Tensor policy)> history, float result)
         {
             var examples = new List<TrainingExample>();
-            // 对于每一手，价值 Z 应该根据当前是谁的回合进行正负反转
-            // 比如最后红方赢了，那么红方走棋的状态 Z=1，黑方走棋的状态 Z=-1
+
             for (int i = 0; i < history.Count; i++)
             {
+                // 1. 获取当前步的元组数据
+                var (s, p) = history[i];
+
+                // 2. 根据回合反转胜负值
                 float perspectiveResult = (i % 2 == 0) ? result : -result;
-                examples.Add(new TrainingExample(history[i].Item1, history[i].Item2, perspectiveResult));
+
+                // 3. 【核心修正】将 Tensor 转换为 float[] 数组
+                // 使用你实际定义的变量名 s 和 p，而不是示例占位符
+                var example = new TrainingExample(
+                    s.detach().cpu().data<float>().ToArray(),
+                    p.detach().cpu().data<float>().ToArray(),
+                    perspectiveResult // 使用计算后的 perspectiveResult
+                );
+
+                examples.Add(example);
             }
             return examples;
         }
