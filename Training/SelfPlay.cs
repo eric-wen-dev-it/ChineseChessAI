@@ -7,7 +7,6 @@ using ChineseChessAI.NeuralNetwork;
 
 namespace ChineseChessAI.Training
 {
-    // TrainingExample 保持数组形式是正确的
     public record TrainingExample(
         float[] State,
         float[] Policy,
@@ -25,43 +24,43 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        // 文件：SelfPlay.cs
         public List<TrainingExample> RunGame(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
+
             var gameHistory = new List<(float[] state, float[] policy)>();
             int moveCount = 0;
 
             while (moveCount < 400)
             {
-                // 确保子线程每一步都有完全隔离的作用域
-                using (var moveScope = torch.NewDisposeScope())
+                // 增加针对每一步的异常捕捉，准确定位
+                try
                 {
-                    // 1. 编码当前状态
-                    var stateTensor = StateEncoder.Encode(board);
+                    using (var moveScope = torch.NewDisposeScope())
+                    {
+                        // 1. 局面编码并立即转为数组
+                        var stateTensor = StateEncoder.Encode(board);
+                        float[] stateData = stateTensor.squeeze(0).data<float>().ToArray();
 
-                    // 2. 执行搜索
-                    // 注意：如果 pi 报错 empty handle，说明 engine 内部可能已经 dispose 了它
-                    var mctsResult = _engine.GetMoveWithProbabilities(board, 800);
-                    Move bestMove = mctsResult.Item1;
-                    torch.Tensor pi = mctsResult.Item2;
+                        // 2. 调用修改后的引擎，直接获取 float[] 数组
+                        // 注意：这里需要配合下方修改后的 MCTSEngine 使用
+                        (Move bestMove, float[] piData) = _engine.GetMoveWithProbabilitiesAsArray(board, 800);
 
-                    // 3. 【核心修复】防御性提取
-                    // 在这一行，我们必须确保 pi 和 stateTensor 是活着的
-                    // 如果报错依然在这一行，说明错误出在 _engine 内部
-                    float[] sArray = stateTensor.detach().cpu().data<float>().ToArray();
-                    float[] pArray = pi.detach().cpu().data<float>().ToArray();
+                        gameHistory.Add((stateData, piData));
 
-                    gameHistory.Add((sArray, pArray));
+                        board.Push(bestMove.From, bestMove.To);
+                        onMovePerformed?.Invoke(board);
+                        moveCount++;
 
-                    // 4. 执行移动
-                    board.Push(bestMove.From, bestMove.To);
-                    onMovePerformed?.Invoke(board);
-                    moveCount++;
-
-                    if (_generator.GenerateLegalMoves(board).Count == 0)
-                        break;
+                        if (_generator.GenerateLegalMoves(board).Count == 0)
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[致命] 线程对弈异常 (步数: {moveCount}): {ex.Message}");
+                    throw; // 向上抛出以触发 MainWindow 的日志记录
                 }
             }
 
@@ -74,14 +73,10 @@ namespace ChineseChessAI.Training
             var examples = new List<TrainingExample>();
             for (int i = 0; i < history.Count; i++)
             {
-                // 计算当前走棋方的胜负分
                 float perspectiveResult = (i % 2 == 0) ? result : -result;
-
-                // 直接构造 TrainingExample，无需再调用 detach()
                 examples.Add(new TrainingExample(history[i].state, history[i].policy, perspectiveResult));
             }
             return examples;
         }
-
     }
 }

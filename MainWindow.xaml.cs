@@ -208,18 +208,25 @@ namespace ChineseChessAI
                                 {
                                     for (int s = 0; s < trainSteps; s++)
                                     {
-                                        // 这是最核心的：确保每一批次训练的中间 Tensor 都在此销毁
-                                        using (var batchScope = torch.NewDisposeScope())
+                                        try
                                         {
-                                            Debug.WriteLine($"[训练调试] Step {s + 1}/{trainSteps} 准备采样...");
-                                            var (states, policies, values) = buffer.Sample(32);
+                                            // 这是最核心的：确保每一批次训练的中间 Tensor 都在此销毁
+                                            using (var batchScope = torch.NewDisposeScope())
+                                            {
+                                                Debug.WriteLine($"[训练调试] Step {s + 1}/{trainSteps} 准备采样...");
+                                                var (states, policies, values) = buffer.Sample(32);
 
-                                            Debug.WriteLine($"[训练调试] Step {s + 1} 采样完成，进入 TrainStep...");
-                                            // 请确保 states, policies, values 已经 model.to(Device)
-                                            double loss = trainer.TrainStep(states, policies, values);
+                                                Debug.WriteLine($"[训练调试] Step {s + 1} 采样完成，进入 TrainStep...");
+                                                // 请确保 states, policies, values 已经 model.to(Device)
+                                                double loss = trainer.TrainStep(states, policies, values);
 
-                                            totalLoss += loss;
-                                            Debug.WriteLine($"[训练调试] Step {s + 1} 成功完成，Loss: {loss:F4}");
+                                                totalLoss += loss;
+                                                Debug.WriteLine($"[训练调试] Step {s + 1} 成功完成，Loss: {loss:F4}");
+                                            }
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            UpdateUI($"[训练警告] Step {s + 1} 失败: {ex.Message}");
                                         }
 
                                         // 如果你担心内存堆积，这里用 GC 替代
@@ -268,7 +275,8 @@ namespace ChineseChessAI
         private void UpdateUI(string message)
         {
             // 修复：确保在 UI 线程执行
-            Dispatcher.Invoke(() => {
+            Dispatcher.Invoke(() =>
+            {
                 if (LogBox != null)
                 {
                     LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {message}\n");

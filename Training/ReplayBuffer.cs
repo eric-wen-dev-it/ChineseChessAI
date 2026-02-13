@@ -43,14 +43,7 @@ namespace ChineseChessAI.Training
         /// </summary>
         public (Tensor States, Tensor Policies, Tensor Values) Sample(int batchSize)
         {
-            // 确保采样数量不超过当前缓存总量
             int count = Math.Min(batchSize, _buffer.Count);
-            if (count == 0)
-                return (null, null, null);
-
-            var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
-
-            // 临时存放转换回来的张量
             var batchStates = new List<Tensor>();
             var batchPolicies = new List<Tensor>();
             var batchValues = new List<float>();
@@ -60,17 +53,23 @@ namespace ChineseChessAI.Training
                 int index = _random.Next(_buffer.Count);
                 var example = _buffer[index];
 
-                // 【核心修正】由于 TrainingExample.State 现在是 float[]
-                // 必须通过 from_array 转回 Tensor 才能进行 stack
-                batchStates.Add(torch.from_array(example.State).to(device));
-                batchPolicies.Add(torch.from_array(example.Policy).to(device));
+                // 核心修正：必须指定原始数据的形状 [14, 10, 9]
+                batchStates.Add(torch.tensor(example.State, new long[] { 14, 10, 9 }));
+                batchPolicies.Add(torch.tensor(example.Policy, new long[] { 8100 }));
                 batchValues.Add(example.Value);
             }
 
-            // 将所有单条 Tensor 合并为一个批次 Tensor
+            // stack 后 states 形状变为 [Batch, 14, 10, 9]
             var states = torch.stack(batchStates);
             var policies = torch.stack(batchPolicies);
-            var values = torch.tensor(batchValues.ToArray(), ScalarType.Float32).to(device);
+            var values = torch.tensor(batchValues.ToArray(), ScalarType.Float32);
+
+            if (cuda.is_available())
+            {
+                states = states.to(DeviceType.CUDA);
+                policies = policies.to(DeviceType.CUDA);
+                values = values.to(DeviceType.CUDA);
+            }
 
             return (states, policies, values);
         }

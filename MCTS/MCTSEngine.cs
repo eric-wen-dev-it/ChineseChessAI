@@ -22,21 +22,25 @@ namespace ChineseChessAI.MCTS
         /// <summary>
         /// 执行 MCTS 搜索并返回最佳走法
         /// </summary>
-        /// <param name="board">当前棋盘状态</param>
-        /// <param name="simulations">模拟次数 (例如 800 或 1600)</param>
         public Move GetBestMove(Board board, int simulations)
         {
-            // 1. 初始化根节点
             var root = new MCTSNode(null, 1.0);
 
             for (int i = 0; i < simulations; i++)
             {
-                // 每次模拟都从原始棋盘的副本开始
                 Board tempBoard = CloneBoard(board);
                 Search(root, tempBoard);
             }
 
-            // 2. 搜索完成后，选择访问次数 N 最高的动作作为最佳走法
+            // 防御性检查：确保有子节点
+            if (root.Children.Count == 0)
+            {
+                var legalMoves = _generator.GenerateLegalMoves(board);
+                if (legalMoves.Count == 0)
+                    throw new Exception("当前局面无合法走法。");
+                return legalMoves[0];
+            }
+
             return root.Children.OrderByDescending(x => x.Value.N).First().Key;
         }
 
@@ -44,69 +48,82 @@ namespace ChineseChessAI.MCTS
         {
             try
             {
+                // A. 选择 (Selection)
                 if (!node.IsLeaf)
                 {
+                    if (node.Children.Count == 0)
+                        return;
+
                     var bestChild = node.Children
                         .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
                         .First();
+
                     board.Push(bestChild.Key.From, bestChild.Key.To);
                     Search(bestChild.Value, board);
                     return;
                 }
 
-                var inputTensor = StateEncoder.Encode(board);
-                _model.eval();
-                using (var noGrad = torch.no_grad())
+                // B. 扩展与评估 (Expansion & Evaluation)
+                using (var scope = torch.NewDisposeScope())
                 {
-                    var (policyLogits, valueTensor) = _model.forward(inputTensor);
-                    double value = valueTensor.item<float>();
+                    var inputTensor = StateEncoder.Encode(board);
+                    _model.eval();
 
-                    var legalMoves = _generator.GenerateLegalMoves(board);
-                    if (legalMoves.Count == 0)
+                    using (var noGrad = torch.no_grad())
                     {
-                        node.Update(-1.0);
-                        return;
-                    }
+                        var (policyLogits, valueTensor) = _model.forward(inputTensor);
 
-                    var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
-                    node.Expand(filteredPolicy);
-                    node.Update(value);
+                        double value = valueTensor.item<float>();
+
+                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        if (legalMoves.Count == 0)
+                        {
+                            node.Update(-1.0); // 处理绝杀或困毙
+                            return;
+                        }
+
+                        var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
+                        node.Expand(filteredPolicy);
+
+                        // C. 反向传播 (Backpropagation)
+                        node.Update(value);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                // 捕获 MCTS 模拟中的异常，避免主线程崩溃
                 Console.WriteLine($"[MCTS Search Error] {ex.Message}");
             }
         }
 
         /// <summary>
-        /// 执行 MCTS 搜索并返回最佳走法以及对应的访问频率分布 (π)
+        /// 执行 MCTS 搜索并返回最佳走法以及对应的概率分布 (π)
         /// </summary>
         public (Move move, torch.Tensor pi) GetMoveWithProbabilities(Board board, int simulations)
         {
-            // 使用本地作用域管理搜索过程中的临时 Tensor
+            torch.Tensor piResult;
+            Move bestMove;
+
+            // 使用局部作用域管理模拟过程中的临时 Tensor
             using (var scope = torch.NewDisposeScope())
             {
                 var root = new MCTSNode(null, 1.0);
-
                 for (int i = 0; i < simulations; i++)
                 {
                     Board tempBoard = CloneBoard(board);
                     Search(root, tempBoard);
                 }
 
-                // 1. 防御性检查：防止 root.Children 为空导致 First() 崩溃
                 if (root.Children.Count == 0)
                 {
                     var legalMoves = _generator.GenerateLegalMoves(board);
                     if (legalMoves.Count == 0)
                         throw new Exception("无合法走法");
-                    // 返回全 0 Tensor 的克隆，确保它不受 scope 释放影响
-                    return (legalMoves[0], torch.zeros(new long[] { 8100 }).detach().clone());
+
+                    // 关键：detach() 确保 Tensor 脱离 DisposeScope 的自动释放列表
+                    return (legalMoves[0], torch.zeros(new long[] { 8100 }).detach());
                 }
 
-                // 2. 构造概率向量
                 float[] piData = new float[8100];
                 double totalVisits = root.Children.Sum(x => x.Value.N);
                 if (totalVisits == 0)
@@ -115,45 +132,88 @@ namespace ChineseChessAI.MCTS
                 foreach (var child in root.Children)
                 {
                     int moveIdx = child.Key.ToNetworkIndex();
-                    piData[moveIdx] = (float)(child.Value.N / totalVisits);
+                    if (moveIdx >= 0 && moveIdx < 8100)
+                        piData[moveIdx] = (float)(child.Value.N / totalVisits);
                 }
 
-                // 3. 关键点：使用 .detach().clone() 将 Tensor 移出 DisposeScope
-                // 这样即使 scope 结束，返回给 SelfPlay 的 pi 依然有效
-                var piTensor = torch.tensor(piData, new long[] { 8100 }).detach().clone();
+                // 核心修复：创建 Tensor 后立即执行 .detach()
+                // 此时句柄在 scope 结束后依然有效，供 SelfPlay 调用 .data<float>()
+                piResult = torch.tensor(piData, new long[] { 8100 }).detach();
 
-                var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
-
-                return (bestMove, piTensor);
+                bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
             }
+
+            return (bestMove, piResult);
         }
+
         private IEnumerable<(Move move, double prob)> GetFilteredPolicy(torch.Tensor logits, List<Move> legalMoves)
         {
-            // 简单实现：只取合法动作对应的原始概率并归一化
-            // 在生产环境中，建议在 GPU 上直接通过 Mask 处理
             var probs = new List<(Move, double)>();
             double sum = 0;
 
             foreach (var move in legalMoves)
             {
                 int idx = move.ToNetworkIndex();
-                // 这里的索引逻辑需与 Move.cs 保持一致
-                float val = Math.Max(0, logits[0, idx].item<float>());
-                double p = Math.Exp(val); // 简易 Softmax
+                if (idx < 0 || idx >= 8100)
+                    continue;
+
+                // 简易 Softmax 处理
+                float val = logits[0, idx].item<float>();
+                double p = Math.Exp(Math.Min(val, 20.0)); // 防止溢出
                 probs.Add((move, p));
                 sum += p;
             }
 
+            if (sum == 0)
+                sum = 1;
             return probs.Select(x => (x.Item1, x.Item2 / sum));
         }
 
-        
         private Board CloneBoard(Board original)
         {
             var newBoard = new Board();
-            // 必须要将原始棋盘的棋子位置复制过去，否则 Search 会报错
             newBoard.LoadState(original.GetState(), original.IsRedTurn);
             return newBoard;
         }
+
+        /// <summary>
+        /// 新增方法：直接返回 C# 数组，彻底解决多线程 Tensor 生命周期问题
+        /// </summary>
+        public (Move move, float[] pi) GetMoveWithProbabilitiesAsArray(Board board, int simulations)
+        {
+            using (var scope = torch.NewDisposeScope())
+            {
+                var root = new MCTSNode(null, 1.0);
+                for (int i = 0; i < simulations; i++)
+                {
+                    Board tempBoard = CloneBoard(board);
+                    Search(root, tempBoard);
+                }
+
+                if (root.Children.Count == 0)
+                {
+                    var legalMoves = _generator.GenerateLegalMoves(board);
+                    return (legalMoves[0], new float[8100]);
+                }
+
+                float[] piData = new float[8100];
+                double totalVisits = root.Children.Sum(x => x.Value.N);
+                if (totalVisits == 0)
+                    totalVisits = 1;
+
+                foreach (var child in root.Children)
+                {
+                    int moveIdx = child.Key.ToNetworkIndex();
+                    if (moveIdx >= 0 && moveIdx < 8100)
+                        piData[moveIdx] = (float)(child.Value.N / totalVisits);
+                }
+
+                var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
+
+                // 返回纯数据数组，不返回 Tensor 对象
+                return (bestMove, piData);
+            }
+        }
+
     }
 }

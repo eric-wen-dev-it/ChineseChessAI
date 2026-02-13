@@ -31,15 +31,21 @@ namespace ChineseChessAI.Training
             _model.train(); // 切换到训练模式，启用 BatchNorm
             _optimizer.zero_grad();
 
+            // 修复 CS1061：TorchSharp 获取维度的方法是 dim() 而非 dimensions
+            // 如果收到的不是 4D 张量（即没有 Batch 维度），强制增加 Batch 维度以适配 Conv2d
+            if (states.dim() == 3)
+            {
+                states = states.unsqueeze(0);
+            }
+
             // 1. 前向传播
             var (policyLogits, valuePred) = _model.forward(states);
 
             // 2. 计算损失函数
-            // Value Loss: 均方误差 (MSE)
+            // Value Loss: 均方误差 (MSE)，确保目标值形状为 [Batch, 1]
             var vLoss = torch.nn.functional.mse_loss(valuePred, targetValues.view(-1, 1));
 
-            // Policy Loss: 交叉熵 (Cross Entropy) 
-            // 注意：targetPolicies 应当是概率分布，此处使用 KL 散度或简化为带 log 的交叉熵
+            // Policy Loss: 交叉熵
             var pLoss = ComputePolicyLoss(policyLogits, targetPolicies);
 
             var totalLoss = vLoss + pLoss;
@@ -59,7 +65,7 @@ namespace ChineseChessAI.Training
         }
 
         /// <summary>
-        /// 调整学习率 (针对训练后期微调)
+        /// 调整学习率
         /// </summary>
         public void SetLearningRate(double lr)
         {
