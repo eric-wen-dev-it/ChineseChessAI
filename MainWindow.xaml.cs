@@ -10,6 +10,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using TorchSharp;
+using static TorchSharp.torch;
 
 namespace ChineseChessAI
 {
@@ -112,7 +113,8 @@ namespace ChineseChessAI
                     {
                         UpdateUI("[硬件] 检测到 GPU，正在启用 CUDA 加速");
                         Debug.WriteLine("[硬件] 检测到 GPU，正在启用 CUDA 加速");
-                        model.to(DeviceType.CUDA);
+                        //model.to(DeviceType.CUDA);
+                        model.to(DeviceType.CUDA, ScalarType.Float16);
                     }
                     else
                     {
