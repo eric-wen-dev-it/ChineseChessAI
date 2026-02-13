@@ -130,7 +130,8 @@ namespace ChineseChessAI
                                 // 传入 Lambda 表达式作为回调更新 UI
                                 var gameData = selfPlay.RunGame((currentBoard) =>
                                 {
-                                    Dispatcher.Invoke(() => DrawBoard(currentBoard)); // 确保回到 UI 线程
+                                    // 使用 BeginInvoke 异步更新 UI，避免阻塞 GPU 搜索线程
+                                    Dispatcher.BeginInvoke(new Action(() => DrawBoard(currentBoard)));
                                 });
 
                                 buffer.AddExamples(gameData); //

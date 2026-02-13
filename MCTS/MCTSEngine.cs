@@ -92,52 +92,47 @@ namespace ChineseChessAI.MCTS
         /// </summary>
         public (Move move, torch.Tensor pi) GetMoveWithProbabilities(Board board, int simulations)
         {
-            // 1. 初始化根节点
-            var root = new MCTSNode(null, 1.0);
-
-            // 2. 执行 MCTS 搜索逻辑
-            for (int i = 0; i < simulations; i++)
+            // 使用本地作用域管理搜索过程中的临时 Tensor
+            using (var scope = torch.NewDisposeScope())
             {
-                // 修复点：必须使用 CloneBoard，否则 Search 过程中的 Push 会改变传入的 board 状态
-                Board tempBoard = CloneBoard(board);
-                Search(root, tempBoard);
+                var root = new MCTSNode(null, 1.0);
+
+                for (int i = 0; i < simulations; i++)
+                {
+                    Board tempBoard = CloneBoard(board);
+                    Search(root, tempBoard);
+                }
+
+                // 1. 防御性检查：防止 root.Children 为空导致 First() 崩溃
+                if (root.Children.Count == 0)
+                {
+                    var legalMoves = _generator.GenerateLegalMoves(board);
+                    if (legalMoves.Count == 0)
+                        throw new Exception("无合法走法");
+                    // 返回全 0 Tensor 的克隆，确保它不受 scope 释放影响
+                    return (legalMoves[0], torch.zeros(new long[] { 8100 }).detach().clone());
+                }
+
+                // 2. 构造概率向量
+                float[] piData = new float[8100];
+                double totalVisits = root.Children.Sum(x => x.Value.N);
+                if (totalVisits == 0)
+                    totalVisits = 1;
+
+                foreach (var child in root.Children)
+                {
+                    int moveIdx = child.Key.ToNetworkIndex();
+                    piData[moveIdx] = (float)(child.Value.N / totalVisits);
+                }
+
+                // 3. 关键点：使用 .detach().clone() 将 Tensor 移出 DisposeScope
+                // 这样即使 scope 结束，返回给 SelfPlay 的 pi 依然有效
+                var piTensor = torch.tensor(piData, new long[] { 8100 }).detach().clone();
+
+                var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
+
+                return (bestMove, piTensor);
             }
-
-            // 3. 安全检查：防止 root.Children 为空导致 First() 崩溃
-            // 报错 "index ('0') must be less than '0'" 的源头就在这里
-            if (root.Children.Count == 0)
-            {
-                // 兜底逻辑：如果搜索未展开，尝试从生成器获取合法走法
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count == 0)
-                    throw new Exception("当前局面无合法走法，可能已进入绝杀/困毙状态。");
-
-                // 返回第一个合法走法和全 0 的概率向量
-                return (legalMoves[0], torch.zeros(new long[] { 8100 }));
-            }
-
-            // 4. 构造 8100 维的概率向量 π
-            float[] piData = new float[8100];
-            double totalVisits = root.Children.Sum(x => x.Value.N);
-
-            // 防止除以零
-            if (totalVisits == 0)
-                totalVisits = 1;
-
-            foreach (var child in root.Children)
-            {
-                int moveIdx = child.Key.ToNetworkIndex();
-                // 概率计算公式: pi = N_i / Total_N
-                piData[moveIdx] = (float)(child.Value.N / totalVisits);
-            }
-
-            // 修复点：确保 piData 大小和 Tensor 形状严格一致
-            var piTensor = torch.tensor(piData, new long[] { 8100 });
-
-            // 5. 选择访问次数最多的走法作为最佳走法
-            var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
-
-            return (bestMove, piTensor);
         }
         private IEnumerable<(Move move, double prob)> GetFilteredPolicy(torch.Tensor logits, List<Move> legalMoves)
         {
