@@ -1,10 +1,11 @@
-﻿using System;
+﻿using ChineseChessAI.NeuralNetwork;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using TorchSharp;
-using ChineseChessAI.NeuralNetwork;
+using static TorchSharp.torch;
 
 namespace ChineseChessAI.MCTS
 {
@@ -31,9 +32,9 @@ namespace ChineseChessAI.MCTS
         /// <summary>
         /// 外部搜索线程调用此方法获取预测结果
         /// </summary>
-        public async Task<(torch.Tensor Policy, float Value)> PredictAsync(torch.Tensor stateTensor)
+        public async Task<(float[] Policy, float Value)> PredictAsync(torch.Tensor stateTensor)
         {
-            var tcs = new TaskCompletionSource<(torch.Tensor, float)>();
+            var tcs = new TaskCompletionSource<(float[], float)>(); // 修改泛型
             _taskQueue.Add(new InferenceTask(stateTensor, tcs));
             return await tcs.Task;
         }
@@ -67,28 +68,29 @@ namespace ChineseChessAI.MCTS
         private void ProcessBatch(List<InferenceTask> tasks)
         {
             _model.eval();
-            using (var noGrad = torch.no_grad())
+            // 核心修复：必须添加 DisposeScope，否则显存爆炸
+            using (var scope = torch.NewDisposeScope())
             {
-                // 将所有 Tensor 合并为一个大 Batch [Batch, 14, 10, 9]
-                var input = torch.cat(tasks.ConvertAll(t => t.Input), 0);
-
-                var (pLogits, vTensors) = _model.forward(input);
-
-                // 4. 将结果分发回各自的 TaskCompletionSource
-                for (int i = 0; i < tasks.Count; i++)
+                using (var noGrad = torch.no_grad())
                 {
-                    // 克隆 Tensor 以防被后续释放，并转移到 CPU 方便主线程读取
-                    var policy = pLogits[i].detach().cpu();
-                    float value = vTensors[i].item<float>();
+                    var input = torch.cat(tasks.ConvertAll(t => t.Input), 0);
+                    var (pLogits, vTensors) = _model.forward(input);
 
-                    tasks[i].Tcs.SetResult((policy, value));
+                    for (int i = 0; i < tasks.Count; i++)
+                    {
+                        // 核心修复：强制转成 C# 的 float 数组，完全切断 TorchSharp 句柄依赖
+                        float[] policy = pLogits[i].to_type(ScalarType.Float32).data<float>().ToArray();
+                        float value = vTensors[i].to_type(ScalarType.Float32).item<float>();
+
+                        tasks[i].Tcs.SetResult((policy, value));
+                    }
                 }
             }
         }
 
         // 内部任务包装类
         private record InferenceTask(
-            torch.Tensor Input,
-            TaskCompletionSource<(torch.Tensor, float)> Tcs);
+                torch.Tensor Input,
+                TaskCompletionSource<(float[], float)> Tcs); // 修改泛型
     }
 }

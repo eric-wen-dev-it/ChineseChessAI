@@ -152,13 +152,13 @@ namespace ChineseChessAI
                             for (int g = 1; g <= 3; g++)
                             {
                                 int gameId = g;
-                                gameTasks.Add(Task.Run(() =>
+                                // 修复：添加 async 关键字
+                                gameTasks.Add(Task.Run(async () =>
                                 {
                                     using (var threadScope = torch.NewDisposeScope())
                                     {
                                         try
                                         {
-                                            Debug.WriteLine($"[线程调试] 游戏线程 {gameId} 开始运行...");
                                             Action<Board>? moveCallback = null;
                                             if (gameId == 1)
                                             {
@@ -173,12 +173,12 @@ namespace ChineseChessAI
                                                     }
                                                 };
                                             }
-                                            return selfPlay.RunGame(moveCallback);
+                                            // 修复：必须 await 并且调用后缀带 Async 的方法
+                                            return await selfPlay.RunGameAsync(moveCallback);
                                         }
                                         catch (Exception ex)
                                         {
                                             UpdateUI($"[致命] 线程 {gameId} 崩溃: {ex.Message}");
-                                            Debug.WriteLine($"[致命] 线程 {gameId} 崩溃: {ex.Message}\n{ex.StackTrace}");
                                             return new List<TrainingExample>();
                                         }
                                     }
