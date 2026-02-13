@@ -102,7 +102,7 @@ namespace ChineseChessAI.MCTS
             }
 
             // 2. 构造 2086 维的概率向量 π
-            float[] piData = new float[2086];
+            float[] piData = new float[8100];
             double totalVisits = root.Children.Sum(x => x.Value.N);
 
             foreach (var child in root.Children)

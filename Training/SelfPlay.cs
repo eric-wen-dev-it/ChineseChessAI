@@ -24,38 +24,43 @@ namespace ChineseChessAI.Training
         }
 
         /// <summary>
-        /// 执行一局完整的自我对弈并返回训练数据
+        /// 执行一局完整的自我对弈并返回训练数据，支持 UI 实时回调
         /// </summary>
-        public List<TrainingExample> RunGame()
+        /// <param name="onMovePerformed">每一步走完后的回调函数，用于更新 UI</param>
+        public List<TrainingExample> RunGame(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
 
+            // 初始状态回调一次，显示开局棋盘
+            onMovePerformed?.Invoke(board);
+
             var gameHistory = new List<(torch.Tensor state, torch.Tensor policy)>();
             int moveCount = 0;
 
-            // 游戏主循环 (设置步数上限防止长将或和棋死循环)
-            // 修改后的 SelfPlay 核心循环片段
             while (moveCount < 400)
             {
                 var stateTensor = StateEncoder.Encode(board);
 
-                // 显式接收元组返回值
+                // MCTS 搜索逻辑
                 (Move bestMove, torch.Tensor pi) = _engine.GetMoveWithProbabilities(board, 800);
 
-                // 记录数据。注意：stateTensor 已经 unsqueeze(0) 了，
-                // 在存入 history 前建议保持维度一致或在 Dataset 处理时统一
+                // 记录数据
                 gameHistory.Add((stateTensor.squeeze(0), pi));
 
+                // 执行走子
                 board.Push(bestMove.From, bestMove.To);
+
+                // 关键修改：执行回调，通知 UI 更新棋盘
+                onMovePerformed?.Invoke(board);
+
                 moveCount++;
 
                 if (_generator.GenerateLegalMoves(board).Count == 0)
                     break;
             }
 
-            // 6. 游戏结束，根据胜负回填价值 Z
-            // 假设最后走棋的人赢了，或者根据最后的回合判断胜负
+            // 胜负判断逻辑
             float gameResult = board.IsRedTurn ? -1.0f : 1.0f;
 
             return FinalizeData(gameHistory, gameResult);

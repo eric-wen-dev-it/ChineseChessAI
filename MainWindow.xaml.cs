@@ -1,12 +1,14 @@
-﻿using System;
-using System.IO;
-using System.Threading.Tasks;
-using System.Windows;
-using TorchSharp;
+﻿using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Training;
-using ChineseChessAI.Core;
+using System;
+using System.IO;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using TorchSharp;
+using System.Windows.Media;
 
 namespace ChineseChessAI
 {
@@ -22,6 +24,50 @@ namespace ChineseChessAI
             InitializeComponent();
             CheckGpuStatus(); // 修复：确保构造函数调用此方法
         }
+
+        private void InitBoardUi()
+        {
+            ChessBoardGrid.Children.Clear();
+            for (int i = 0; i < 90; i++)
+            {
+                var border = new Border { BorderBrush = Brushes.Black, BorderThickness = new Thickness(0.5) };
+                var txt = new TextBlock
+                {
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    FontSize = 18,
+                    FontWeight = FontWeights.Bold
+                };
+                border.Child = txt;
+                ChessBoardGrid.Children.Add(border);
+            }
+        }
+
+        // 核心：将 Board 状态绘制到 UI
+        private void DrawBoard(Board board)
+        {
+            Dispatcher.Invoke(() => {
+                var state = board.GetState();
+                for (int i = 0; i < 90; i++)
+                {
+                    var border = (Border)ChessBoardGrid.Children[i];
+                    var txt = (TextBlock)border.Child;
+                    sbyte piece = state[i];
+
+                    if (piece == 0)
+                    {
+                        txt.Text = "";
+                        continue;
+                    }
+
+                    // 映射棋子名称
+                    string[] names = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
+                    txt.Text = names[Math.Abs(piece)];
+                    txt.Foreground = piece > 0 ? Brushes.Red : Brushes.Black;
+                }
+            });
+        }
+
 
         private void CheckGpuStatus()
         {
@@ -53,59 +99,55 @@ namespace ChineseChessAI
         {
             try
             {
-                // 使用 DisposeScope 自动管理非托管 Tensor 内存
                 using (var outerScope = torch.NewDisposeScope())
                 {
                     var model = new CChessNet(numResBlocks: 10, numFilters: 128);
 
-                    // 如果 model.to 支持直接接收枚举
                     if (torch.cuda.is_available())
-                    {
-                        model.to(DeviceType.CUDA);
-                    }
+                        model.to(DeviceType.CUDA); //
                     else
-                    {
-                        model.to(DeviceType.CPU);
-                    }
+                        model.to(DeviceType.CPU); //
 
-                    string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+                    string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt"); //
                     if (File.Exists(modelPath))
-                        ModelManager.LoadModel(model, modelPath);
+                        ModelManager.LoadModel(model, modelPath); //
 
-                    var trainer = new Trainer(model);
-                    var buffer = new ReplayBuffer(capacity: 50000);
-                    var engine = new MCTSEngine(model);
-                    var selfPlay = new SelfPlay(engine);
+                    var trainer = new Trainer(model); //
+                    var buffer = new ReplayBuffer(capacity: 50000); //
+                    var engine = new MCTSEngine(model); //
+                    var selfPlay = new SelfPlay(engine); //
 
                     int iteration = 1;
                     while (_isTraining)
                     {
-                        // 每一轮迭代也开启一个内层作用域，防止内存累积
                         using (var iterScope = torch.NewDisposeScope())
                         {
                             UpdateUI($"\n--- 迭代第 {iteration} 轮 ---");
 
-                            // 阶段 A: 自我对弈
                             for (int g = 1; g <= 3; g++)
                             {
-                                var gameData = selfPlay.RunGame();
-                                buffer.AddExamples(gameData);
+                                // 传入 Lambda 表达式作为回调更新 UI
+                                var gameData = selfPlay.RunGame((currentBoard) =>
+                                {
+                                    Dispatcher.Invoke(() => DrawBoard(currentBoard)); // 确保回到 UI 线程
+                                });
+
+                                buffer.AddExamples(gameData); //
                                 UpdateUI($"[对弈] 游戏 {g}/3 完成。");
                             }
 
-                            // 阶段 B: 训练
                             if (buffer.Count >= 256)
                             {
                                 double totalLoss = 0;
                                 for (int s = 0; s < 20; s++)
                                 {
-                                    var (states, policies, values) = buffer.Sample(32);
-                                    totalLoss += trainer.TrainStep(states, policies, values);
+                                    var (states, policies, values) = buffer.Sample(32); //
+                                    totalLoss += trainer.TrainStep(states, policies, values); //
                                 }
                                 UpdateUI($"[训练] 平均 Loss: {totalLoss / 20:F4}");
                             }
 
-                            ModelManager.SaveModel(model, modelPath);
+                            ModelManager.SaveModel(model, modelPath); //
                             iteration++;
                         }
                     }
