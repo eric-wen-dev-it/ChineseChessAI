@@ -42,48 +42,41 @@ namespace ChineseChessAI.MCTS
 
         private void Search(MCTSNode node, Board board)
         {
-            // A. 选择 (Selection)
-            // 如果当前节点已经展开，根据 PUCT 公式向下递归
-            if (!node.IsLeaf)
+            try
             {
-                var bestChild = node.Children
-                    .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
-                    .First();
-
-                board.Push(bestChild.Key.From, bestChild.Key.To);
-                Search(bestChild.Value, board);
-                return;
-            }
-
-            // B. 扩展与评估 (Expansion & Evaluation)
-            // 1. 将局面转为 Tensor
-            var inputTensor = StateEncoder.Encode(board);
-
-            // 2. 神经网络推理
-            _model.eval();
-            using (var noGrad = torch.no_grad())
-            {
-                var (policyLogits, valueTensor) = _model.forward(inputTensor);
-
-                // 获取当前局面的胜率评估 z
-                double value = valueTensor.item<float>();
-
-                // 获取所有合法动作
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count == 0) // 处理绝杀或困毙
+                if (!node.IsLeaf)
                 {
-                    node.Update(-1.0); // 当前玩家输了
+                    var bestChild = node.Children
+                        .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
+                        .First();
+                    board.Push(bestChild.Key.From, bestChild.Key.To);
+                    Search(bestChild.Value, board);
                     return;
                 }
 
-                // 3. 提取合法动作对应的 Policy 概率并进行 Softmax 归一化
-                var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
+                var inputTensor = StateEncoder.Encode(board);
+                _model.eval();
+                using (var noGrad = torch.no_grad())
+                {
+                    var (policyLogits, valueTensor) = _model.forward(inputTensor);
+                    double value = valueTensor.item<float>();
 
-                // 4. 展开节点
-                node.Expand(filteredPolicy);
+                    var legalMoves = _generator.GenerateLegalMoves(board);
+                    if (legalMoves.Count == 0)
+                    {
+                        node.Update(-1.0);
+                        return;
+                    }
 
-                // C. 反向传播 (Backpropagation)
-                node.Update(value);
+                    var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
+                    node.Expand(filteredPolicy);
+                    node.Update(value);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 捕获 MCTS 模拟中的异常，避免主线程崩溃
+                Console.WriteLine($"[MCTS Search Error] {ex.Message}");
             }
         }
 
