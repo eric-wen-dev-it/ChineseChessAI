@@ -13,17 +13,19 @@ namespace ChineseChessAI.MCTS
     {
         private readonly CChessNet _model;
         private readonly MoveGenerator _generator;
-        private readonly BatchInference _batchInference; // 引入批量推理器
+        private readonly BatchInference _batchInference;
         private readonly double _cPuct = 1.5;
 
-        // 构造函数中初始化批量推理器
         public MCTSEngine(CChessNet model, int batchSize = 16)
         {
             _model = model;
             _generator = new MoveGenerator();
-            // 确保模型处于推理模式并使用 Float16
-            _model.to(DeviceType.CUDA, ScalarType.Float16);
+
+            // 优化 1: 移除强制 Float16，使用默认 Float32
+            // 具体的混合精度计算将由 Trainer 和 BatchInference 中的 AMP (autocast) 接管
+            _model.to(DeviceType.CUDA);
             _model.eval();
+
             _batchInference = new BatchInference(_model, batchSize);
         }
 
@@ -34,9 +36,11 @@ namespace ChineseChessAI.MCTS
         {
             var root = new MCTSNode(null, 1.0);
 
-            // 将模拟任务分组并行处理，而不是一个一个跑
+            // 将模拟任务分组并行处理
             int parallelTasks = 16;
             int simsPerTask = simulations / parallelTasks;
+            if (simsPerTask == 0)
+                simsPerTask = 1;
 
             var tasks = new List<Task>();
             for (int t = 0; t < parallelTasks; t++)
@@ -45,15 +49,17 @@ namespace ChineseChessAI.MCTS
                 {
                     for (int i = 0; i < simsPerTask; i++)
                     {
+                        // 必须克隆 Board，因为 MCTS 在不同线程中会修改棋盘状态
                         Board tempBoard = CloneBoard(board);
-                        await SearchAsync(root, tempBoard); // 异步搜索
+                        await SearchAsync(root, tempBoard);
                     }
                 }));
             }
 
             await Task.WhenAll(tasks);
 
-            if (root.Children.Count == 0)
+            // 兼容 ConcurrentDictionary 的判空方式 (IsEmpty 性能优于 Count)
+            if (root.Children.IsEmpty)
             {
                 var legalMoves = _generator.GenerateLegalMoves(board);
                 return legalMoves.Count == 0 ? throw new Exception("无合法走法") : legalMoves[0];
@@ -72,7 +78,7 @@ namespace ChineseChessAI.MCTS
                 // A. 选择阶段 (同步执行，树操作极快)
                 if (!node.IsLeaf)
                 {
-                    if (node.Children.Count == 0)
+                    if (node.Children.IsEmpty)
                         return;
 
                     var bestChild = node.Children
@@ -87,10 +93,10 @@ namespace ChineseChessAI.MCTS
                 // B. 扩展与评估阶段 (异步调用 GPU 批量推理)
                 using (var scope = torch.NewDisposeScope())
                 {
-                    // 1. 编码局面并转换为 Float16
-                    var inputTensor = StateEncoder.Encode(board).to(DeviceType.CUDA, ScalarType.Float16);
+                    // 优化 2: 保持 FP32 输入，不要手动转 Float16
+                    var inputTensor = StateEncoder.Encode(board).to(DeviceType.CUDA);
 
-                    // 2. 调用批量推理器，此处 CPU 会释放线程去处理其他节点的选择
+                    // 调用批量推理器，直接获取 float[] 数组，无需处理 Tensor 句柄
                     var (policyLogits, value) = await _batchInference.PredictAsync(inputTensor);
 
                     var legalMoves = _generator.GenerateLegalMoves(board);
@@ -100,7 +106,7 @@ namespace ChineseChessAI.MCTS
                         return;
                     }
 
-                    // 3. 过滤并展开
+                    // 优化 3: 传递 float[] 进行策略过滤
                     var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
                     node.Expand(filteredPolicy);
 
@@ -121,7 +127,7 @@ namespace ChineseChessAI.MCTS
         {
             var root = new MCTSNode(null, 1.0);
 
-            // 同样使用并行模拟提升速度
+            // 并行模拟
             var tasks = Enumerable.Range(0, 8).Select(_ => Task.Run(async () => {
                 for (int i = 0; i < simulations / 8; i++)
                 {
@@ -130,13 +136,15 @@ namespace ChineseChessAI.MCTS
             }));
             await Task.WhenAll(tasks);
 
-            if (root.Children.Count == 0)
+            if (root.Children.IsEmpty)
             {
-                return (_generator.GenerateLegalMoves(board)[0], new float[8100]);
+                var legalMoves = _generator.GenerateLegalMoves(board);
+                return (legalMoves[0], new float[8100]);
             }
 
             float[] piData = new float[8100];
             double totalVisits = root.Children.Sum(x => x.Value.N);
+
             foreach (var child in root.Children)
             {
                 int moveIdx = child.Key.ToNetworkIndex();
@@ -148,9 +156,9 @@ namespace ChineseChessAI.MCTS
             return (bestMove, piData);
         }
 
-        private IEnumerable<(Move move, double prob)> GetFilteredPolicy(torch.Tensor logits, List<Move> legalMoves)
+        // 优化 4: 参数改为 float[] logits，直接操作数组提升性能
+        private IEnumerable<(Move move, double prob)> GetFilteredPolicy(float[] logits, List<Move> legalMoves)
         {
-            // 注意：此处 logits 已经是 CPU 上的 Float32 Tensor (由 BatchInference.cs 处理)
             var probs = new List<(Move, double)>();
             float maxLogit = float.MinValue;
             var validMoves = new List<(Move, float)>();
@@ -160,13 +168,14 @@ namespace ChineseChessAI.MCTS
                 int idx = move.ToNetworkIndex();
                 if (idx >= 0 && idx < 8100)
                 {
-                    float val = logits[idx].item<float>(); // 直接读取索引
+                    float val = logits[idx]; // 直接数组访问，比 Tensor.item<float> 快得多
                     if (val > maxLogit)
                         maxLogit = val;
                     validMoves.Add((move, val));
                 }
             }
 
+            // Stable Softmax
             double sum = 0;
             foreach (var (move, val) in validMoves)
             {
