@@ -1,65 +1,54 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq; // 必须添加，用于 Select
 using TorchSharp;
 using static TorchSharp.torch;
 
 namespace ChineseChessAI.Training
 {
-    /// <summary>
-    /// 经验回放池：存储自我对弈数据并提供随机采样功能
-    /// </summary>
     public class ReplayBuffer
     {
         private readonly int _capacity;
-        // 你代码中定义的是 _buffer，所以 AddExamples 里也必须用 _buffer
-        private readonly List<TrainingExample> _buffer;
+        // 核心修改：使用数组代替 List
+        private readonly TrainingExample[] _buffer;
+        private int _count = 0;
+        private int _head = 0; // 记录当前插入位置的指针
         private readonly Random _random = new Random();
 
-        public ReplayBuffer(int capacity = 100000)
+        public ReplayBuffer(int capacity = 50000)
         {
             _capacity = capacity;
-            _buffer = new List<TrainingExample>(capacity);
+            _buffer = new TrainingExample[capacity];
         }
 
-        /// <summary>
-        /// 直接接收转换好的 TrainingExample (数组形式) 列表
-        /// </summary>
         public void AddExamples(List<TrainingExample> newExamples)
         {
             foreach (var ex in newExamples)
             {
-                // 修正变量名：将 _examples 改为类定义的 _buffer
-                if (this._buffer.Count >= _capacity)
-                {
-                    this._buffer.RemoveAt(0);
-                }
-                this._buffer.Add(ex);
+                // 循环覆盖旧数据，时间复杂度从 O(N) 降为 O(1)
+                _buffer[_head] = ex;
+                _head = (_head + 1) % _capacity;
+                if (_count < _capacity)
+                    _count++;
             }
         }
 
-        /// <summary>
-        /// 随机采样一个 Batch 用于训练
-        /// </summary>
         public (Tensor States, Tensor Policies, Tensor Values) Sample(int batchSize)
         {
-            int count = Math.Min(batchSize, _buffer.Count);
+            int count = Math.Min(batchSize, _count);
             var batchStates = new List<Tensor>();
             var batchPolicies = new List<Tensor>();
             var batchValues = new List<float>();
 
             for (int i = 0; i < count; i++)
             {
-                int index = _random.Next(_buffer.Count);
+                int index = _random.Next(_count);
                 var example = _buffer[index];
 
-                // 核心修正：必须指定原始数据的形状 [14, 10, 9]
                 batchStates.Add(torch.tensor(example.State, new long[] { 14, 10, 9 }));
                 batchPolicies.Add(torch.tensor(example.Policy, new long[] { 8100 }));
                 batchValues.Add(example.Value);
             }
 
-            // stack 后 states 形状变为 [Batch, 14, 10, 9]
             var states = torch.stack(batchStates);
             var policies = torch.stack(batchPolicies);
             var values = torch.tensor(batchValues.ToArray(), ScalarType.Float32);
@@ -74,6 +63,6 @@ namespace ChineseChessAI.Training
             return (states, policies, values);
         }
 
-        public int Count => _buffer.Count;
+        public int Count => _count;
     }
 }

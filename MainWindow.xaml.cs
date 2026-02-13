@@ -230,11 +230,11 @@ namespace ChineseChessAI
                                         }
 
                                         // 如果你担心内存堆积，这里用 GC 替代
-                                        if (s % 5 == 0)
-                                        {
-                                            GC.Collect();
-                                            GC.WaitForPendingFinalizers();
-                                        }
+                                        //if (s % 5 == 0)
+                                        //{
+                                        //    GC.Collect();
+                                        //    GC.WaitForPendingFinalizers();
+                                        //}
                                     }
                                     UpdateUI($"[训练] 完毕，平均 Loss: {totalLoss / trainSteps:F4}");
                                     Debug.WriteLine($"[训练] 完毕，平均 Loss: {totalLoss / trainSteps:F4}");

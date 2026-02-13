@@ -149,17 +149,28 @@ namespace ChineseChessAI.MCTS
         private IEnumerable<(Move move, double prob)> GetFilteredPolicy(torch.Tensor logits, List<Move> legalMoves)
         {
             var probs = new List<(Move, double)>();
-            double sum = 0;
+
+            // 1. 寻找合法走法中的最大 Logit (用于数值稳定)
+            float maxLogit = float.MinValue;
+            var validMoves = new List<(Move, float)>();
 
             foreach (var move in legalMoves)
             {
                 int idx = move.ToNetworkIndex();
-                if (idx < 0 || idx >= 8100)
-                    continue;
+                if (idx >= 0 && idx < 8100)
+                {
+                    float val = logits[0, idx].item<float>();
+                    if (val > maxLogit)
+                        maxLogit = val;
+                    validMoves.Add((move, val));
+                }
+            }
 
-                // 简易 Softmax 处理
-                float val = logits[0, idx].item<float>();
-                double p = Math.Exp(Math.Min(val, 20.0)); // 防止溢出
+            // 2. 计算 Stable Softmax (每个值减去最大值再求 Exp，永不溢出)
+            double sum = 0;
+            foreach (var (move, val) in validMoves)
+            {
+                double p = Math.Exp(val - maxLogit);
                 probs.Add((move, p));
                 sum += p;
             }
