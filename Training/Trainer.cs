@@ -10,9 +10,6 @@ namespace ChineseChessAI.Training
     {
         private readonly CChessNet _model;
         private readonly torch.optim.Optimizer _optimizer;
-        // 1. 引入梯度缩放器，防止 Float16 下梯度下溢
-        private readonly torch.cuda.amp.GradScaler _scaler = new torch.cuda.amp.GradScaler();
-
         private readonly double _learningRate = 0.001;
         private readonly double _l2Reg = 1e-4;
 
@@ -27,29 +24,25 @@ namespace ChineseChessAI.Training
             _model.train();
             _optimizer.zero_grad();
 
+            // 维度保护：确保是 4D 张量 [Batch, Channels, Height, Width]
             if (states.dim() == 3)
                 states = states.unsqueeze(0);
 
-            // 2. 开启自动混合精度上下文 (AMP)
-            // 这会自动将卷积和全连接层切换到 Tensor Cores (FP16) 计算
-            using (var amp = torch.cuda.amp.autocast())
-            {
-                var (policyLogits, valuePred) = _model.forward(states);
+            // --- 标准 FP32 训练 (移除 AMP) ---
 
-                var vLoss = torch.nn.functional.mse_loss(valuePred, targetValues.view(-1, 1));
-                var pLoss = ComputePolicyLoss(policyLogits, targetPolicies);
-                var totalLoss = vLoss + pLoss;
+            // 1. 前向传播
+            var (policyLogits, valuePred) = _model.forward(states);
 
-                // 3. 使用 Scaler 处理反向传播
-                // Scale 损失值 -> Backward -> Step -> Update
-                _scaler.scale(totalLoss).backward();
-            }
+            // 2. 计算损失
+            var vLoss = torch.nn.functional.mse_loss(valuePred, targetValues.view(-1, 1));
+            var pLoss = ComputePolicyLoss(policyLogits, targetPolicies);
+            var totalLoss = vLoss + pLoss;
 
-            // 4. 更新权重
-            _scaler.step(_optimizer);
-            _scaler.update();
+            // 3. 反向传播
+            totalLoss.backward();
+            _optimizer.step();
 
-            return 0.0; // 返回 Loss 需要从 Tensor 提取，为避免同步阻塞可暂时返回 0 或仅定期提取
+            return totalLoss.item<float>();
         }
 
         private Tensor ComputePolicyLoss(Tensor logits, Tensor targets)

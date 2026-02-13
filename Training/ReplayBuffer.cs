@@ -8,10 +8,10 @@ namespace ChineseChessAI.Training
     public class ReplayBuffer
     {
         private readonly int _capacity;
-        // 核心修改：使用数组代替 List
+        // 优化：使用数组代替 List，配合循环指针实现 O(1) 插入
         private readonly TrainingExample[] _buffer;
         private int _count = 0;
-        private int _head = 0; // 记录当前插入位置的指针
+        private int _head = 0;
         private readonly Random _random = new Random();
 
         public ReplayBuffer(int capacity = 50000)
@@ -24,7 +24,7 @@ namespace ChineseChessAI.Training
         {
             foreach (var ex in newExamples)
             {
-                // 循环覆盖旧数据，时间复杂度从 O(N) 降为 O(1)
+                // 循环覆盖旧数据，无需内存搬移
                 _buffer[_head] = ex;
                 _head = (_head + 1) % _capacity;
                 if (_count < _capacity)
@@ -44,6 +44,7 @@ namespace ChineseChessAI.Training
                 int index = _random.Next(_count);
                 var example = _buffer[index];
 
+                // 显式指定形状，确保 Trainer 收到正确的 4D 数据
                 batchStates.Add(torch.tensor(example.State, new long[] { 14, 10, 9 }));
                 batchPolicies.Add(torch.tensor(example.Policy, new long[] { 8100 }));
                 batchValues.Add(example.Value);

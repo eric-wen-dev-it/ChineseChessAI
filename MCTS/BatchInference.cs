@@ -1,11 +1,12 @@
-﻿using System;
+﻿using ChineseChessAI.NeuralNetwork;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using TorchSharp;
-using ChineseChessAI.NeuralNetwork;
-using System.Linq; // 确保引用 Linq
+using static TorchSharp.torch;
 
 namespace ChineseChessAI.MCTS
 {
@@ -13,7 +14,6 @@ namespace ChineseChessAI.MCTS
     {
         private readonly CChessNet _model;
         private readonly int _batchSize;
-        // 修改 Tcs 泛型为 float[]，彻底切断与 Tensor 的联系
         private readonly BlockingCollection<InferenceTask> _taskQueue = new();
 
         public BatchInference(CChessNet model, int batchSize = 16)
@@ -52,21 +52,20 @@ namespace ChineseChessAI.MCTS
         {
             _model.eval();
 
-            // 关键修复 1: 必须加 DisposeScope，否则显存几秒钟就会爆满
+            // 核心修复：必须添加 DisposeScope，否则显存会无限增长直到崩溃
             using (var scope = torch.NewDisposeScope())
             {
-                // 关键优化 2: 开启 AMP，让 4070 使用 Tensor Cores 加速推理
-                using (var amp = torch.cuda.amp.autocast())
                 using (var noGrad = torch.no_grad())
                 {
+                    // 移除 AMP，使用标准 FP32 推理
                     var input = torch.cat(tasks.ConvertAll(t => t.Input), 0);
                     var (pLogits, vTensors) = _model.forward(input);
 
                     for (int i = 0; i < tasks.Count; i++)
                     {
-                        // 关键修复 3: 立即转为 float[] 数组，数据回到 CPU，Tensor 在 scope 结束时销毁
-                        float[] policy = pLogits[i].to(torch.ScalarType.Float32).data<float>().ToArray();
-                        float value = vTensors[i].to(torch.ScalarType.Float32).item<float>();
+                        // 立即转为 CPU 数组，切断 Tensor 句柄依赖
+                        float[] policy = pLogits[i].to(ScalarType.Float32).data<float>().ToArray();
+                        float value = vTensors[i].to(ScalarType.Float32).item<float>();
 
                         tasks[i].Tcs.SetResult((policy, value));
                     }

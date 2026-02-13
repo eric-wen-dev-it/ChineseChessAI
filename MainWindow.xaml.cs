@@ -25,7 +25,7 @@ namespace ChineseChessAI
         {
             InitializeComponent();
             InitBoardUi();
-            CheckGpuStatus(); // 修复：确保构造函数调用此方法
+            CheckGpuStatus(); // 确保构造函数调用此方法
         }
 
         private void InitBoardUi()
@@ -47,15 +47,13 @@ namespace ChineseChessAI
         }
 
         // 核心：将 Board 状态绘制到 UI
-        // 修改 DrawBoard 签名，直接接收棋子数据副本
         private void DrawBoard(sbyte[] pieces)
         {
-            // 注意：这里不再需要 Dispatcher.Invoke，因为调用方已经使用了 BeginInvoke
             for (int i = 0; i < 90; i++)
             {
                 var border = (Border)ChessBoardGrid.Children[i];
                 var txt = (TextBlock)border.Child;
-                sbyte piece = pieces[i]; // 使用传入的副本数据
+                sbyte piece = pieces[i];
 
                 if (piece == 0)
                 {
@@ -87,7 +85,7 @@ namespace ChineseChessAI
             if (_isTraining)
                 return;
             _isTraining = true;
-            StartBtn.IsEnabled = false; // 修复：禁用 XAML 中定义的 StartBtn
+            StartBtn.IsEnabled = false;
 
             UpdateUI("=== 进化循环已启动 ===");
 
@@ -113,8 +111,10 @@ namespace ChineseChessAI
                     {
                         UpdateUI("[硬件] 检测到 GPU，正在启用 CUDA 加速");
                         Debug.WriteLine("[硬件] 检测到 GPU，正在启用 CUDA 加速");
-                        //model.to(DeviceType.CUDA);
-                        model.to(DeviceType.CUDA, ScalarType.Float16);
+
+                        // 核心修复：这里只指定设备，不要指定 ScalarType
+                        // TorchSharp 的 .to() 方法不支持同时传 DeviceType 和 ScalarType
+                        model.to(DeviceType.CUDA);
                     }
                     else
                     {
@@ -131,8 +131,11 @@ namespace ChineseChessAI
                         ModelManager.LoadModel(model, modelPath);
                     }
 
+                    // 请确保 Trainer.cs 也是最新的 FP32 版本
                     var trainer = new Trainer(model);
+                    // 请确保 ReplayBuffer.cs 是最新的数组优化版本
                     var buffer = new ReplayBuffer(capacity: 50000);
+                    // 请确保 MCTSEngine.cs 移除了 Float16 强制转换
                     var engine = new MCTSEngine(model);
                     var selfPlay = new SelfPlay(engine);
 
@@ -152,7 +155,6 @@ namespace ChineseChessAI
                             for (int g = 1; g <= 3; g++)
                             {
                                 int gameId = g;
-                                // 修复：添加 async 关键字
                                 gameTasks.Add(Task.Run(async () =>
                                 {
                                     using (var threadScope = torch.NewDisposeScope())
@@ -173,7 +175,6 @@ namespace ChineseChessAI
                                                     }
                                                 };
                                             }
-                                            // 修复：必须 await 并且调用后缀带 Async 的方法
                                             return await selfPlay.RunGameAsync(moveCallback);
                                         }
                                         catch (Exception ex)
@@ -190,8 +191,6 @@ namespace ChineseChessAI
                             var allGameResults = await Task.WhenAll(gameTasks);
                             foreach (var gameData in allGameResults)
                             {
-                                // 此时 gameData 的类型是 List<TrainingExample>
-                                // 调用的 buffer.AddExamples 也是接收 List<TrainingExample>
                                 if (gameData != null)
                                     buffer.AddExamples(gameData);
                             }
@@ -212,31 +211,22 @@ namespace ChineseChessAI
                                     {
                                         try
                                         {
-                                            // 这是最核心的：确保每一批次训练的中间 Tensor 都在此销毁
                                             using (var batchScope = torch.NewDisposeScope())
                                             {
-                                                Debug.WriteLine($"[训练调试] Step {s + 1}/{trainSteps} 准备采样...");
+                                                //Debug.WriteLine($"[训练调试] Step {s + 1}/{trainSteps} 准备采样...");
                                                 var (states, policies, values) = buffer.Sample(32);
 
-                                                Debug.WriteLine($"[训练调试] Step {s + 1} 采样完成，进入 TrainStep...");
-                                                // 请确保 states, policies, values 已经 model.to(Device)
+                                                //Debug.WriteLine($"[训练调试] Step {s + 1} 采样完成，进入 TrainStep...");
                                                 double loss = trainer.TrainStep(states, policies, values);
 
                                                 totalLoss += loss;
-                                                Debug.WriteLine($"[训练调试] Step {s + 1} 成功完成，Loss: {loss:F4}");
+                                                //Debug.WriteLine($"[训练调试] Step {s + 1} 成功完成，Loss: {loss:F4}");
                                             }
                                         }
                                         catch (Exception ex)
                                         {
                                             UpdateUI($"[训练警告] Step {s + 1} 失败: {ex.Message}");
                                         }
-
-                                        // 如果你担心内存堆积，这里用 GC 替代
-                                        //if (s % 5 == 0)
-                                        //{
-                                        //    GC.Collect();
-                                        //    GC.WaitForPendingFinalizers();
-                                        //}
                                     }
                                     UpdateUI($"[训练] 完毕，平均 Loss: {totalLoss / trainSteps:F4}");
                                     Debug.WriteLine($"[训练] 完毕，平均 Loss: {totalLoss / trainSteps:F4}");
@@ -273,10 +263,8 @@ namespace ChineseChessAI
             }
         }
 
-        // 统一的日志输出方法，修复 LogText 缺失问题
         private void UpdateUI(string message)
         {
-            // 修复：确保在 UI 线程执行
             Dispatcher.Invoke(() =>
             {
                 if (LogBox != null)
