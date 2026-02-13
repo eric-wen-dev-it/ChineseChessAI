@@ -3,6 +3,7 @@ using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Training;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
@@ -113,7 +114,6 @@ namespace ChineseChessAI
                         Debug.WriteLine("[硬件] 检测到 GPU，正在启用 CUDA 加速");
 
                         // 核心修复：这里只指定设备，不要指定 ScalarType
-                        // TorchSharp 的 .to() 方法不支持同时传 DeviceType 和 ScalarType
                         model.to(DeviceType.CUDA);
                     }
                     else
@@ -129,6 +129,21 @@ namespace ChineseChessAI
                         UpdateUI($"[加载] 发现权重文件，正在载入: {modelPath}");
                         Debug.WriteLine($"[加载] 发现权重文件，正在载入: {modelPath}");
                         ModelManager.LoadModel(model, modelPath);
+
+                        // 核心修复：强制开启所有参数的梯度记录，防止 backward 报错
+                        foreach (var param in model.parameters())
+                        {
+                            param.requires_grad = true;
+                        }
+                        UpdateUI("[系统] 已强制开启模型参数梯度 (RequiresGrad = True)");
+                    }
+                    else
+                    {
+                        // 新模型也默认开启梯度
+                        foreach (var param in model.parameters())
+                        {
+                            param.requires_grad = true;
+                        }
                     }
 
                     // 请确保 Trainer.cs 也是最新的 FP32 版本
