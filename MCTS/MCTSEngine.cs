@@ -21,7 +21,6 @@ namespace ChineseChessAI.MCTS
             _model = model;
             _generator = new MoveGenerator();
 
-            // 确保模型在 GPU
             if (torch.cuda.is_available())
                 _model.to(DeviceType.CUDA);
             _model.eval();
@@ -29,12 +28,11 @@ namespace ChineseChessAI.MCTS
             _batchInference = new BatchInference(_model, batchSize);
         }
 
-        // ... GetBestMoveAsync 保持不变 ...
         public async Task<Move> GetBestMoveAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
 
-            // 降低并发度，减少内存压力
+            // 保持较低的并发度，稳定性优先
             int parallelTasks = 4;
             int simsPerTask = simulations / parallelTasks;
             if (simsPerTask < 1)
@@ -85,43 +83,43 @@ namespace ChineseChessAI.MCTS
                     return;
                 }
 
-                // 使用 DisposeScope 管理 CPU Tensor
+                // 准备数据变量
+                float[] inputData;
+                bool isRed = board.IsRedTurn;
+
+                // 【关键修复】使用局部 Scope 快速生成数据并转换为 Array，随后立即销毁 Tensor
+                // 这样 Tensor 永远不会跨越 await 边界，也不会跨线程
                 using (var scope = torch.NewDisposeScope())
                 {
-                    bool isRed = board.IsRedTurn;
+                    var tensor = StateEncoder.Encode(board);
 
-                    // 【核心修复1】只在 CPU 上生成 Tensor，不移动到 CUDA
-                    // 多线程并发向 GPU 搬运数据是崩溃的主因
-                    var rawTensor = StateEncoder.Encode(board);
+                    // 确保数据在 CPU 且为 float32
+                    if (tensor.device_type != DeviceType.CPU)
+                        tensor = tensor.cpu();
+                    tensor = tensor.to_type(ScalarType.Float32);
 
-                    // 确保是 [1, 14, 10, 9] 形状
-                    if (rawTensor.shape.Length == 3)
-                        rawTensor = rawTensor.unsqueeze(0);
+                    inputData = tensor.data<float>().ToArray();
+                } // Tensor 在此处被物理销毁，非常安全
 
-                    // 传递 CPU Tensor 给 BatchInference
-                    var (policyLogits, value) = await _batchInference.PredictAsync(rawTensor);
+                // 发送纯数组进行推理
+                var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
 
-                    // 4. 后处理
-                    if (!isRed)
-                    {
-                        policyLogits = FlipPolicy(policyLogits);
-                    }
-
-                    var legalMoves = _generator.GenerateLegalMoves(board);
-                    if (legalMoves.Count == 0)
-                    {
-                        node.Update(-1.0);
-                        return;
-                    }
-
-                    var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
-                    node.Expand(filteredPolicy);
-                    node.Update(value);
+                // 后处理
+                if (!isRed)
+                {
+                    policyLogits = FlipPolicy(policyLogits);
                 }
-            }
-            catch (IndexOutOfRangeException ior)
-            {
-                Console.WriteLine($"[MCTS Index Error] {ior.Message}");
+
+                var legalMoves = _generator.GenerateLegalMoves(board);
+                if (legalMoves.Count == 0)
+                {
+                    node.Update(-1.0);
+                    return;
+                }
+
+                var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
+                node.Expand(filteredPolicy);
+                node.Update(value);
             }
             catch (Exception ex)
             {
@@ -129,12 +127,11 @@ namespace ChineseChessAI.MCTS
             }
         }
 
-        // ... GetMoveWithProbabilitiesAsArrayAsync, GetFilteredPolicy, FlipPolicy, CloneBoard 保持不变 ...
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
 
-            var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(async () => { // 降低并发
+            var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(async () => {
                 for (int i = 0; i < simulations / 4; i++)
                 {
                     await SearchAsync(root, CloneBoard(board));
@@ -162,6 +159,7 @@ namespace ChineseChessAI.MCTS
             return (bestMove, piData);
         }
 
+        // ... GetFilteredPolicy, FlipPolicy, CloneBoard 保持不变 ...
         private IEnumerable<(Move move, double prob)> GetFilteredPolicy(float[] logits, List<Move> legalMoves)
         {
             var probs = new List<(Move, double)>();
@@ -211,7 +209,7 @@ namespace ChineseChessAI.MCTS
                 int from_flip = r1_flip * 9 + c1_flip;
                 int to_flip = r2_flip * 9 + c2_flip;
                 int idx_flip = from_flip * 90 + to_flip;
-                if (idx_flip >= 0 && idx_flip < 8100) // 安全检查
+                if (idx_flip >= 0 && idx_flip < 8100)
                     flippedPi[idx_flip] = originalPi[i];
             }
             return flippedPi;

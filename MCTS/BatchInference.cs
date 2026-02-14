@@ -16,6 +16,9 @@ namespace ChineseChessAI.MCTS
         private readonly int _batchSize;
         private readonly BlockingCollection<InferenceTask> _taskQueue = new();
 
+        // 预计算输入维度：14通道 * 10行 * 9列 = 1260
+        private const int INPUT_SIZE = 14 * 10 * 9;
+
         public BatchInference(CChessNet model, int batchSize = 16)
         {
             _model = model;
@@ -23,10 +26,14 @@ namespace ChineseChessAI.MCTS
             Task.Run(InferenceLoop);
         }
 
-        public async Task<(float[] Policy, float Value)> PredictAsync(torch.Tensor stateTensor)
+        // 修改：接收 float[] 数组，彻底切断 Tensor 的线程依赖
+        public async Task<(float[] Policy, float Value)> PredictAsync(float[] inputData)
         {
+            if (inputData.Length != INPUT_SIZE)
+                throw new ArgumentException($"输入数据长度错误，期望 {INPUT_SIZE}，实际 {inputData.Length}");
+
             var tcs = new TaskCompletionSource<(float[], float)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _taskQueue.Add(new InferenceTask(stateTensor, tcs));
+            _taskQueue.Add(new InferenceTask(inputData, tcs));
             return await tcs.Task;
         }
 
@@ -66,39 +73,44 @@ namespace ChineseChessAI.MCTS
 
         private void ProcessBatch(List<InferenceTask> tasks)
         {
-            // _model 已经在 GPU 上了
             _model.eval();
 
             using (var scope = torch.NewDisposeScope())
             {
                 using (var noGrad = torch.no_grad())
                 {
-                    // 【关键步骤】
-                    // 1. 在 CPU 上合并所有小 Tensor (tasks[i].Input 都在 CPU)
-                    var inputCPU = torch.cat(tasks.ConvertAll(t => t.Input), 0);
+                    // 1. 构建 Batch 数据 (在 CPU 端拼装大数组)
+                    int batchCount = tasks.Count;
+                    float[] batchData = new float[batchCount * INPUT_SIZE];
 
-                    // 2. 统一移动到 GPU (仅发生一次 CPU->GPU 拷贝)
+                    // 使用 BlockCopy 极速拷贝
+                    for (int i = 0; i < batchCount; i++)
+                    {
+                        Buffer.BlockCopy(tasks[i].InputData, 0, batchData, i * INPUT_SIZE * sizeof(float), INPUT_SIZE * sizeof(float));
+                    }
+
+                    // 2. 创建 Tensor 并一次性传输到 GPU
+                    // 注意形状：[Batch, 14, 10, 9]
+                    var inputCPU = torch.tensor(batchData, new long[] { batchCount, 14, 10, 9 });
                     var inputGPU = torch.cuda.is_available() ? inputCPU.to(DeviceType.CUDA) : inputCPU;
 
-                    // 3. 执行推理
+                    // 3. 推理
                     var (pLogitsGPU, vTensorsGPU) = _model.forward(inputGPU);
 
                     // 4. 结果搬回 CPU
                     var pLogitsCPU = pLogitsGPU.cpu();
                     var vTensorsCPU = vTensorsGPU.cpu();
 
-                    for (int i = 0; i < tasks.Count; i++)
+                    for (int i = 0; i < batchCount; i++)
                     {
-                        // 5. 安全地转换为数组
                         float[] policy = pLogitsCPU[i].to(ScalarType.Float32).data<float>().ToArray();
                         float value = vTensorsCPU[i].to(ScalarType.Float32).item<float>();
-
                         tasks[i].Tcs.SetResult((policy, value));
                     }
                 }
             }
         }
 
-        private record InferenceTask(torch.Tensor Input, TaskCompletionSource<(float[], float)> Tcs);
+        private record InferenceTask(float[] InputData, TaskCompletionSource<(float[], float)> Tcs);
     }
 }
