@@ -188,5 +188,13 @@ namespace ChineseChessAI.Core
             CalculateFullHash();
             _history.Clear();
         }
+
+        // Core/Board.cs
+        public string GetMoveHistoryString()
+        {
+            // 将栈转换为列表并反转，以按时间顺序排列走法
+            var moves = _history.Select(s => new Move(s.From, s.To)).Reverse().ToList();
+            return string.Join(" ", moves.Select(m => m.ToString()));
+        }
     }
 }

@@ -8,10 +8,9 @@ namespace ChineseChessAI.Training
     public class ReplayBuffer
     {
         private readonly int _capacity;
-        // 修复：使用定长数组而非 List，避免 RemoveAt(0) 的巨大开销
         private readonly TrainingExample[] _buffer;
         private int _count = 0;
-        private int _head = 0; // 循环指针
+        private int _head = 0;
         private readonly Random _random = new Random();
 
         public ReplayBuffer(int capacity = 100000)
@@ -20,11 +19,11 @@ namespace ChineseChessAI.Training
             _buffer = new TrainingExample[capacity];
         }
 
-        public void AddExamples(List<TrainingExample> newExamples)
+        // 【修复】重命名为 AddRange 以匹配 MainWindow 的调用
+        public void AddRange(List<TrainingExample> newExamples)
         {
             foreach (var ex in newExamples)
             {
-                // 使用循环数组逻辑：O(1) 复杂度覆盖旧数据
                 _buffer[_head] = ex;
                 _head = (_head + 1) % _capacity;
 
