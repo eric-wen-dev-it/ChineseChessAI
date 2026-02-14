@@ -9,11 +9,10 @@ using ChineseChessAI.NeuralNetwork;
 
 namespace ChineseChessAI.Training
 {
-    public record TrainingExample(
-        float[] State,
-        float[] Policy,
-        float Value
-    );
+    public record TrainingExample(float[] State, float[] Policy, float Value);
+
+    // 【新增】封装对弈结果，便于 UI 获取信息
+    public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount);
 
     public class SelfPlay
     {
@@ -27,19 +26,17 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        /// <summary>
-        /// 运行一局完整的自我对弈，直到分出胜负或判定和棋
-        /// </summary>
-        public async Task<List<TrainingExample>> RunGameAsync(Action<Board>? onMovePerformed = null)
+        // 【修改】返回类型改为 Task<GameResult>
+        public async Task<GameResult> RunGameAsync(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
 
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             int moveCount = 0;
-            float finalResult = 0; // 0: 和棋, 1: 红胜, -1: 黑胜
+            float finalResult = 0;
+            string endReason = "进行中";
 
-            // 循环直到触发 break 结束游戏
             while (true)
             {
                 try
@@ -48,49 +45,42 @@ namespace ChineseChessAI.Training
                     {
                         bool isRed = board.IsRedTurn;
 
-                        // 1. 获取当前状态特征编码
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        // 2. MCTS 搜索获取走法概率分布
                         (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
 
-                        // 3. 规范化 Policy 数据（黑方视角翻转）
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        // 4. 选择动作执行（前30步随机采样增加探索性）
                         Move move = (moveCount < 30) ? SelectMoveBySampling(piData) : bestMove;
 
                         board.Push(move.From, move.To);
                         onMovePerformed?.Invoke(board);
                         moveCount++;
 
-                        // --- 5. 终局判定逻辑 ---
-
-                        // A. 胜负判定：检查是否存在合法走法（绝杀或困毙）
-                        if (_generator.GenerateLegalMoves(board).Count == 0)
+                        // --- 终局判定与原因细化 ---
+                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        if (legalMoves.Count == 0)
                         {
-                            // 当前轮到走棋的一方已无路可走，判负
+                            // 区分绝杀（在将军状态下无棋可走）和困毙（非将军状态下无棋可走）
+                            bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
+                            endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
-                            Console.WriteLine($"[对弈结束] 胜负已分：{(finalResult > 0 ? "红胜" : "黑胜")}，总步数: {moveCount}");
                             break;
                         }
 
-                        // B. 和棋判定：三次重复局面
-                        // 由于 MoveGenerator 已经过滤了非法的长将/长捉，若仍出现 3 次重复，则属于合法和棋
                         if (board.GetRepetitionCount() >= 3)
                         {
+                            endReason = "三次重复局面";
                             finalResult = 0.0f;
-                            Console.WriteLine($"[对弈结束] 检测到三次重复局面，判定和棋，总步数: {moveCount}");
                             break;
                         }
 
-                        // C. 和棋判定：达到自然限着（防止早期模型死循环）
                         if (moveCount >= 500)
                         {
+                            endReason = "步数达到 500 步限制";
                             finalResult = 0.0f;
-                            Console.WriteLine($"[对弈结束] 达到最大步数限制，判定和棋");
                             break;
                         }
                     }
@@ -102,10 +92,10 @@ namespace ChineseChessAI.Training
                 }
             }
 
-            // 输出中文格式棋谱（如：兵1进1）
-            Console.WriteLine($"[最终棋谱] {board.GetMoveHistoryString()}");
+            string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
 
-            return FinalizeData(gameHistory, finalResult);
+            // 返回包含所有信息的 GameResult
+            return new GameResult(FinalizeData(gameHistory, finalResult), endReason, resultStr, moveCount);
         }
 
         private Move SelectMoveBySampling(float[] piData)
@@ -138,13 +128,35 @@ namespace ChineseChessAI.Training
             return flippedPi;
         }
 
+        // 位置：Training/SelfPlay.cs 类内部
+
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult)
         {
             var examples = new List<TrainingExample>();
+
+            // 【关键修改】设置和棋惩罚值
+            // 推荐值：-0.05 到 -0.1
+            // 逻辑：如果 AI 发现这一步走完后预估价值是 -0.1 (和棋)，而另一步是 -0.5 (输棋)，它会选和棋。
+            // 但如果它发现有一步是 0.1 (微弱优势)，它就会放弃和棋去拼一把。
+            float drawPenalty = -0.1f;
+
             foreach (var step in history)
             {
-                // Value 始终针对当前走棋方：胜则为1，负则为-1，和则为0
-                float valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
+                float valueForCurrentPlayer;
+
+                // 判定：如果 finalResult 为 0，说明是和棋（三次重复或步数耗尽）
+                if (Math.Abs(finalResult) < 0.001f)
+                {
+                    // 无论当前是红方还是黑方，和棋都记为负分
+                    valueForCurrentPlayer = drawPenalty;
+                }
+                else
+                {
+                    // 有胜负：红胜(1) 或 黑胜(-1)
+                    // 逻辑不变：如果当前是红方且红胜，得1分；如果当前是黑方且红胜，得-1分
+                    valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
+                }
+
                 examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
             }
             return examples;
