@@ -33,7 +33,7 @@ namespace ChineseChessAI.MCTS
             var root = new MCTSNode(null, 1.0);
 
             // 动态调整并行度，避免小模拟次数下线程开销过大
-            int parallelTasks = 16;
+            int parallelTasks = 4;
             int simsPerTask = simulations / parallelTasks;
             if (simsPerTask < 1)
             {

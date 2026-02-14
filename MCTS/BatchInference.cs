@@ -25,7 +25,8 @@ namespace ChineseChessAI.MCTS
 
         public async Task<(float[] Policy, float Value)> PredictAsync(torch.Tensor stateTensor)
         {
-            var tcs = new TaskCompletionSource<(float[], float)>();
+            // 【优化】让 await 之后的代码在线程池运行，不要阻塞推理线程
+            var tcs = new TaskCompletionSource<(float[], float)>(TaskCreationOptions.RunContinuationsAsynchronously);
             _taskQueue.Add(new InferenceTask(stateTensor, tcs));
             return await tcs.Task;
         }
@@ -84,14 +85,21 @@ namespace ChineseChessAI.MCTS
                     // 合并 Batch
                     var input = torch.cat(tasks.ConvertAll(t => t.Input), 0);
 
-                    // 前向推理 (这里最容易抛出 OOM 或 ExternalException)
+                    // 前向推理
                     var (pLogits, vTensors) = _model.forward(input);
+
+                    // 【核心修复】先将结果批量移动到 CPU，避免多次 GPU-CPU 通信开销，并防止非法访问
+                    var pLogitsCPU = pLogits.cpu();
+                    var vTensorsCPU = vTensors.cpu();
 
                     for (int i = 0; i < tasks.Count; i++)
                     {
-                        // 数据回传 CPU
-                        float[] policy = pLogits[i].to(ScalarType.Float32).data<float>().ToArray();
-                        float value = vTensors[i].to(ScalarType.Float32).item<float>();
+                        // 从 CPU Tensor 读取数据是安全的
+                        // 注意：这里 pLogitsCPU[i] 仍然是一个 Tensor 切片，需要确保数据类型正确
+                        float[] policy = pLogitsCPU[i].to(ScalarType.Float32).data<float>().ToArray();
+
+                        // item<float>() 对 CPU Tensor 也是安全的
+                        float value = vTensorsCPU[i].to(ScalarType.Float32).item<float>();
 
                         tasks[i].Tcs.SetResult((policy, value));
                     }
