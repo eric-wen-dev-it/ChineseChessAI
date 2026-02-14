@@ -189,12 +189,101 @@ namespace ChineseChessAI.Core
             _history.Clear();
         }
 
-        // Core/Board.cs
+
+
+        // 修改原有的 GetMoveHistoryString 方法以显示新格式
         public string GetMoveHistoryString()
         {
-            // 将栈转换为列表并反转，以按时间顺序排列走法
-            var moves = _history.Select(s => new Move(s.From, s.To)).Reverse().ToList();
-            return string.Join(" ", moves.Select(m => m.ToString()));
+            // 需要通过模拟走法来正确获取每一步执行前的棋子位置
+            var tempBoard = new Board();
+            var history = _history.Reverse().ToList();
+            var result = new List<string>();
+
+            foreach (var state in history)
+            {
+                result.Add(tempBoard.GetChineseMoveName(state.From, state.To));
+                tempBoard.Push(state.From, state.To);
+            }
+
+            return string.Join(" ", result);
         }
+
+        // 新增：带步数编号的易读格式（用于 UI 显示）
+        public string GetReadableMoveHistory()
+        {
+            var moves = _history.Select(s => new Move(s.From, s.To)).Reverse().ToList();
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < moves.Count; i++)
+            {
+                if (i % 2 == 0)
+                    sb.Append($"{i / 2 + 1}. ");
+                sb.Append($"{moves[i]} ");
+            }
+            return sb.ToString().Trim();
+        }
+
+        // Core/Board.cs
+
+        /// <summary>
+        /// 获取单步走法的中文标准表示（如：兵1进1）
+        /// </summary>
+        public string GetChineseMoveName(int from, int to)
+        {
+            sbyte piece = _cells[from];
+            if (piece == 0)
+                return "";
+
+            bool isRed = piece > 0;
+            int fromR = from / 9;
+            int fromC = from % 9;
+            int toR = to / 9;
+            int toC = to % 9;
+
+            // 1. 获取棋子名称
+            string name = GetPieceName(piece);
+
+            // 2. 计算原始纵线 (1-9)
+            // 红方：右(9)->左(0) 映射为 1-9
+            // 黑方：左(0)->右(9) 映射为 1-9
+            int fromCol = isRed ? (9 - fromC) : (fromC + 1);
+            int toCol = isRed ? (9 - toC) : (toC + 1);
+
+            // 3. 确定动作
+            string action = "";
+            if (toR == fromR)
+                action = "平";
+            else if (isRed)
+                action = (toR < fromR) ? "进" : "退";
+            else
+                action = (toR > fromR) ? "进" : "退";
+
+            // 4. 计算目标值 (纵线号或距离)
+            int targetValue;
+            int type = Math.Abs(piece);
+
+            // 马(4)、象(3)、士(2) 永远走斜线，最后一位是目标纵线
+            if (type == 2 || type == 3 || type == 4)
+            {
+                targetValue = toCol;
+            }
+            else // 车、炮、兵、将
+            {
+                if (action == "平")
+                    targetValue = toCol;
+                else
+                    targetValue = Math.Abs(toR - fromR); // 进退则记录步数
+            }
+
+            return $"{name}{fromCol}{action}{targetValue}";
+        }
+
+        private string GetPieceName(sbyte p)
+        {
+            string[] namesRed = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
+            string[] namesBlack = { "", "将", "士", "象", "马", "车", "炮", "卒" };
+            return p > 0 ? namesRed[p] : namesBlack[-p];
+        }
+
+       
     }
 }

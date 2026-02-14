@@ -22,22 +22,25 @@ namespace ChineseChessAI
         {
             InitializeComponent();
             InitializeBoardUI();
+            // 订阅加载事件以绘制棋盘线条
             this.Loaded += (s, e) => DrawBoardLines();
         }
 
         private void InitializeBoardUI()
         {
             ChessBoardGrid.Children.Clear();
+            Style pieceStyle = (Style)this.FindResource("ChessPieceStyle");
+
             for (int i = 0; i < 90; i++)
             {
                 var btn = new Button
                 {
-                    Style = null,
-                    Background = Brushes.Transparent,
-                    BorderThickness = new Thickness(0),
+                    Style = pieceStyle,
                     Content = "",
-                    FontSize = 24,
-                    FontWeight = FontWeights.Bold
+                    FontSize = 26,
+                    FontFamily = new FontFamily("KaiTi"),
+                    FontWeight = FontWeights.Bold,
+                    Margin = new Thickness(2)
                 };
                 _cellButtons[i] = btn;
                 ChessBoardGrid.Children.Add(btn);
@@ -46,23 +49,30 @@ namespace ChineseChessAI
 
         private void DrawBoardLines()
         {
+            if (ChessLinesCanvas == null)
+                return;
             ChessLinesCanvas.Children.Clear();
+
             double w = ChessLinesCanvas.ActualWidth;
             double h = ChessLinesCanvas.ActualHeight;
             double stepX = w / 9;
             double stepY = h / 10;
 
-            // 绘制横线与纵线
+            // 绘制横线
             for (int i = 0; i < 10; i++)
-                DrawLine(0, i * stepY + stepY / 2, w, i * stepY + stepY / 2);
+                DrawLine(stepX / 2, i * stepY + stepY / 2, w - stepX / 2, i * stepY + stepY / 2);
+
+            // 绘制纵线 (中场断开)
             for (int i = 0; i < 9; i++)
             {
-                DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, h / 2 - stepY / 2); // 上半场
-                DrawLine(i * stepX + stepX / 2, h / 2 + stepY / 2, i * stepX + stepX / 2, h - stepY / 2); // 下半场
+                if (i == 0 || i == 8)
+                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, h - stepY / 2);
+                else
+                {
+                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, 4 * stepY + stepY / 2);
+                    DrawLine(i * stepX + stepX / 2, 5 * stepY + stepY / 2, i * stepX + stepX / 2, h - stepY / 2);
+                }
             }
-            // 补全两侧边缘纵线
-            DrawLine(stepX / 2, stepY / 2, stepX / 2, h - stepY / 2);
-            DrawLine(w - stepX / 2, stepY / 2, w - stepX / 2, h - stepY / 2);
 
             // 绘制九宫格斜线
             DrawLine(3 * stepX + stepX / 2, stepY / 2, 5 * stepX + stepX / 2, 2 * stepY + stepY / 2);
@@ -73,9 +83,11 @@ namespace ChineseChessAI
 
         private void DrawLine(double x1, double y1, double x2, double y2)
         {
-            var line = new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = Brushes.Black, StrokeThickness = 1.5 };
+            var line = new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = Brushes.Black, StrokeThickness = 1.2 };
             ChessLinesCanvas.Children.Add(line);
         }
+
+        // MainWindow.xaml.cs
 
         private void UpdateBoard(Board board)
         {
@@ -87,6 +99,8 @@ namespace ChineseChessAI
                     _cellButtons[i].Content = GetPieceChar(p);
                     _cellButtons[i].Foreground = p > 0 ? Brushes.Red : Brushes.Black;
                 }
+
+                // 自动更新为 "兵1进1" 格式的序列
                 MoveListLog.Text = board.GetMoveHistoryString();
             });
         }
@@ -95,9 +109,9 @@ namespace ChineseChessAI
         {
             if (p == 0)
                 return "";
-            string[] names = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
+            string[] namesRed = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
             string[] namesBlack = { "", "将", "士", "象", "马", "车", "炮", "卒" };
-            return p > 0 ? names[p] : namesBlack[-p];
+            return p > 0 ? namesRed[p] : namesBlack[-p];
         }
 
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
@@ -124,18 +138,19 @@ namespace ChineseChessAI
                     for (int iter = 1; iter <= 1000; iter++)
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
-
-                        // 自我对弈阶段
                         var examples = await selfPlay.RunGameAsync(b => UpdateBoard(b));
                         buffer.AddRange(examples);
-                        Log($"[对弈] 结束，收集样本数: {examples.Count} (Buffer总数: {buffer.Count})");
+                        Log($"[对弈] 结束，收集样本数: {examples.Count}");
 
-                        // 训练阶段
                         if (buffer.Count >= 1024)
                         {
                             Log("[训练] 开始梯度下降...");
+                            // 进行训练并回传 Loss
                             float loss = trainer.Train(buffer.Sample(1024), epochs: 5);
-                            Dispatcher.Invoke(() => LossLabel.Text = $"平均 Loss: {loss:F4}");
+
+                            // 修复点：确保 LossLabel 被正确引用
+                            Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
+
                             model.save("best_model.pt");
                             Log($"[训练] 完成，Loss: {loss:F4}");
                         }
@@ -150,8 +165,7 @@ namespace ChineseChessAI
 
         private void Log(string msg)
         {
-            Dispatcher.Invoke(() =>
-            {
+            Dispatcher.Invoke(() => {
                 LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {msg}\n");
                 LogBox.ScrollToEnd();
             });
