@@ -130,31 +130,49 @@ namespace ChineseChessAI.MCTS
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
+            int numThreads = 4;
+            int baseSims = simulations / numThreads;
+            int extraSims = simulations % numThreads;
 
-            var tasks = Enumerable.Range(0, 4).Select(_ => Task.Run(async () => {
-                for (int i = 0; i < simulations / 4; i++)
+            var tasks = Enumerable.Range(0, numThreads).Select(t => Task.Run(async () =>
+            {
+                // 确保总数准确，将余数分配给第一个线程
+                int taskSims = (t == 0) ? baseSims + extraSims : baseSims;
+
+                for (int i = 0; i < taskSims; i++)
                 {
+                    // SearchAsync 内部应保持对 root 节点的并发安全操作
                     await SearchAsync(root, CloneBoard(board));
                 }
             }));
+
             await Task.WhenAll(tasks);
 
+            // 检查是否有合法走法
             if (root.Children.IsEmpty)
             {
                 var legalMoves = _generator.GenerateLegalMoves(board);
+                if (legalMoves.Count == 0)
+                    throw new Exception("无合法走法");
                 return (legalMoves[0], new float[8100]);
             }
 
+            // 计算概率分布 (Pi)
             float[] piData = new float[8100];
-            double totalVisits = root.Children.Sum(x => x.Value.N);
+            // 使用 Sum() 统计所有子节点的访问次数总和
+            double totalVisits = root.Children.Values.Sum(x => x.N);
 
             foreach (var child in root.Children)
             {
                 int moveIdx = child.Key.ToNetworkIndex();
                 if (moveIdx >= 0 && moveIdx < 8100)
+                {
+                    // 归一化访问次数：pi = N_i / Total_N
                     piData[moveIdx] = (float)(child.Value.N / (totalVisits > 0 ? totalVisits : 1));
+                }
             }
 
+            // 选择访问次数最多的走法作为最佳走法
             var bestMove = root.Children.OrderByDescending(x => x.Value.N).First().Key;
             return (bestMove, piData);
         }

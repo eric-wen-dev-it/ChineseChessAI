@@ -47,7 +47,7 @@ namespace ChineseChessAI.Training
                         float[] stateData = stateTensor.squeeze(0).data<float>().ToArray();
 
                         // 2. MCTS 搜索 (得到的是基于真实棋盘的绝对坐标 Policy)
-                        (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
+                        (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 8);
 
                         // 3. 关键修复：如果当前是黑方，Input 已经被翻转了，Output (Policy) 也必须对应翻转
                         // 否则神经网络会学习到“看着红方的棋盘，却走出黑方的坐标”，导致逻辑错乱
