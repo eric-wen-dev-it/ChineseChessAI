@@ -6,7 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq; // 引入 Linq 以支持 Count()
+using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -27,7 +27,7 @@ namespace ChineseChessAI
         {
             InitializeComponent();
             InitBoardUi();
-            CheckGpuStatus(); // 确保构造函数调用此方法
+            CheckGpuStatus();
         }
 
         private void InitBoardUi()
@@ -48,7 +48,6 @@ namespace ChineseChessAI
             }
         }
 
-        // 将 Board 状态绘制到 UI
         private void DrawBoard(sbyte[] pieces)
         {
             for (int i = 0; i < 90; i++)
@@ -67,7 +66,6 @@ namespace ChineseChessAI
                 txt.Foreground = piece > 0 ? Brushes.Red : Brushes.Black;
             }
         }
-
 
         private void CheckGpuStatus()
         {
@@ -90,60 +88,57 @@ namespace ChineseChessAI
             StartBtn.IsEnabled = false;
 
             UpdateUI("=== 进化循环已启动 ===");
-
-            // 启动后台线程执行死循环，防止 UI 卡死
             await Task.Run(() => RunEvolutionLoop());
         }
 
         private async void RunEvolutionLoop()
         {
             UpdateUI("[系统] 启动进化训练流程...");
-            Debug.WriteLine("[系统] 启动进化训练流程...");
 
             try
             {
                 using (var outerScope = torch.NewDisposeScope())
                 {
                     UpdateUI("[初始化] 正在构建 CChessNet 模型...");
-                    Debug.WriteLine("[初始化] 正在构建 CChessNet 模型...");
-
-                    // 实例化模型（请确保 CChessNet.cs 内部已正确 RegisterModule）
                     var model = new CChessNet(numResBlocks: 10, numFilters: 128);
 
                     if (torch.cuda.is_available())
                     {
-                        UpdateUI("[硬件] 检测到 GPU，正在启用 CUDA 加速");
+                        UpdateUI("[硬件] 启用 CUDA 加速");
                         model.to(DeviceType.CUDA);
                     }
                     else
                     {
-                        UpdateUI("[硬件] 未检测到 GPU，使用 CPU 运行");
+                        UpdateUI("[硬件] 使用 CPU 运行");
                         model.to(DeviceType.CPU);
                     }
 
                     string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
                     if (File.Exists(modelPath))
                     {
-                        UpdateUI($"[加载] 发现权重文件，正在载入: {modelPath}");
+                        UpdateUI($"[加载] 载入权重: {modelPath}");
                         ModelManager.LoadModel(model, modelPath);
-
-                        // 【修复 A】加载后强制开启梯度，防止 backward 报错
-                        foreach (var param in model.parameters())
-                        {
-                            param.requires_grad = true;
-                        }
-                        UpdateUI("[系统] 已强制激活加载模型的参数梯度记录");
                     }
-                    else
+
+                    // ========================================================
+                    // 【核心修复步骤 1】：先开启梯度，确保所有参数变为可训练状态
+                    // ========================================================
+                    var parameters = model.parameters().ToList();
+                    foreach (var param in parameters)
                     {
-                        // 新模型也强制开启梯度
-                        foreach (var param in model.parameters())
-                        {
-                            param.requires_grad = true;
-                        }
-                        UpdateUI("[系统] 新模型已就绪并开启梯度记录");
+                        param.requires_grad = true;
+                    }
+                    UpdateUI($"[系统] 模型参数已激活，参数总数: {parameters.Count}");
+
+                    if (parameters.Count == 0)
+                    {
+                        UpdateUI("[致命错误] 无法识别模型参数！请检查 CChessNet.cs 内部注册逻辑。");
+                        return;
                     }
 
+                    // ========================================================
+                    // 【核心修复步骤 2】：在梯度开启后，再创建 Trainer（及优化器）
+                    // ========================================================
                     var trainer = new Trainer(model);
                     var buffer = new ReplayBuffer(capacity: 50000);
                     var engine = new MCTSEngine(model);
@@ -156,9 +151,9 @@ namespace ChineseChessAI
 
                         using (var iterScope = torch.NewDisposeScope())
                         {
-                            // --- 阶段 A: 多线程并行自我对弈 ---
+                            // 阶段 A: 自我对弈
                             var gameTasks = new List<Task<List<TrainingExample>>>();
-                            UpdateUI($"[对弈] 启动线程进行自我博弈...");
+                            UpdateUI($"[对弈] 启动线程中...");
 
                             for (int g = 1; g <= 3; g++)
                             {
@@ -172,8 +167,7 @@ namespace ChineseChessAI
                                             Action<Board>? moveCallback = null;
                                             if (gameId == 1)
                                             {
-                                                moveCallback = (currentBoard) =>
-                                                {
+                                                moveCallback = (currentBoard) => {
                                                     var boardSnapshot = currentBoard.GetState();
                                                     Dispatcher.BeginInvoke(new Action(() => DrawBoard(boardSnapshot)));
                                                 };
@@ -189,19 +183,18 @@ namespace ChineseChessAI
                                 }));
                             }
 
-                            UpdateUI("[同步] 等待所有对弈完成...");
                             var allGameResults = await Task.WhenAll(gameTasks);
                             foreach (var gameData in allGameResults)
                             {
                                 if (gameData != null)
                                     buffer.AddExamples(gameData);
                             }
-                            UpdateUI($"[缓存] 当前 Buffer 总数: {buffer.Count}");
+                            UpdateUI($"[缓存] Buffer 总数: {buffer.Count}");
 
-                            // --- 阶段 B: 神经网络训练 ---
+                            // 阶段 B: 训练
                             if (buffer.Count >= 256)
                             {
-                                UpdateUI("[训练] 满足样本量，开始梯度下降...");
+                                UpdateUI("[训练] 开始梯度下降...");
                                 double totalLoss = 0;
                                 int trainSteps = 20;
 
@@ -213,16 +206,10 @@ namespace ChineseChessAI
                                         {
                                             var (states, policies, values) = buffer.Sample(32);
 
-                                            // 【修复 B】训练前最后的诊断与自愈
-                                            var paramList = model.parameters().ToList();
-                                            if (paramList.Count == 0)
+                                            // 训练前最后的防御性检查
+                                            if (!model.parameters().First().requires_grad)
                                             {
-                                                UpdateUI("[致命错误] 模型参数数量为0，RegisterComponents 注册失败！");
-                                                break;
-                                            }
-                                            if (!paramList[0].requires_grad)
-                                            {
-                                                foreach (var p in paramList)
+                                                foreach (var p in model.parameters())
                                                     p.requires_grad = true;
                                             }
 
@@ -238,24 +225,24 @@ namespace ChineseChessAI
                                 UpdateUI($"[训练] 完毕，平均 Loss: {totalLoss / trainSteps:F4}");
                             }
 
-                            UpdateUI("[IO] 正在保存模型权重...");
+                            UpdateUI("[IO] 保存模型权重...");
                             ModelManager.SaveModel(model, modelPath);
 
                             iteration++;
-                            UpdateUI($"[清理] 第 {iteration - 1} 轮结束，显存已释放");
+                            UpdateUI($"[清理] 结束第 {iteration - 1} 轮");
                         }
                     }
                 }
             }
             catch (Exception ex)
             {
-                UpdateUI($"[全局错误] 进化循环崩溃: {ex.Message}");
-                Debug.WriteLine($"[全局错误] 崩溃堆栈: {ex.StackTrace}");
+                UpdateUI($"[全局错误] {ex.Message}");
+                Debug.WriteLine($"[全局错误] {ex.StackTrace}");
             }
             finally
             {
                 _isTraining = false;
-                UpdateUI("[系统] 训练流程已完全停止。");
+                UpdateUI("[系统] 流程已停止。");
                 Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
             }
         }
