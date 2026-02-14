@@ -34,24 +34,24 @@ namespace ChineseChessAI.Training
 
             var device = torch.cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
 
-            // 修复：不要对 input 使用 using，因为它们在 MainWindow 的 DisposeScope 中被管理
-            var x = states.to(device).to_type(ScalarType.Float32);
-            var y_policy = targetPolicies.to(device).to_type(ScalarType.Float32);
-            var y_value = targetValues.to(device).to_type(ScalarType.Float32);
+            // 将输入移动到计算设备
+            using var x = states.to(device).to_type(ScalarType.Float32);
+            using var y_p = targetPolicies.to(device).to_type(ScalarType.Float32);
+            using var y_v = targetValues.to(device).to_type(ScalarType.Float32);
 
-            // 执行推理
-            var (policyLogits, valuePred) = _model.forward(x);
+            // 前向传播
+            var (pLogits, vPred) = _model.forward(x);
 
-            // 损失计算
-            var vLoss = torch.nn.functional.mse_loss(valuePred, y_value.view(-1, 1));
-            var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
-            var pLoss = -(y_policy * logProbs).sum(1).mean();
+            // 损失函数
+            using var vLoss = torch.nn.functional.mse_loss(vPred, y_v.view(-1, 1));
+            using var logSoftmax = torch.nn.functional.log_softmax(pLogits, 1);
+            using var pLoss = -(y_p * logSoftmax).sum(1).mean();
 
-            var totalLoss = vLoss + pLoss;
+            using var totalLoss = vLoss + pLoss;
 
             if (!totalLoss.requires_grad)
             {
-                throw new Exception("计算图断裂！此时请务必确认 MainWindow 中的 parameters 循环是否执行成功。");
+                throw new Exception("严重错误：计算图断裂。请确认模型参数已开启 requires_grad。");
             }
 
             totalLoss.backward();
