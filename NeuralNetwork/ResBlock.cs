@@ -29,13 +29,13 @@ namespace ChineseChessAI.NeuralNetwork
 
         public override Tensor forward(Tensor x)
         {
-            // 极简计算链，确保 grad_fn 连贯
-            using var h1 = conv1.forward(x);
-            using var h2 = bn1.forward(h1);
-            using var h3 = torch.nn.functional.relu(h2);
+            // 严禁在 forward 内部使用 using 或 Dispose
+            var h1 = conv1.forward(x);
+            var h2 = bn1.forward(h1);
+            var h3 = torch.nn.functional.relu(h2);
 
-            using var h4 = conv2.forward(h3);
-            using var h5 = bn2.forward(h4);
+            var h4 = conv2.forward(h3);
+            var h5 = bn2.forward(h4);
 
             // 残差连接
             var sum = h5.add(x);

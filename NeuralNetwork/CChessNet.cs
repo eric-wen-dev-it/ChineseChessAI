@@ -72,20 +72,18 @@ namespace ChineseChessAI.NeuralNetwork
             // 穿过所有残差块
             foreach (var block in resBlockList)
             {
-                var nextH = block.forward(h);
-                h.Dispose(); // 手动清理旧特征图，节省显存
-                h = nextH;
+                h = block.forward(h); // 直接覆盖引用，不要调用 Dispose()
             }
 
-            // 策略分支
-            using var ph1 = torch.nn.functional.relu(p_bn.forward(p_conv.forward(h)));
-            using var ph2 = ph1.flatten();
+            // 策略分支（移除 using）
+            var ph1 = torch.nn.functional.relu(p_bn.forward(p_conv.forward(h)));
+            var ph2 = ph1.flatten();
             var pLogits = p_fc.forward(ph2);
 
-            // 价值分支
-            using var vh1 = torch.nn.functional.relu(v_bn.forward(v_conv.forward(h)));
-            using var vh2 = vh1.flatten();
-            using var vh3 = torch.nn.functional.relu(v_fc1.forward(vh2));
+            // 价值分支（移除 using）
+            var vh1 = torch.nn.functional.relu(v_bn.forward(v_conv.forward(h)));
+            var vh2 = vh1.flatten();
+            var vh3 = torch.nn.functional.relu(v_fc1.forward(vh2));
             var vPred = torch.tanh(v_fc2.forward(vh3));
 
             return (pLogits, vPred);
