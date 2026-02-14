@@ -1,4 +1,6 @@
-﻿using static TorchSharp.torch;
+﻿using TorchSharp;
+using TorchSharp.Modules; // 显式引入以确保 Module 基类识别
+using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
 
 public class ResBlock : Module<Tensor, Tensor>
@@ -17,17 +19,30 @@ public class ResBlock : Module<Tensor, Tensor>
         bn2 = BatchNorm2d(channels);
         relu = ReLU();
 
-        // 【关键步】必须显式注册，否则其参数不会被 CChessNet 识别
+        // 【最稳妥的注册方式】显式注册每一个层，确保它们被父模块 CChessNet 的 parameters() 捕获
+        register_module("conv1", conv1);
+        register_module("bn1", bn1);
+        register_module("conv2", conv2);
+        register_module("bn2", bn2);
+        register_module("relu", relu);
+
         RegisterComponents();
     }
 
     public override Tensor forward(Tensor x)
     {
-        // 核心修复：直接使用算子，不要进行任何可能断开梯度的临时转换
-        var outTensor = relu.forward(bn1.forward(conv1.forward(x)));
-        outTensor = bn2.forward(conv2.forward(outTensor));
+        // 核心：保持计算链的绝对连贯，不要在中间手动 Dispose 任何张量
+        // 第一层卷积 -> BN -> ReLU
+        var h = relu.forward(bn1.forward(conv1.forward(x)));
 
-        // 必须通过 add 方法合并，并再次 ReLU
-        return relu.forward(outTensor.add(x));
+        // 第二层卷积 -> BN
+        var outTensor = bn2.forward(conv2.forward(h));
+
+        // 残差连接：x (原始输入) + outTensor (处理后的特征)
+        // 使用 .add(x) 是正确的，这会建立加法节点的梯度联系
+        var residual = outTensor.add(x);
+
+        // 最后一次激活并返回
+        return relu.forward(residual);
     }
 }

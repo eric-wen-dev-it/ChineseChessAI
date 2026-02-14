@@ -63,29 +63,26 @@ namespace ChineseChessAI.NeuralNetwork
 
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 确保输入设备一致
+            // 1. 确保输入设备一致
             var currentDevice = this.convBlock.parameters().First().device;
             if (x.device.type != currentDevice.type)
                 x = x.to(currentDevice);
 
-            // 执行计算
-            using (var out1 = convBlock.forward(x))
+            // 2. 执行卷积块 (不要使用 using)
+            var outTensor = convBlock.forward(x);
+
+            // 3. 依次通过残差块 (不要在循环中 Dispose 中间变量)
+            for (int i = 0; i < resBlockList.Count; i++)
             {
-                var current = out1;
-                // 核心修复：依次通过残差块，必须保留张量引用
-                for (int i = 0; i < resBlockList.Count; i++)
-                {
-                    var next = resBlockList[i].forward(current);
-                    // 只有在不是第一层时才尝试 dispose 旧层，但由于我们要保留梯度，
-                    // 建议在训练模式下减少手动 dispose 以免切断计算图
-                    current = next;
-                }
-
-                var policy = policyHead.forward(current);
-                var value = valueHead.forward(current);
-
-                return (policy, value);
+                outTensor = resBlockList[i].forward(outTensor);
             }
+
+            // 4. 计算策略头和价值头
+            var policy = policyHead.forward(outTensor);
+            var value = valueHead.forward(outTensor);
+
+            // 5. 返回元组，TorchSharp 会自动管理这些张量的生命周期直至 backward 完成
+            return (policy, value);
         }
     }
 }
