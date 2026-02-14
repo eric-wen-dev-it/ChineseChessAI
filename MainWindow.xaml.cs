@@ -257,7 +257,7 @@ namespace ChineseChessAI
                             var gameTasks = new List<Task<List<TrainingExample>>>();
                             UpdateUI($"[对弈] 启动线程中...");
 
-                            for (int g = 1; g <= 3; g++)
+                            for (int g = 1; g <= 1; g++)
                             {
                                 int gameId = g;
                                 gameTasks.Add(Task.Run(async () =>

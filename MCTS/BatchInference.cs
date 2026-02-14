@@ -35,16 +35,40 @@ namespace ChineseChessAI.MCTS
             while (true)
             {
                 var batchTasks = new List<InferenceTask>();
+
+                // 1. 尝试获取第一个任务（阻塞等待）
                 if (_taskQueue.TryTake(out var firstTask, Timeout.Infinite))
                 {
                     batchTasks.Add(firstTask);
+
+                    // 2. 尝试获取后续任务以凑够 Batch（非阻塞）
                     while (batchTasks.Count < _batchSize && _taskQueue.TryTake(out var nextTask))
                     {
                         batchTasks.Add(nextTask);
                     }
                 }
+
                 if (batchTasks.Count > 0)
-                    ProcessBatch(batchTasks);
+                {
+                    // 【核心修复】添加 try-catch 块
+                    try
+                    {
+                        ProcessBatch(batchTasks);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 发生异常时，必须通知这一批的所有等待者，否则它们会永久卡死！
+                        Console.WriteLine($"[BatchInference Critical Error] {ex.Message}");
+                        foreach (var task in batchTasks)
+                        {
+                            // 将异常传递给 await 的调用方
+                            task.Tcs.TrySetException(ex);
+                        }
+
+                        // 可选：如果遇到 OOM 等严重错误，可能需要清理显存或暂停一下
+                        GC.Collect();
+                    }
+                }
             }
         }
 
@@ -52,18 +76,20 @@ namespace ChineseChessAI.MCTS
         {
             _model.eval();
 
-            // 核心修复：必须添加 DisposeScope，否则显存会无限增长直到崩溃
+            // 保持 DisposeScope，防止显存泄漏
             using (var scope = torch.NewDisposeScope())
             {
                 using (var noGrad = torch.no_grad())
                 {
-                    // 移除 AMP，使用标准 FP32 推理
+                    // 合并 Batch
                     var input = torch.cat(tasks.ConvertAll(t => t.Input), 0);
+
+                    // 前向推理 (这里最容易抛出 OOM 或 ExternalException)
                     var (pLogits, vTensors) = _model.forward(input);
 
                     for (int i = 0; i < tasks.Count; i++)
                     {
-                        // 立即转为 CPU 数组，切断 Tensor 句柄依赖
+                        // 数据回传 CPU
                         float[] policy = pLogits[i].to(ScalarType.Float32).data<float>().ToArray();
                         float value = vTensors[i].to(ScalarType.Float32).item<float>();
 
