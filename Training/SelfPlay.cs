@@ -34,7 +34,7 @@ namespace ChineseChessAI.Training
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             int moveCount = 0;
 
-            while (moveCount < 400)
+            while (moveCount < 100)
             {
                 try
                 {

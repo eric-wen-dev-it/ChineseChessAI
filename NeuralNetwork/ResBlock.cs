@@ -31,18 +31,15 @@ public class ResBlock : Module<Tensor, Tensor>
 
     public override Tensor forward(Tensor x)
     {
-        // 核心：保持计算链的绝对连贯，不要在中间手动 Dispose 任何张量
-        // 第一层卷积 -> BN -> ReLU
-        var h = relu.forward(bn1.forward(conv1.forward(x)));
+        // 保持计算链连贯，直接返回计算结果
+        var h = conv1.forward(x);
+        h = bn1.forward(h);
+        h = relu.forward(h);
+        h = conv2.forward(h);
+        h = bn2.forward(h);
 
-        // 第二层卷积 -> BN
-        var outTensor = bn2.forward(conv2.forward(h));
-
-        // 残差连接：x (原始输入) + outTensor (处理后的特征)
-        // 使用 .add(x) 是正确的，这会建立加法节点的梯度联系
-        var residual = outTensor.add(x);
-
-        // 最后一次激活并返回
+        // 残差相加并激活
+        var residual = h.add(x);
         return relu.forward(residual);
     }
 }
