@@ -62,24 +62,25 @@ namespace ChineseChessAI.NeuralNetwork
 
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 1. 确保输入张量在正确的设备上
+            // 1. 确保输入在模型所在的设备上
             var device = this.convBlock.parameters().First().device;
             var input = x.device.type != device.type ? x.to(device) : x;
 
-            // 2. 顺序传递，严禁在 forward 内部使用 using
+            // 2. 链式前向计算，严禁使用 using 或中间 Dispose
             var output = convBlock.forward(input);
 
-            // 3. 必须通过 ModuleList 循环，确保梯度链条连贯
+            // 3. 遍历残差块
             foreach (var block in resBlocks)
             {
                 output = block.forward(output);
             }
 
-            // 4. 计算两个输出头
-            var policy = policyHead.forward(output);
-            var value = valueHead.forward(output);
+            // 4. 计算头输出
+            var p = policyHead.forward(output);
+            var v = valueHead.forward(output);
 
-            return (policy, value);
+            return (p, v);
         }
+
     }
 }
