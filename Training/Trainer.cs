@@ -32,21 +32,36 @@ namespace ChineseChessAI.Training
             _model.train();
             _optimizer.zero_grad();
 
-            // 1. 前向传播
-            var (policyLogits, valuePred) = _model.forward(states);
+            // --- A. 核心修复：确保输入在正确的设备上并开启梯度追踪 ---
+            var device = torch.cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
 
-            // 2. 计算损失
-            var vLoss = torch.nn.functional.mse_loss(valuePred, targetValues.view(-1, 1));
-            var pLoss = ComputePolicyLoss(policyLogits, targetPolicies);
+            // 确保数据类型为 Float32 且在同一设备
+            // 显式先转设备，再转类型
+            using var x = states.to(device).to_type(ScalarType.Float32);
+            using var y_policy = targetPolicies.to(device).to_type(ScalarType.Float32);
+            using var y_value = targetValues.to(device).to_type(ScalarType.Float32);
+
+            // --- B. 前向传播 ---
+            var (policyLogits, valuePred) = _model.forward(x);
+
+            // --- C. 损失计算 (必须保持张量计算，不能转回数组) ---
+            // 价值损失
+            var vLoss = torch.nn.functional.mse_loss(valuePred, y_value.view(-1, 1));
+
+            // 策略损失 (手动实现交叉熵以确保稳定性)
+            var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
+            var pLoss = -(y_policy * logProbs).sum(1).mean();
+
             var totalLoss = vLoss + pLoss;
 
-            // 3. 反向传播
-            // 确保 totalLoss 本身需要梯度
+            // --- D. 诊断 ---
             if (!totalLoss.requires_grad)
             {
-                throw new Exception("Loss tensor does not require grad. 计算图断裂！");
+                // 这是一个极端情况：如果这里还是断了，说明 CChessNet 的 forward 内部有问题
+                throw new Exception("计算图在 forward 阶段断裂。请检查 CChessNet 的层是否正确 RegisterModule。");
             }
 
+            // --- E. 反向传播与更新 ---
             totalLoss.backward();
             _optimizer.step();
 
