@@ -29,31 +29,29 @@ namespace ChineseChessAI.Training
 
         public double TrainStep(Tensor states, Tensor targetPolicies, Tensor targetValues)
         {
-            // 核心：强制开启训练模式，重置 BatchNorm 状态
             _model.train();
             _optimizer.zero_grad();
 
             var device = torch.cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
 
-            // 显式转换并确保不切断梯度链
-            using var x = states.to(device).to_type(ScalarType.Float32);
-            using var y_policy = targetPolicies.to(device).to_type(ScalarType.Float32);
-            using var y_value = targetValues.to(device).to_type(ScalarType.Float32);
+            // 修复：不要对 input 使用 using，因为它们在 MainWindow 的 DisposeScope 中被管理
+            var x = states.to(device).to_type(ScalarType.Float32);
+            var y_policy = targetPolicies.to(device).to_type(ScalarType.Float32);
+            var y_value = targetValues.to(device).to_type(ScalarType.Float32);
 
-            // 前向传播
+            // 执行推理
             var (policyLogits, valuePred) = _model.forward(x);
 
-            // 损失计算：确保操作都在张量上完成
+            // 损失计算
             var vLoss = torch.nn.functional.mse_loss(valuePred, y_value.view(-1, 1));
             var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
             var pLoss = -(y_policy * logProbs).sum(1).mean();
 
             var totalLoss = vLoss + pLoss;
 
-            // 诊断检查
             if (!totalLoss.requires_grad)
             {
-                throw new Exception("计算图断裂！建议检查 ResBlock 内部是否包含 RegisterComponents。");
+                throw new Exception("计算图断裂！此时请务必确认 MainWindow 中的 parameters 循环是否执行成功。");
             }
 
             totalLoss.backward();

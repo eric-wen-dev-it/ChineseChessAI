@@ -10,7 +10,6 @@ namespace ChineseChessAI.NeuralNetwork
     public class CChessNet : Module<Tensor, (Tensor, Tensor)>
     {
         private Module<Tensor, Tensor> convBlock;
-        // 核心修复：必须使用 ModuleList，否则 forward 里的梯度链条无法自动连接
         private ModuleList<ResBlock> resBlocks;
         private Module<Tensor, Tensor> policyHead;
         private Module<Tensor, Tensor> valueHead;
@@ -48,13 +47,11 @@ namespace ChineseChessAI.NeuralNetwork
                 Tanh()
             );
 
-            // 显式注册所有顶层组件
+            // 统一显式注册，移除 RegisterComponents()
             register_module("convBlock", convBlock);
             register_module("resBlocks", resBlocks);
             register_module("policyHead", policyHead);
             register_module("valueHead", valueHead);
-
-            RegisterComponents();
 
             var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
             this.to(device);
@@ -62,25 +59,23 @@ namespace ChineseChessAI.NeuralNetwork
 
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 1. 确保输入在模型所在的设备上
             var device = this.convBlock.parameters().First().device;
             var input = x.device.type != device.type ? x.to(device) : x;
 
-            // 2. 链式前向计算，严禁使用 using 或中间 Dispose
+            // 核心前向传递链路
             var output = convBlock.forward(input);
 
-            // 3. 遍历残差块
+            // ModuleList 必须通过索引或 foreach 正确传递梯度
             foreach (var block in resBlocks)
             {
                 output = block.forward(output);
             }
 
-            // 4. 计算头输出
-            var p = policyHead.forward(output);
-            var v = valueHead.forward(output);
+            var policy = policyHead.forward(output);
+            var value = valueHead.forward(output);
 
-            return (p, v);
+            return (policy, value);
         }
-
     }
+
 }
