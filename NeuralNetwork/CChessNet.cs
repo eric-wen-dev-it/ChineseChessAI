@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic; // 必须引入
 using TorchSharp;
 using TorchSharp.Modules;
 using static TorchSharp.torch;
@@ -6,36 +7,31 @@ using static TorchSharp.torch.nn;
 
 namespace ChineseChessAI.NeuralNetwork
 {
-    /// <summary>
-    /// 基于 ResNet 的中国象棋双头神经网络
-    /// 修复了参数注册失效导致的梯度丢失问题
-    /// </summary>
     public class CChessNet : Module<Tensor, (Tensor, Tensor)>
     {
-        // 核心：移除 readonly，确保 RegisterComponents 或 register_module 能生效
         private Module<Tensor, Tensor> convBlock;
-        private ModuleList<ResBlock> resBlocks;
+        // 核心修复：显式定义残差块数组，方便 RegisterComponents 扫描
+        private List<ResBlock> resBlockList;
         private Module<Tensor, Tensor> policyHead;
         private Module<Tensor, Tensor> valueHead;
 
         public CChessNet(int numResBlocks = 10, int numFilters = 128) : base("CChessNet")
         {
-            // 1. 卷积块定义
             convBlock = Sequential(
                 Conv2d(14, numFilters, 3, 1, 1, bias: false),
                 BatchNorm2d(numFilters),
                 ReLU()
             );
 
-            // 2. 残差块组定义
-            resBlocks = new ModuleList<ResBlock>();
+            resBlockList = new List<ResBlock>();
             for (int i = 0; i < numResBlocks; i++)
             {
-                // 注意：ResBlock 内部也必须包含 RegisterComponents 或显式注册
-                resBlocks.Add(new ResBlock(numFilters));
+                var block = new ResBlock(numFilters);
+                resBlockList.Add(block);
+                // 【关键步】必须给每个 ResBlock 显式起名并注册，否则计算图必断
+                register_module($"resBlock_{i}", block);
             }
 
-            // 3. 策略头定义
             policyHead = Sequential(
                 Conv2d(numFilters, 2, 1, 1, 0, bias: false),
                 BatchNorm2d(2),
@@ -44,7 +40,6 @@ namespace ChineseChessAI.NeuralNetwork
                 Linear(2 * 10 * 9, 8100)
             );
 
-            // 4. 价值头定义
             valueHead = Sequential(
                 Conv2d(numFilters, 1, 1, 1, 0, bias: false),
                 BatchNorm2d(1),
@@ -56,41 +51,41 @@ namespace ChineseChessAI.NeuralNetwork
                 Tanh()
             );
 
-            // 【核心修复步骤】
-            // 在某些 TorchSharp 版本中，RegisterComponents 对 private 字段支持不佳
-            // 必须显式调用 register_module 建立父子模块的参数关联
             register_module("convBlock", convBlock);
-            register_module("resBlocks", resBlocks);
             register_module("policyHead", policyHead);
             register_module("valueHead", valueHead);
 
-            // 最后调用这个确保所有通过 register_module 挂载的参数都被提取
-            RegisterComponents();
+            RegisterComponents(); // 确保所有通过 register_module 挂载的子模块被激活
 
-            // 移动到设备
             var device = cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
             this.to(device);
         }
 
         public override (Tensor, Tensor) forward(Tensor x)
         {
-            // 自动处理输入设备的转换
-            if (x.device.type != this.convBlock.parameters().First().device.type)
+            // 确保输入设备一致
+            var currentDevice = this.convBlock.parameters().First().device;
+            if (x.device.type != currentDevice.type)
+                x = x.to(currentDevice);
+
+            // 执行计算
+            using (var out1 = convBlock.forward(x))
             {
-                x = x.to(this.convBlock.parameters().First().device);
+                var current = out1;
+                // 核心修复：依次通过残差块，必须保留张量引用
+                for (int i = 0; i < resBlockList.Count; i++)
+                {
+                    var next = resBlockList[i].forward(current);
+                    // 只有在不是第一层时才尝试 dispose 旧层，但由于我们要保留梯度，
+                    // 建议在训练模式下减少手动 dispose 以免切断计算图
+                    current = next;
+                }
+
+                var policy = policyHead.forward(current);
+                var value = valueHead.forward(current);
+
+                return (policy, value);
             }
-
-            var outTensor = convBlock.forward(x);
-
-            foreach (var block in resBlocks)
-            {
-                outTensor = block.forward(outTensor);
-            }
-
-            var policy = policyHead.forward(outTensor);
-            var value = valueHead.forward(outTensor);
-
-            return (policy, value);
         }
     }
 }
