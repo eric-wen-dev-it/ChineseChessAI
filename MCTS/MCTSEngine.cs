@@ -126,7 +126,7 @@ namespace ChineseChessAI.MCTS
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
-            int numThreads = 4;
+            int numThreads = 8;
             int baseSims = simulations / numThreads;
             int extraSims = simulations % numThreads;
 

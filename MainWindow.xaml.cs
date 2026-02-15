@@ -144,7 +144,7 @@ namespace ChineseChessAI
                         // 【日志增强】输出结束原因、结果和步数
                         Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 收集样本: {result.Examples.Count}");
 
-                        if (buffer.Count >= 1024)
+                        if (buffer.Count >= 2048)
                         {
                             Log("[训练] 开始梯度下降...");
                             float loss = trainer.Train(buffer.Sample(1024), epochs: 5);
