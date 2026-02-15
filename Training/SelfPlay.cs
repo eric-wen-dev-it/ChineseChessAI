@@ -53,7 +53,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        Move move = (moveCount < 30) ? SelectMoveBySampling(piData) : bestMove;
+                        Move move = (moveCount < 80) ? SelectMoveBySampling(piData) : bestMove;
 
                         board.Push(move.From, move.To);
                         onMovePerformed?.Invoke(board);
@@ -138,7 +138,7 @@ namespace ChineseChessAI.Training
             // 推荐值：-0.05 到 -0.1
             // 逻辑：如果 AI 发现这一步走完后预估价值是 -0.1 (和棋)，而另一步是 -0.5 (输棋)，它会选和棋。
             // 但如果它发现有一步是 0.1 (微弱优势)，它就会放弃和棋去拼一把。
-            float drawPenalty = -0.1f;
+            float drawPenalty = -0.5f;
 
             foreach (var step in history)
             {
