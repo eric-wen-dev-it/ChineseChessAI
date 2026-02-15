@@ -11,7 +11,6 @@ namespace ChineseChessAI.Training
 {
     public record TrainingExample(float[] State, float[] Policy, float Value);
 
-    // 【新增】封装对弈结果，便于 UI 获取信息
     public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount);
 
     public class SelfPlay
@@ -26,7 +25,6 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        // 【修改】返回类型改为 Task<GameResult>
         public async Task<GameResult> RunGameAsync(Action<Board>? onMovePerformed = null)
         {
             var board = new Board();
@@ -48,31 +46,35 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
+                        // 保持 200 次模拟，兼顾速度与深度
                         (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 200);
 
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        Move move = (moveCount < 80) ? SelectMoveBySampling(piData) : bestMove;
+                        // 【优化 1】引入温度系数打破死循环
+                        // 前 80 步完全随机探索，80 步后保持 0.5 的温度（不完全走 bestMove）
+                        double temperature = (moveCount < 80) ? 1.0 : 0.5;
+                        Move move = SelectMoveByTemperature(piData, temperature);
 
                         board.Push(move.From, move.To);
                         onMovePerformed?.Invoke(board);
                         moveCount++;
 
-                        // --- 终局判定与原因细化 ---
+                        // --- 终局判定 ---
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
-                            // 区分绝杀（在将军状态下无棋可走）和困毙（非将军状态下无棋可走）
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
                             break;
                         }
 
-                        if (board.GetRepetitionCount() >= 3)
+                        // 维持 8 次重复判定，配合温度采样更容易跳出死结
+                        if (board.GetRepetitionCount() >= 8)
                         {
-                            endReason = "三次重复局面";
+                            endReason = "八次重复局面";
                             finalResult = 0.0f;
                             break;
                         }
@@ -93,18 +95,26 @@ namespace ChineseChessAI.Training
             }
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
-
-            // 返回包含所有信息的 GameResult
             return new GameResult(FinalizeData(gameHistory, finalResult), endReason, resultStr, moveCount);
         }
 
-        private Move SelectMoveBySampling(float[] piData)
+        // 【优化 2】新增温度采样方法
+        private Move SelectMoveByTemperature(float[] piData, double temperature)
         {
-            double r = _random.NextDouble();
-            double cumulative = 0;
-            for (int i = 0; i < piData.Length; i++)
+            if (temperature < 0.1)
             {
-                cumulative += piData[i];
+                return Move.FromNetworkIndex(Array.IndexOf(piData, piData.Max()));
+            }
+
+            // P_new = P_old ^ (1/temperature)
+            double[] poweredPi = piData.Select(p => Math.Pow(p, 1.0 / temperature)).ToArray();
+            double sum = poweredPi.Sum();
+
+            double r = _random.NextDouble() * sum;
+            double cumulative = 0;
+            for (int i = 0; i < poweredPi.Length; i++)
+            {
+                cumulative += poweredPi[i];
                 if (r <= cumulative)
                     return Move.FromNetworkIndex(i);
             }
@@ -128,32 +138,28 @@ namespace ChineseChessAI.Training
             return flippedPi;
         }
 
-        // 位置：Training/SelfPlay.cs 类内部
-
+        // 【优化 3】引入近因衰减的和棋惩罚
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult)
         {
             var examples = new List<TrainingExample>();
+            // 将平局基础惩罚设为极重的 -0.9
+            float drawPenalty = -0.9f;
 
-            // 【关键修改】设置和棋惩罚值
-            // 推荐值：-0.05 到 -0.1
-            // 逻辑：如果 AI 发现这一步走完后预估价值是 -0.1 (和棋)，而另一步是 -0.5 (输棋)，它会选和棋。
-            // 但如果它发现有一步是 0.1 (微弱优势)，它就会放弃和棋去拼一把。
-            float drawPenalty = -0.5f;
-
-            foreach (var step in history)
+            for (int i = 0; i < history.Count; i++)
             {
+                var step = history[i];
                 float valueForCurrentPlayer;
 
-                // 判定：如果 finalResult 为 0，说明是和棋（三次重复或步数耗尽）
                 if (Math.Abs(finalResult) < 0.001f)
                 {
-                    // 无论当前是红方还是黑方，和棋都记为负分
-                    valueForCurrentPlayer = drawPenalty;
+                    // 衰减逻辑：越靠近棋局结束（重复发生时）的步数，惩罚越重
+                    // 这样可以保护开局和早期的正确知识不被过度惩罚
+                    float decay = (float)(i + 1) / history.Count;
+                    valueForCurrentPlayer = drawPenalty * decay;
                 }
                 else
                 {
-                    // 有胜负：红胜(1) 或 黑胜(-1)
-                    // 逻辑不变：如果当前是红方且红胜，得1分；如果当前是黑方且红胜，得-1分
+                    // 有胜负：1.0 或 -1.0
                     valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
                 }
 
