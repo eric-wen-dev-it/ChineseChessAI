@@ -153,7 +153,14 @@ namespace ChineseChessAI
                             Log("[训练] 开始梯度下降...");
                             float loss = trainer.Train(buffer.Sample(1024), epochs: 5);
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-                            model.save("best_model.pt");
+                            // 1. 获取程序运行的绝对基准路径
+                            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+
+                            // 2. 拼接成绝对路径
+                            string fullPath = System.IO.Path.Combine(baseDir, "best_model.pt");
+
+                            // 3. 使用绝对路径调用您的 ModelManager
+                            ModelManager.SaveModel(model, fullPath);
                             Log($"[训练] 完成，Loss: {loss:F4}");
                         }
                     }
