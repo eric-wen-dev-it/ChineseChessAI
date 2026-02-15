@@ -54,15 +54,30 @@ namespace ChineseChessAI.MCTS
             }
         }
 
+        // 在类成员中定义
+        private SpinLock _spinLock = new SpinLock();
+
         public void Update(double value)
         {
-            // 核心修复：防止并发更新导致的脏数据
-            lock (_lockObj)
+            bool lockTaken = false;
+            try
             {
+                // 尝试获取锁
+                _spinLock.Enter(ref lockTaken);
+
+                // 极速执行更新
                 N++;
                 W += value;
                 Q = W / N;
             }
+            finally
+            {
+                // 释放锁
+                if (lockTaken)
+                    _spinLock.Exit();
+            }
+
+            // 递归更新父节点（注意：Parent 的更新在锁外面，减少持有锁的时间）
             Parent?.Update(-value);
         }
     }
