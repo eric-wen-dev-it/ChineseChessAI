@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace ChineseChessAI.Core
+﻿namespace ChineseChessAI.Core
 {
     public static class Zobrist
     {

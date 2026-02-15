@@ -1,6 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using TorchSharp;
+﻿using TorchSharp;
 using TorchSharp.Modules; // 必须引用
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;

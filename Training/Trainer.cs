@@ -1,9 +1,6 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
+﻿using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
 using static TorchSharp.torch;
-using ChineseChessAI.NeuralNetwork;
 
 namespace ChineseChessAI.Training
 {

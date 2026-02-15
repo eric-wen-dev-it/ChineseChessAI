@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace ChineseChessAI.Core
+﻿namespace ChineseChessAI.Core
 {
     public class MoveGenerator
     {

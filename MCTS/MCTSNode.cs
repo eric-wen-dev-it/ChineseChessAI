@@ -1,7 +1,5 @@
-﻿using System;
+﻿using ChineseChessAI.Core;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using ChineseChessAI.Core;
 
 namespace ChineseChessAI.MCTS
 {

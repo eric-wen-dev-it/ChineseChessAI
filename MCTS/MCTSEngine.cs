@@ -1,9 +1,5 @@
 ﻿using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using TorchSharp;
 using static TorchSharp.torch;
 

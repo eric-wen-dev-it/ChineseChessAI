@@ -1,11 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
-using TorchSharp;
-using ChineseChessAI.Core;
+﻿using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
+using TorchSharp;
 
 namespace ChineseChessAI.Training
 {
@@ -46,8 +42,8 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        // 保持 200 次模拟，兼顾速度与深度
-                        (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 200);
+                        // 保持 1600 次模拟，兼顾速度与深度
+                        (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 1600);
 
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
@@ -79,9 +75,9 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        if (moveCount >= 500)
+                        if (moveCount >= 1000)
                         {
-                            endReason = "步数达到 500 步限制";
+                            endReason = "步数达到 1000 步限制";
                             finalResult = 0.0f;
                             break;
                         }

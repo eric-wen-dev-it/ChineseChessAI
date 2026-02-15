@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-
-namespace ChineseChessAI.Core
+﻿namespace ChineseChessAI.Core
 {
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
@@ -284,6 +280,6 @@ namespace ChineseChessAI.Core
             return p > 0 ? namesRed[p] : namesBlack[-p];
         }
 
-       
+
     }
 }

@@ -1,7 +1,6 @@
-﻿using System;
+﻿using ChineseChessAI.Core;
 using System.Buffers; // 必须引用：用于 ArrayPool
 using TorchSharp;
-using ChineseChessAI.Core;
 using static TorchSharp.torch;
 
 namespace ChineseChessAI.NeuralNetwork

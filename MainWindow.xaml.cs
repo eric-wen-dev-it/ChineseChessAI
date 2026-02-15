@@ -1,15 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+﻿using ChineseChessAI.Core;
+using ChineseChessAI.MCTS;
+using ChineseChessAI.NeuralNetwork;
+using ChineseChessAI.Training;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
-using ChineseChessAI.Core;
-using ChineseChessAI.MCTS;
-using ChineseChessAI.NeuralNetwork;
-using ChineseChessAI.Training;
 
 namespace ChineseChessAI
 {
@@ -131,7 +127,7 @@ namespace ChineseChessAI
                     if (System.IO.File.Exists("best_model.pt"))
                         model.load("best_model.pt");
 
-                    var engine = new MCTSEngine(model);
+                    var engine = new MCTSEngine(model, batchSize: 256);
                     var selfPlay = new SelfPlay(engine);
                     var buffer = new ReplayBuffer(50000);
                     var trainer = new Trainer(model);
@@ -174,7 +170,8 @@ namespace ChineseChessAI
 
         private void Log(string msg)
         {
-            Dispatcher.Invoke(() => {
+            Dispatcher.Invoke(() =>
+            {
                 LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {msg}\n");
                 LogBox.ScrollToEnd();
             });
