@@ -127,7 +127,7 @@ namespace ChineseChessAI
                     if (System.IO.File.Exists("best_model.pt"))
                         model.load("best_model.pt");
 
-                    var engine = new MCTSEngine(model, batchSize: 256);
+                    var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine);
                     var buffer = new ReplayBuffer(50000);
                     var trainer = new Trainer(model);
