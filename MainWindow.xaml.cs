@@ -147,7 +147,7 @@ namespace ChineseChessAI
                         if (buffer.Count >= 4096)
                         {
                             Log("[训练] 开始梯度下降...");
-                            float loss = trainer.Train(buffer.Sample(1024), epochs: 5);
+                            float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
                             // 1. 获取程序运行的绝对基准路径
                             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
