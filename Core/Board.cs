@@ -1,4 +1,8 @@
-﻿namespace ChineseChessAI.Core
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace ChineseChessAI.Core
 {
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
@@ -76,6 +80,28 @@
         public sbyte GetPiece(int index) => _cells[index];
 
         /// <summary>
+        /// 核心：检测如果执行某一步，是否会导致三复局面
+        /// </summary>
+        public bool WillCauseThreefoldRepetition(int from, int to)
+        {
+            // 预测哈希变化
+            sbyte piece = _cells[from];
+            sbyte captured = _cells[to];
+            ulong nextHash = CurrentHash;
+
+            // 增量模拟哈希
+            nextHash ^= PieceKeys[from, piece + 7];      // 移除起点
+            if (captured != 0)
+                nextHash ^= PieceKeys[to, captured + 7]; // 移除被吃子
+            nextHash ^= PieceKeys[to, piece + 7];        // 放入终点
+            nextHash ^= SideKey;                         // 换手
+
+            // 检查历史中出现的次数
+            int count = _history.Count(s => s.Hash == nextHash);
+            return count >= 2;
+        }
+
+        /// <summary>
         /// 标准走棋：更新棋盘、切换回合、记录历史并更新哈希
         /// </summary>
         public void Push(int from, int to)
@@ -83,10 +109,10 @@
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
 
-            // 1. 记录当前状态
+            // 1. 记录当前状态（记录移动前的哈希）
             _history.Push(new GameState(from, to, captured, CurrentHash));
 
-            // 2. 更新哈希（增量更新：异或掉旧位置，异或上新位置）
+            // 2. 增量更新哈希
             TogglePieceHash(from, piece);      // 移除起点棋子
             if (captured != 0)
                 TogglePieceHash(to, captured); // 移除被吃掉的棋子
@@ -132,12 +158,77 @@
             return count;
         }
 
-        /// <summary>
-        /// 获取完整的历史记录（用于 MoveGenerator 分析长捉属性）
-        /// </summary>
         public IEnumerable<GameState> GetHistory() => _history;
 
-        // --- 合法性检查专用辅助方法（不改变哈希和历史） ---
+        // --- 哈希逻辑 ---
+
+        private void TogglePieceHash(int pos, sbyte piece)
+        {
+            CurrentHash ^= PieceKeys[pos, piece + 7];
+        }
+
+        private void CalculateFullHash()
+        {
+            CurrentHash = 0;
+            for (int i = 0; i < 90; i++)
+            {
+                if (_cells[i] != 0)
+                    TogglePieceHash(i, _cells[i]);
+            }
+            if (!IsRedTurn) // 习惯上黑方走棋时异或 SideKey
+                CurrentHash ^= SideKey;
+        }
+
+        // --- 走法文本转换 ---
+
+        public string GetChineseMoveName(int from, int to)
+        {
+            sbyte piece = _cells[from];
+            if (piece == 0)
+                return "";
+
+            bool isRed = piece > 0;
+            int fromR = from / 9, fromC = from % 9;
+            int toR = to / 9, toC = to % 9;
+
+            string name = GetPieceName(piece);
+            int fromCol = isRed ? (9 - fromC) : (fromC + 1);
+            int toCol = isRed ? (9 - toC) : (toC + 1);
+
+            string action = (toR == fromR) ? "平" :
+                            (isRed ? (toR < fromR ? "进" : "退") : (toR > fromR ? "进" : "退"));
+
+            int targetValue;
+            int type = Math.Abs(piece);
+            if (type == 2 || type == 3 || type == 4) // 士、相、马
+                targetValue = toCol;
+            else
+                targetValue = (action == "平") ? toCol : Math.Abs(toR - fromR);
+
+            return $"{name}{fromCol}{action}{targetValue}";
+        }
+
+        private string GetPieceName(sbyte p)
+        {
+            string[] namesRed = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
+            string[] namesBlack = { "", "将", "士", "象", "马", "车", "炮", "卒" };
+            return p > 0 ? namesRed[p] : namesBlack[-p];
+        }
+
+        public string GetMoveHistoryString()
+        {
+            var tempBoard = new Board();
+            var historyList = _history.Reverse().ToList();
+            var result = new List<string>();
+            foreach (var state in historyList)
+            {
+                result.Add(tempBoard.GetChineseMoveName(state.From, state.To));
+                tempBoard.Push(state.From, state.To);
+            }
+            return string.Join(" ", result);
+        }
+
+        // --- 内部辅助方法 ---
 
         public sbyte PerformMoveInternal(int from, int to)
         {
@@ -153,28 +244,6 @@
             _cells[to] = captured;
         }
 
-        // --- 内部哈希计算逻辑 ---
-
-        private void TogglePieceHash(int pos, sbyte piece)
-        {
-            // piece + 7 将 [-7, 7] 映射到 [0, 14]
-            CurrentHash ^= PieceKeys[pos, piece + 7];
-        }
-
-        private void CalculateFullHash()
-        {
-            CurrentHash = 0;
-            for (int i = 0; i < 90; i++)
-            {
-                if (_cells[i] != 0)
-                    TogglePieceHash(i, _cells[i]);
-            }
-            if (IsRedTurn)
-                CurrentHash ^= SideKey;
-        }
-
-        // --- 状态快照 ---
-
         public sbyte[] GetState() => (sbyte[])_cells.Clone();
 
         public void LoadState(sbyte[] state, bool isRedTurn)
@@ -184,102 +253,5 @@
             CalculateFullHash();
             _history.Clear();
         }
-
-
-
-        // 修改原有的 GetMoveHistoryString 方法以显示新格式
-        public string GetMoveHistoryString()
-        {
-            // 需要通过模拟走法来正确获取每一步执行前的棋子位置
-            var tempBoard = new Board();
-            var history = _history.Reverse().ToList();
-            var result = new List<string>();
-
-            foreach (var state in history)
-            {
-                result.Add(tempBoard.GetChineseMoveName(state.From, state.To));
-                tempBoard.Push(state.From, state.To);
-            }
-
-            return string.Join(" ", result);
-        }
-
-        // 新增：带步数编号的易读格式（用于 UI 显示）
-        public string GetReadableMoveHistory()
-        {
-            var moves = _history.Select(s => new Move(s.From, s.To)).Reverse().ToList();
-            var sb = new System.Text.StringBuilder();
-            for (int i = 0; i < moves.Count; i++)
-            {
-                if (i % 2 == 0)
-                    sb.Append($"{i / 2 + 1}. ");
-                sb.Append($"{moves[i]} ");
-            }
-            return sb.ToString().Trim();
-        }
-
-        // Core/Board.cs
-
-        /// <summary>
-        /// 获取单步走法的中文标准表示（如：兵1进1）
-        /// </summary>
-        public string GetChineseMoveName(int from, int to)
-        {
-            sbyte piece = _cells[from];
-            if (piece == 0)
-                return "";
-
-            bool isRed = piece > 0;
-            int fromR = from / 9;
-            int fromC = from % 9;
-            int toR = to / 9;
-            int toC = to % 9;
-
-            // 1. 获取棋子名称
-            string name = GetPieceName(piece);
-
-            // 2. 计算原始纵线 (1-9)
-            // 红方：右(9)->左(0) 映射为 1-9
-            // 黑方：左(0)->右(9) 映射为 1-9
-            int fromCol = isRed ? (9 - fromC) : (fromC + 1);
-            int toCol = isRed ? (9 - toC) : (toC + 1);
-
-            // 3. 确定动作
-            string action = "";
-            if (toR == fromR)
-                action = "平";
-            else if (isRed)
-                action = (toR < fromR) ? "进" : "退";
-            else
-                action = (toR > fromR) ? "进" : "退";
-
-            // 4. 计算目标值 (纵线号或距离)
-            int targetValue;
-            int type = Math.Abs(piece);
-
-            // 马(4)、象(3)、士(2) 永远走斜线，最后一位是目标纵线
-            if (type == 2 || type == 3 || type == 4)
-            {
-                targetValue = toCol;
-            }
-            else // 车、炮、兵、将
-            {
-                if (action == "平")
-                    targetValue = toCol;
-                else
-                    targetValue = Math.Abs(toR - fromR); // 进退则记录步数
-            }
-
-            return $"{name}{fromCol}{action}{targetValue}";
-        }
-
-        private string GetPieceName(sbyte p)
-        {
-            string[] namesRed = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
-            string[] namesBlack = { "", "将", "士", "象", "马", "车", "炮", "卒" };
-            return p > 0 ? namesRed[p] : namesBlack[-p];
-        }
-
-
     }
 }

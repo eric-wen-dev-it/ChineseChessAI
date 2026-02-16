@@ -76,26 +76,22 @@ namespace ChineseChessAI.MCTS
 
                     board.Push(bestChild.Key.From, bestChild.Key.To);
                     await SearchAsync(bestChild.Value, board);
+                    board.Pop(); // 确保递归返回时恢复棋盘状态
                     return;
                 }
 
-                // 准备数据变量
+                // 准备推理数据
                 float[] inputData;
                 bool isRed = board.IsRedTurn;
 
-                // 【关键修复】使用局部 Scope 快速生成数据并转换为 Array，随后立即销毁 Tensor
-                // 这样 Tensor 永远不会跨越 await 边界，也不会跨线程
                 using (var scope = torch.NewDisposeScope())
                 {
                     var tensor = StateEncoder.Encode(board);
-
-                    // 确保数据在 CPU 且为 float32
                     if (tensor.device_type != DeviceType.CPU)
                         tensor = tensor.cpu();
                     tensor = tensor.to_type(ScalarType.Float32);
-
                     inputData = tensor.data<float>().ToArray();
-                } // Tensor 在此处被物理销毁，非常安全
+                }
 
                 // 发送纯数组进行推理
                 var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
@@ -113,8 +109,28 @@ namespace ChineseChessAI.MCTS
                     return;
                 }
 
-                var filteredPolicy = GetFilteredPolicy(policyLogits, legalMoves);
-                node.Expand(filteredPolicy);
+                // --- 修复错误的关键部分 ---
+                // 1. 获取原始策略分布（此时是经过过滤的 IEnumerable）
+                var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves);
+
+                // 2. 将 IEnumerable 转换为 List 以便进行索引修改（解决 CS1061 和 CS0021）
+                var adjustedPolicy = rawPolicy.ToList();
+
+                // 3. 遍历并检测重复局面
+                for (int i = 0; i < adjustedPolicy.Count; i++)
+                {
+                    var move = adjustedPolicy[i].move;
+
+                    // 调用 Board 中新增的 WillCauseThreefoldRepetition 方法
+                    if (board.WillCauseThreefoldRepetition(move.From, move.To))
+                    {
+                        // 【惩罚重复】：将该路径的先验概率降低，强制 AI 探索变招
+                        adjustedPolicy[i] = (move, adjustedPolicy[i].prob * 0.0001);
+                    }
+                }
+
+                // 扩展节点并更新价值
+                node.Expand(adjustedPolicy);
                 node.Update(value);
             }
             catch (Exception ex)
