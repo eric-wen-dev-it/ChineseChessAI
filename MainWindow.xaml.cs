@@ -132,7 +132,7 @@ namespace ChineseChessAI
                     var buffer = new ReplayBuffer(50000);
                     var trainer = new Trainer(model);
 
-                    for (int iter = 1; iter <= 1000; iter++)
+                    for (int iter = 1; iter <= 10000; iter++)
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
