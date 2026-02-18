@@ -51,7 +51,7 @@ namespace ChineseChessAI.Training
                         // 【重大调整】优化温度系数逻辑
                         // 前 30 步 (约 15 回合) 保持 1.0 的高探索度，确保开局库多样性
                         // 30 步之后立即降至 0.01 (趋近于只选概率最高的步子)，保证中残局样本的极高棋力
-                        double temperature = (moveCount < 30) ? 1.0 : 0.01;
+                        double temperature = (moveCount < 60) ? 1.0 : 0.01;
 
                         Move move = SelectMoveByTemperature(piData, temperature);
 
@@ -78,7 +78,7 @@ namespace ChineseChessAI.Training
                         }
 
                         // 步数硬上限
-                        if (moveCount >= 1000)
+                        if (moveCount >= 300)
                         {
                             endReason = "步数达到 1000 步限制";
                             finalResult = 0.0f;
@@ -150,24 +150,20 @@ namespace ChineseChessAI.Training
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult)
         {
             var examples = new List<TrainingExample>();
-            float drawPenalty = -0.9f;
+            // 将平局惩罚从 -0.9 调整为更敏感的 -0.5
+            float drawPenalty = -0.5f;
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
                 float valueForCurrentPlayer;
 
-                if (Math.Abs(finalResult) < 0.001f)
+                if (Math.Abs(finalResult) < 0.001f) // 处理平局
                 {
-                    // 仅对最后 50 步的平局僵持给予重罚
-                    if (i > history.Count - 50)
-                    {
-                        valueForCurrentPlayer = drawPenalty;
-                    }
-                    else
-                    {
-                        valueForCurrentPlayer = 0.0f;
-                    }
+                    // 只要是平局，所有步数都给予一定的负面评价，
+                    // 越接近结尾的步数惩罚越重（说明它没能打破僵局）
+                    float progression = (float)i / history.Count;
+                    valueForCurrentPlayer = drawPenalty * progression;
                 }
                 else
                 {
