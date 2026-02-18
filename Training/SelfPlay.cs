@@ -42,15 +42,17 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        // 保持 3200 次模拟，兼顾速度与深度
+                        // 核心：使用 3200 次模拟量进行深度搜索
                         (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
 
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        // 【优化 1】引入温度系数打破死循环
-                        // 前 80 步完全随机探索，800 步后保持 0.5 的温度（不完全走 bestMove）
-                        double temperature = (moveCount < 800) ? 1.0 : 0.5;
+                        // 【重大调整】优化温度系数逻辑
+                        // 前 30 步 (约 15 回合) 保持 1.0 的高探索度，确保开局库多样性
+                        // 30 步之后立即降至 0.01 (趋近于只选概率最高的步子)，保证中残局样本的极高棋力
+                        double temperature = (moveCount < 30) ? 1.0 : 0.01;
+
                         Move move = SelectMoveByTemperature(piData, temperature);
 
                         board.Push(move.From, move.To);
@@ -67,7 +69,7 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // 维持 8 次重复判定，配合温度采样更容易跳出死结
+                        // 8次重复判定：配合低温度更容易检测出死结
                         if (board.GetRepetitionCount() >= 8)
                         {
                             endReason = "八次重复局面";
@@ -75,6 +77,7 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
+                        // 步数硬上限
                         if (moveCount >= 1000)
                         {
                             endReason = "步数达到 1000 步限制";
@@ -94,15 +97,25 @@ namespace ChineseChessAI.Training
             return new GameResult(FinalizeData(gameHistory, finalResult), endReason, resultStr, moveCount);
         }
 
-        // 【优化 2】新增温度采样方法
+        // 温度采样：P_new = P_old ^ (1/T)
         private Move SelectMoveByTemperature(float[] piData, double temperature)
         {
+            // 当温度极低时，直接取概率最大的走法，避免浮点溢出
             if (temperature < 0.1)
             {
-                return Move.FromNetworkIndex(Array.IndexOf(piData, piData.Max()));
+                int bestIdx = 0;
+                float maxProb = -1f;
+                for (int i = 0; i < piData.Length; i++)
+                {
+                    if (piData[i] > maxProb)
+                    {
+                        maxProb = piData[i];
+                        bestIdx = i;
+                    }
+                }
+                return Move.FromNetworkIndex(bestIdx);
             }
 
-            // P_new = P_old ^ (1/temperature)
             double[] poweredPi = piData.Select(p => Math.Pow(p, 1.0 / temperature)).ToArray();
             double sum = poweredPi.Sum();
 
@@ -134,11 +147,9 @@ namespace ChineseChessAI.Training
             return flippedPi;
         }
 
-        // 【优化 3】引入近因衰减的和棋惩罚
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult)
         {
             var examples = new List<TrainingExample>();
-            // 将平局基础惩罚设为极重的 -0.9
             float drawPenalty = -0.9f;
 
             for (int i = 0; i < history.Count; i++)
@@ -148,21 +159,18 @@ namespace ChineseChessAI.Training
 
                 if (Math.Abs(finalResult) < 0.001f)
                 {
-                    // 【核心调优】打破先手必和僵局
-                    // 对于平局，前期的探索（如前 80% 的步数）视为“中立”（0分），不予奖惩
-                    // 只有最后 50 步由于陷入循环或无法突破，才判定为“无能”，给予 -0.9f 的重惩
+                    // 仅对最后 50 步的平局僵持给予重罚
                     if (i > history.Count - 50)
                     {
-                        valueForCurrentPlayer = drawPenalty; // 此时 drawPenalty 为 -0.9f
+                        valueForCurrentPlayer = drawPenalty;
                     }
                     else
                     {
-                        valueForCurrentPlayer = 0.0f; // 保护前期进攻逻辑，不让平局惩罚污染开局知识
+                        valueForCurrentPlayer = 0.0f;
                     }
                 }
                 else
                 {
-                    // 有胜负时逻辑保持不变：胜者 1.0，败者 -1.0
                     valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
                 }
 

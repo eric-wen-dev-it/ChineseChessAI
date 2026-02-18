@@ -208,7 +208,7 @@ namespace ChineseChessAI.Core
             return $"{name}{fromCol}{action}{targetValue}";
         }
 
-        private string GetPieceName(sbyte p)
+        public static string GetPieceName(sbyte p)
         {
             string[] namesRed = { "", "帅", "仕", "相", "傌", "俥", "炮", "兵" };
             string[] namesBlack = { "", "将", "士", "象", "馬", "車", "砲", "卒" };
