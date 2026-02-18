@@ -105,8 +105,8 @@ namespace ChineseChessAI
         {
             if (p == 0)
                 return "";
-            string[] namesRed = { "", "帅", "仕", "相", "马", "车", "炮", "兵" };
-            string[] namesBlack = { "", "将", "士", "象", "马", "车", "炮", "卒" };
+            string[] namesRed = { "", "帅", "仕", "相", "傌", "俥", "炮", "兵" };
+            string[] namesBlack = { "", "将", "士", "象", "馬", "車", "砲", "卒" };
             return p > 0 ? namesRed[p] : namesBlack[-p];
         }
 

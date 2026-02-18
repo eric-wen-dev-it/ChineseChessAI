@@ -211,7 +211,7 @@ namespace ChineseChessAI.Core
         private string GetPieceName(sbyte p)
         {
             string[] namesRed = { "", "帅", "仕", "相", "傌", "俥", "炮", "兵" };
-            string[] namesBlack = { "", "将", "士", "象", "马", "車", "砲", "卒" };
+            string[] namesBlack = { "", "将", "士", "象", "馬", "車", "砲", "卒" };
             return p > 0 ? namesRed[p] : namesBlack[-p];
         }
 
