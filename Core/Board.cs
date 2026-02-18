@@ -253,5 +253,14 @@ namespace ChineseChessAI.Core
             CalculateFullHash();
             _history.Clear();
         }
+
+        // 在 Board.cs 中添加
+        public void RecordHistory(GameState state)
+        {
+            _history.Push(state);
+            // 注意：这里不需要修改 CurrentHash 和 _cells，
+            // 因为 LoadState 已经根据当前棋盘计算了最新的 Hash。
+            // 我们只是为了让重复检测 GetRepetitionCount() 能找到之前的 Hash。
+        }
     }
 }
