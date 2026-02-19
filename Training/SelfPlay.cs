@@ -78,9 +78,9 @@ namespace ChineseChessAI.Training
                         }
 
                         // 步数硬上限
-                        if (moveCount >= 300)
+                        if (moveCount >= 600)
                         {
-                            endReason = "步数达到 1000 步限制";
+                            endReason = "步数达到 600 步限制";
                             finalResult = 0.0f;
                             break;
                         }
@@ -160,10 +160,11 @@ namespace ChineseChessAI.Training
 
                 if (Math.Abs(finalResult) < 0.001f) // 处理平局
                 {
-                    // 只要是平局，所有步数都给予一定的负面评价，
-                    // 越接近结尾的步数惩罚越重（说明它没能打破僵局）
-                    float progression = (float)i / history.Count;
-                    valueForCurrentPlayer = drawPenalty * progression;
+                    // 方案：减弱平局惩罚，仅针对最后 50 步
+                    if (i > history.Count - 50)
+                        valueForCurrentPlayer = -0.5f;
+                    else
+                        valueForCurrentPlayer = 0.0f; // 前期动作视为中立
                 }
                 else
                 {
