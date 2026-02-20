@@ -9,7 +9,7 @@ namespace ChineseChessAI.MCTS
         public double W { get; private set; } = 0;
         public double P
         {
-            get; private set;
+            get; set;
         }
         public int N { get; private set; } = 0;
 
