@@ -18,7 +18,6 @@ namespace ChineseChessAI
         {
             InitializeComponent();
             InitializeBoardUI();
-            // 订阅加载事件以绘制棋盘线条
             this.Loaded += (s, e) => DrawBoardLines();
         }
 
@@ -37,7 +36,7 @@ namespace ChineseChessAI
                     FontFamily = new FontFamily("KaiTi"),
                     FontWeight = FontWeights.Bold,
                     Margin = new Thickness(2),
-                    Tag = null // 初始化 Tag 为空
+                    Tag = null
                 };
                 _cellButtons[i] = btn;
                 ChessBoardGrid.Children.Add(btn);
@@ -49,17 +48,14 @@ namespace ChineseChessAI
             if (ChessLinesCanvas == null)
                 return;
             ChessLinesCanvas.Children.Clear();
-
             double w = ChessLinesCanvas.ActualWidth;
             double h = ChessLinesCanvas.ActualHeight;
             double stepX = w / 9;
             double stepY = h / 10;
 
-            // 绘制横线
             for (int i = 0; i < 10; i++)
                 DrawLine(stepX / 2, i * stepY + stepY / 2, w - stepX / 2, i * stepY + stepY / 2);
 
-            // 绘制纵线 (中场断开)
             for (int i = 0; i < 9; i++)
             {
                 if (i == 0 || i == 8)
@@ -71,7 +67,6 @@ namespace ChineseChessAI
                 }
             }
 
-            // 绘制九宫格斜线
             DrawLine(3 * stepX + stepX / 2, stepY / 2, 5 * stepX + stepX / 2, 2 * stepY + stepY / 2);
             DrawLine(5 * stepX + stepX / 2, stepY / 2, 3 * stepX + stepX / 2, 2 * stepY + stepY / 2);
             DrawLine(3 * stepX + stepX / 2, 7 * stepY + stepY / 2, 5 * stepX + stepX / 2, 9 * stepY + stepY / 2);
@@ -85,45 +80,56 @@ namespace ChineseChessAI
         }
 
         /// <summary>
-        /// 【核心修改】带分步动画的棋盘更新逻辑
+        /// 【核心修正】分步动画逻辑：
+        /// 确保两次 UI 更新之间释放控制权，让 WPF 能够渲染第一阶段。
         /// </summary>
         private async Task UpdateBoardWithAnimation(Board board)
         {
             var move = board.LastMove;
-
-            // 如果是开局或重置，直接刷新
             if (move == null)
             {
-                await Dispatcher.InvokeAsync(() => RefreshBoardOnly(board));
+                Dispatcher.Invoke(() => RefreshBoardOnly(board));
                 return;
             }
 
-            // 在 UI 线程执行分步演示
-            await Dispatcher.InvokeAsync(async () =>
+            // === 阶段 1：在 UI 线程绘制“起手”状态并渲染 ===
+            Dispatcher.Invoke(() =>
             {
-                // 1. 恢复之前的物理状态（棋子在原位），仅绘制红色起始方框
-                // 注意：这里需要先手动“撤销”视觉上的移动，展示起点
-                sbyte movingPiece = board.GetPiece(move.Value.To);
-                sbyte capturedPiece = board.GetPiece(move.Value.From); // 虽然已经是0，但在逻辑上它是起点
-
-                // 强制将起点设为红框
-                _cellButtons[move.Value.From].Tag = "From";
-                _cellButtons[move.Value.To].Tag = null;
-
-                // 等待让用户看清“起手”
-                await Task.Delay(200);
-
-                // 2. 正式移动棋子并绘制结束位置
+                // 先整体刷一遍物理位置
                 RefreshBoardOnly(board);
 
-                // 确保起止点高亮同时存在
+                // 核心视觉欺骗：
+                // 1. 获取刚才动的那颗子（当前已在终点）
+                sbyte movingPiece = board.GetPiece(move.Value.To);
+
+                // 2. 将终点强行设为空，将起点强行恢复为该棋子
+                _cellButtons[move.Value.To].Content = "";
+                _cellButtons[move.Value.From].Content = Board.GetPieceName(movingPiece);
+                _cellButtons[move.Value.From].Foreground = movingPiece > 0 ? Brushes.Red : Brushes.Black;
+
+                // 3. 仅亮起起点红框
+                _cellButtons[move.Value.From].Tag = "From";
+                _cellButtons[move.Value.To].Tag = null;
+            });
+
+            // === 阶段 2：在后台线程等待，给 UI 线程渲染红框的时间 ===
+            // 此时 UI 线程已空闲，可以完成上一轮设置的“红框+原位棋子”的绘制
+            await Task.Delay(200);
+
+            // === 阶段 3：在 UI 线程执行“落子”并亮起绿框 ===
+            Dispatcher.Invoke(() =>
+            {
+                // 再次物理刷新，此时棋子会跳到真实的终点
+                RefreshBoardOnly(board);
+
+                // 同时补上起止点的方框标记
                 _cellButtons[move.Value.From].Tag = "From";
                 _cellButtons[move.Value.To].Tag = "To";
             });
         }
 
         /// <summary>
-        /// 仅刷新棋子物理位置，不处理动画延迟
+        /// 基础物理刷新，不处理动画延迟，不包含 Tag 逻辑
         /// </summary>
         private void RefreshBoardOnly(Board board)
         {
@@ -132,14 +138,9 @@ namespace ChineseChessAI
                 sbyte p = board.GetPiece(i);
                 _cellButtons[i].Content = Board.GetPieceName(p);
                 _cellButtons[i].Foreground = p > 0 ? Brushes.Red : Brushes.Black;
-                _cellButtons[i].Tag = null; // 重置标记
+                _cellButtons[i].Tag = null;
             }
             MoveListLog.Text = board.GetMoveHistoryString();
-        }
-
-        private string GetPieceChar(sbyte p)
-        {
-            return Board.GetPieceName(p);
         }
 
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
@@ -154,8 +155,6 @@ namespace ChineseChessAI
                 try
                 {
                     Log("=== 进化循环已启动 ===");
-
-                    // 1. 初始化模型
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                     string modelPath = System.IO.Path.Combine(baseDir, "best_model.pt");
@@ -168,20 +167,17 @@ namespace ChineseChessAI
 
                     var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine);
-
-                    // 2. 初始化缓存并加载旧样本
                     var buffer = new ReplayBuffer(100000);
                     Log("[系统] 正在扫描磁盘旧样本...");
                     buffer.LoadOldSamples();
 
                     var trainer = new Trainer(model);
 
-                    // 3. 进入循环
                     for (int iter = 1; iter <= 10000; iter++)
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
-                        // 【修改】回调改为异步函数以支持动画演示
+                        // 必须 await 动画方法，确保本步动作演示完再进行下一步 MCTS 搜索
                         GameResult result = await selfPlay.RunGameAsync(async b => await UpdateBoardWithAnimation(b));
 
                         buffer.AddRange(result.Examples);
@@ -193,9 +189,8 @@ namespace ChineseChessAI
                             Log("[训练] 开始梯度下降...");
                             float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-
                             ModelManager.SaveModel(model, modelPath);
-                            Log($"[训练] 完成，当前 Loss: {loss:F4}");
+                            Log($"[训练] 完成，Loss: {loss:F4}");
                         }
                     }
                 }
