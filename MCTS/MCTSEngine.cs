@@ -30,7 +30,6 @@ namespace ChineseChessAI.MCTS
             var root = new MCTSNode(null, 1.0);
 
             // --- 1. 初次搜索/推理以展开根节点 ---
-            // 必须先进行一次 Search 确保 root.Children 被填充
             await SearchAsync(root, CloneBoard(board));
 
             // --- 2. 注入狄利克雷噪声 (仅在自对弈探索阶段) ---
@@ -96,7 +95,29 @@ namespace ChineseChessAI.MCTS
                     return;
                 }
 
-                // 推理部分
+                // --- 1. 终局判定与合法走法获取 ---
+                var legalMoves = _generator.GenerateLegalMoves(board);
+                if (legalMoves.Count == 0)
+                {
+                    node.Update(-1.0);
+                    return;
+                }
+
+                // --- 2. 【核心新增：贪婪击杀判定】 ---
+                // 如果发现能直接击杀对方将帅，立即终止搜索并判定必胜
+                foreach (var move in legalMoves)
+                {
+                    if (_generator.CanCaptureKing(board, move))
+                    {
+                        // 发现可以直接吃将，赋予该动作绝对权重并停止搜索
+                        var instantKillPolicy = new List<(Move move, double prob)> { (move, 1.0) };
+                        node.Expand(instantKillPolicy);
+                        node.Update(1.0); // 立即判定为当前搜索方的必胜局面
+                        return;
+                    }
+                }
+
+                // --- 3. 神经网络推理部分 ---
                 float[] inputData;
                 bool isRed = board.IsRedTurn;
 
@@ -112,14 +133,7 @@ namespace ChineseChessAI.MCTS
                 if (!isRed)
                     policyLogits = FlipPolicy(policyLogits);
 
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count == 0)
-                {
-                    node.Update(-1.0);
-                    return;
-                }
-
-                // 局面干预与概率过滤
+                // --- 4. 局面干预与概率过滤 ---
                 var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
                 double adjustedValue = value;
 
@@ -146,16 +160,13 @@ namespace ChineseChessAI.MCTS
             }
         }
 
-        /// <summary>
-        /// 在根节点注入狄利克雷噪声，强迫模型进行探索
-        /// </summary>
         private void ApplyDirichletNoise(MCTSNode root)
         {
             if (root.Children.IsEmpty)
                 return;
 
-            const double epsilon = 0.25; // 噪声权重
-            const double alpha = 0.3;    // 象棋建议参数
+            const double epsilon = 0.25;
+            const double alpha = 0.3;
 
             var moves = root.Children.Keys.ToList();
             var noise = SampleDirichlet(moves.Count, alpha);
@@ -163,7 +174,6 @@ namespace ChineseChessAI.MCTS
             for (int i = 0; i < moves.Count; i++)
             {
                 var node = root.Children[moves[i]];
-                // 混合公式: P = (1 - ε) * P + ε * η
                 node.P = (1 - epsilon) * node.P + epsilon * noise[i];
             }
         }
@@ -174,7 +184,6 @@ namespace ChineseChessAI.MCTS
             double sum = 0;
             for (int i = 0; i < count; i++)
             {
-                // 使用 Gamma 分布采样生成狄利克雷分布 (k=alpha, theta=1)
                 double sample = GammaSample(alpha, 1.0);
                 samples[i] = sample;
                 sum += sample;
@@ -186,7 +195,6 @@ namespace ChineseChessAI.MCTS
 
         private double GammaSample(double alpha, double beta)
         {
-            // 简易 Gamma 采样实现
             if (alpha < 1.0)
                 return GammaSample(alpha + 1.0, beta) * Math.Pow(_random.NextDouble(), 1.0 / alpha);
             double d = alpha - 1.0 / 3.0;
@@ -267,7 +275,7 @@ namespace ChineseChessAI.MCTS
             newBoard.LoadState(original.GetState(), original.IsRedTurn);
             foreach (var state in original.GetHistory().Reverse())
             {
-                newBoard.RecordHistory(state); // 确保 Zobrist 历史同步
+                newBoard.RecordHistory(state);
             }
             return newBoard;
         }

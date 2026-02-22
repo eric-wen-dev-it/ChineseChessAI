@@ -1,4 +1,7 @@
-﻿namespace ChineseChessAI.Core
+﻿using System;
+using System.Collections.Generic;
+
+namespace ChineseChessAI.Core
 {
     public class MoveGenerator
     {
@@ -39,8 +42,7 @@
                     continue;
 
                 // B. 长将与长捉检测 (重复局面判定)
-                // 如果当前步会导致第3次及以上重复，则检查其攻击属性
-                if (board.GetRepetitionCount() >= 2) // 如果当前哈希在历史中已出现2次，下一步就是第3次
+                if (board.GetRepetitionCount() >= 2)
                 {
                     if (IsForbiddenPerpetualMove(board, move))
                         continue;
@@ -53,24 +55,37 @@
         }
 
         /// <summary>
-        /// 判定某一着棋是否属于“禁着”（长将或禁止的长捉）
+        /// 【核心新增】判定某一动作是否能直接“击杀”对方老将。
+        /// 用于实现 AI 的强制击杀逻辑。
         /// </summary>
+        public bool CanCaptureKing(Board board, Move move)
+        {
+            bool isRedAttacker = board.IsRedTurn;
+
+            // 1. 模拟走棋
+            sbyte captured = board.PerformMoveInternal(move.From, move.To);
+
+            // 2. 检查对方老将是否在当前局面下处于被攻击状态（即老将不安全）
+            // 在象棋规则逻辑中，如果对方老将“不安全”，意味着这一步可以直接吃将
+            bool canCapture = !IsKingSafe(board, !isRedAttacker);
+
+            // 3. 撤销模拟
+            board.UndoMoveInternal(move.From, move.To, captured);
+
+            return canCapture;
+        }
+
         private bool IsForbiddenPerpetualMove(Board board, Move move)
         {
-            // 模拟推入局面
             board.Push(move.From, move.To);
             int count = board.GetRepetitionCount();
 
             bool isForbidden = false;
             if (count >= 3)
             {
-                // 分析历史循环中的步法属性
-                // 按照中国象棋规则：单方长将必判负，长捉大子通常也禁止
-                bool isChecking = IsChecking(board, !board.IsRedTurn); // 刚走完的那一方是否在将军
-                bool isChasing = IsChasing(board, move);             // 刚走完的那一着是否在“捉”
+                bool isChecking = IsChecking(board, !board.IsRedTurn);
+                bool isChasing = IsChasing(board, move);
 
-                // 在 AI 层面，为了简化逻辑并保持严谨性：
-                // 如果连续 3 次重复局面且每一步都是攻击性动作（将或捉），则视为禁着
                 if (isChecking || isChasing)
                 {
                     isForbidden = true;
@@ -81,24 +96,18 @@
             return isForbidden;
         }
 
-        /// <summary>
-        /// 检查当前回合方是否正在将军
-        /// </summary>
         public bool IsChecking(Board board, bool isRedAttacker)
         {
-            // 对方老将如果不安全，说明我方正在将军
             return !IsKingSafe(board, !isRedAttacker);
         }
 
-        /// <summary>
-        /// 判定当前走法是否属于“捉”（针对车、马、炮等大子的攻击）
-        /// </summary>
         private bool IsChasing(Board board, Move move)
         {
             sbyte attacker = board.GetPiece(move.To);
+            if (attacker == 0)
+                return false;
             bool isRedAttacker = attacker > 0;
 
-            // 1. 生成移动后该棋子的所有走法
             var attacks = new List<Move>();
             GeneratePieceMoves(board, move.To, attacker, attacks);
 
@@ -108,14 +117,11 @@
                 if (target == 0)
                     continue;
 
-                // 2. 如果目标是对方的大子（车、马、炮）
                 int targetType = Math.Abs(target);
                 if ((isRedAttacker && target < 0) || (!isRedAttacker && target > 0))
                 {
                     if (targetType >= 4 && targetType <= 6) // 4:马, 5:车, 6:炮
                     {
-                        // 3. 简单的“捉”判定：攻击了大子且对方该子不在保护下（或属于不计代价的捉）
-                        // 在复杂规则中需判定“保护”，此处实现为：只要产生了新的大子威胁即视为攻击
                         return true;
                     }
                 }
@@ -123,9 +129,6 @@
             return false;
         }
 
-        /// <summary>
-        /// 检查指定颜色的老将是否安全（未被将军，且无飞将）
-        /// </summary>
         public bool IsKingSafe(Board board, bool checkRed)
         {
             int kingIndex = -1;
@@ -139,6 +142,8 @@
                     break;
                 }
             }
+
+            // 如果棋盘上已经没有将（被吃了），直接返回不安全
             if (kingIndex == -1)
                 return false;
 
@@ -160,19 +165,19 @@
                     int nr = r + dr[i] * step, nc = c + dc[i] * step;
                     if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
                         break;
+
                     sbyte p = board.GetPiece(nr, nc);
                     if (p == 0)
                         continue;
+
                     count++;
                     if (count == 1)
                     {
-                        // 敌方车或老将（飞将检测：类型1）
                         if (IsEnemy(isRedKing, p, 5) || IsEnemy(isRedKing, p, 1))
                             return false;
                     }
                     else if (count == 2)
                     {
-                        // 敌方炮
                         if (IsEnemy(isRedKing, p, 6))
                             return false;
                         break;
@@ -228,8 +233,6 @@
 
         private bool IsEnemy(bool isRedSelf, sbyte p, int type) =>
             p != 0 && Math.Abs(p) == type && (isRedSelf ? p < 0 : p > 0);
-
-        // --- 物理走法生成 (Pseudo-Legal) ---
 
         private void GeneratePieceMoves(Board board, int from, sbyte piece, List<Move> moves)
         {

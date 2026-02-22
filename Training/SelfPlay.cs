@@ -68,27 +68,50 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        // --- 核心优化：动态调整探索温度 ---
-                        // 150步之前保持 1.0 的高随机性
-                        // 150步之后降至 0.4 而非 0.01，鼓励在残局也寻找变招
-                        double temperature = (moveCount < 150) ? 1.0 : 0.4;
+                        // --- 【核心修改：强制击杀检测】 ---
+                        // 获取当前所有合法走法，优先检查是否有能直接吃掉对方将/帅的棋
+                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        Move? killMove = legalMoves.FirstOrDefault(m => _generator.CanCaptureKing(board, m));
 
-                        Move move = SelectMoveByTemperature(piData, temperature);
+                        Move move;
+                        bool isInstantKill = false;
+
+                        if (killMove != null)
+                        {
+                            // 发现送吃情况，强制执行击杀动作
+                            move = killMove.Value;
+                            isInstantKill = true;
+                        }
+                        else
+                        {
+                            // 否则按正常温度系数采样
+                            double temperature = (moveCount < 150) ? 1.0 : 0.4;
+                            move = SelectMoveByTemperature(piData, temperature);
+                        }
 
                         // 执行走子
                         board.Push(move.From, move.To);
 
-                        // 触发 UI 动画回调
+                        // 触发 UI 动画回调（此处会进入 MainWindow 的分步演示逻辑）
                         if (onMovePerformed != null)
                             await onMovePerformed.Invoke(board);
 
                         moveCount++;
 
                         // --- 3. 终局判定 ---
-                        var legalMoves = _generator.GenerateLegalMoves(board);
 
-                        // A. 绝杀或困毙判定
-                        if (legalMoves.Count == 0)
+                        // A. 判定是否刚刚完成了“吃将”击杀
+                        if (isInstantKill)
+                        {
+                            endReason = "老将被击杀";
+                            // 判定获胜方：因为已经执行了 Push，当前回合方是输家
+                            finalResult = board.IsRedTurn ? -1.0f : 1.0f;
+                            break;
+                        }
+
+                        // B. 常规绝杀或困毙判定（无法走子）
+                        var remainingMoves = _generator.GenerateLegalMoves(board);
+                        if (remainingMoves.Count == 0)
                         {
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
@@ -96,11 +119,11 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // B. 平局判定 (长将重复 8 次或达到 600 步限制)
+                        // C. 平局判定 (长将重复 8 次或达到 600 步限制)
                         if (board.GetRepetitionCount() >= 8 || moveCount >= 600)
                         {
                             endReason = moveCount >= 600 ? "步数限制" : "八次重复";
-                            finalResult = 0.0f; // 初始设为 0，在 FinalizeData 中根据子力细化
+                            finalResult = 0.0f;
                             break;
                         }
                     }
@@ -177,17 +200,16 @@ namespace ChineseChessAI.Training
                 float blackMaterial = CalculateMaterialScore(finalBoard, false);
 
                 if (redMaterial > blackMaterial)
-                    adjustedResult = 0.15f; // 红方子力占优，给小正分
+                    adjustedResult = 0.15f; // 红方子力占优
                 else if (blackMaterial > redMaterial)
                     adjustedResult = -0.15f; // 黑方子力占优
                 else
-                    adjustedResult = -0.1f; // 纯平局轻微惩罚，鼓励分出胜负
+                    adjustedResult = -0.1f; // 纯平局轻微惩罚
             }
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-                // 当前步的价值：若是当前选手的回合，则直接使用结果，否则反转
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
                 examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
             }
@@ -196,7 +218,6 @@ namespace ChineseChessAI.Training
 
         /// <summary>
         /// 计算局面子力分值
-        /// 帅:0, 仕:2, 相:2, 马:4, 车:9, 炮:4.5, 兵:1
         /// </summary>
         private float CalculateMaterialScore(Board board, bool isRed)
         {
@@ -211,7 +232,7 @@ namespace ChineseChessAI.Training
                     int type = Math.Abs(p);
                     score += type switch
                     {
-                        1 => 0,    // 帅本身不计分
+                        1 => 0,    // 帅
                         2 => 2,    // 仕
                         3 => 2,    // 相
                         4 => 4,    // 马
