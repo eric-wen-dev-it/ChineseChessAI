@@ -2,6 +2,10 @@
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace ChineseChessAI.Training
 {
@@ -26,13 +30,12 @@ namespace ChineseChessAI.Training
             var board = new Board();
             board.Reset();
 
-            // --- 1. 随机开局 ---
             for (int i = 0; i < 4; i++)
             {
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count > 0)
+                var initMoves = _generator.GenerateLegalMoves(board);
+                if (initMoves.Count > 0)
                 {
-                    var randomMove = legalMoves[_random.Next(legalMoves.Count)];
+                    var randomMove = initMoves[_random.Next(initMoves.Count)];
                     board.Push(randomMove.From, randomMove.To);
                     if (onMovePerformed != null)
                         await onMovePerformed.Invoke(board);
@@ -44,7 +47,6 @@ namespace ChineseChessAI.Training
             float finalResult = 0;
             string endReason = "进行中";
 
-            // --- 2. 正式对弈循环 ---
             while (true)
             {
                 try
@@ -53,66 +55,27 @@ namespace ChineseChessAI.Training
                     {
                         bool isRed = board.IsRedTurn;
 
-                        // 编码局面：如果是黑方，StateEncoder 内部会自动翻转物理棋盘
-                        var stateTensor = StateEncoder.Encode(board);
-                        float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
-
-                        // MCTS 搜索：返回基于“当前方视角”的概率分布
-                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
-
-                        // 记录样本：Policy 必须对应当前视角，无需额外翻转
-                        gameHistory.Add((stateData, piData, isRed));
-
-                        // --- 【关键修复：坐标映射与反转】 ---
-                        var legalMoves = _generator.GenerateLegalMoves(board);
-                        Move? killMove = legalMoves.FirstOrDefault(m => _generator.CanCaptureKing(board, m));
-
-                        Move move;
-                        bool isInstantKill = false;
-
-                        if (killMove != null)
+                        // --- 【防线 1：送将必败拦截】 ---
+                        // 在这回合开始时，看一眼能不能直接吃掉对方的老将。
+                        // 如果能，说明对方上一回合犯了致命错误：“送将”或“没有应将”。
+                        Move? instantKillMove = _generator.GetCaptureKingMove(board);
+                        if (instantKillMove != null)
                         {
-                            move = killMove.Value;
-                            isInstantKill = true;
-                        }
-                        else
-                        {
-                            double temperature = (moveCount < 150) ? 1.0 : 0.4;
-                            // 从概率分布中采样选出一个基于“视角坐标”的动作
-                            move = SelectMoveByTemperature(piData, temperature);
+                            Console.WriteLine($"[规则裁判] 发现对方送将/未应将！执行绝杀: {instantKillMove.Value}");
+                            // 强行把老将吃掉作为最后一步演示
+                            board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
+                            if (onMovePerformed != null)
+                                await onMovePerformed.Invoke(board);
 
-                            // 【核心修复点】如果是黑方，必须将视角坐标映射回逻辑棋盘物理坐标
-                            if (!isRed)
-                            {
-                                move = FlipMove(move);
-                            }
-
-                            // 安全拦截：如果采样动作原地踏步或不合法，强制纠正
-                            if (move.From == move.To || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
-                            {
-                                move = legalMoves[_random.Next(legalMoves.Count)];
-                            }
-                        }
-
-                        // 执行走子
-                        board.Push(move.From, move.To);
-
-                        if (onMovePerformed != null)
-                            await onMovePerformed.Invoke(board);
-
-                        moveCount++;
-
-                        // --- 3. 终局判定 ---
-                        if (isInstantKill)
-                        {
-                            await Task.Delay(1000); // 终局停留观察
-                            endReason = "老将被击杀";
-                            finalResult = board.IsRedTurn ? -1.0f : 1.0f;
+                            await Task.Delay(1000);
+                            endReason = "对方送将/未应将，老将被击杀";
+                            finalResult = isRed ? 1.0f : -1.0f; // 当前方赢
                             break;
                         }
 
-                        var remainingMoves = _generator.GenerateLegalMoves(board);
-                        if (remainingMoves.Count == 0)
+                        // 常规逻辑继续...
+                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        if (legalMoves.Count == 0)
                         {
                             await Task.Delay(1000);
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
@@ -128,6 +91,29 @@ namespace ChineseChessAI.Training
                             finalResult = 0.0f;
                             break;
                         }
+
+                        var stateTensor = StateEncoder.Encode(board);
+                        float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
+
+                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
+
+                        float[] trainingPi = isRed ? piData : FlipPolicy(piData);
+                        gameHistory.Add((stateData, trainingPi, isRed));
+
+                        double temperature = (moveCount < 150) ? 1.0 : 0.4;
+                        Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
+
+                        if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
+                        {
+                            Console.WriteLine($"[警告拦截] 拦截到无效动作 {move.From}->{move.To}，强行重算...");
+                            move = legalMoves[_random.Next(legalMoves.Count)];
+                        }
+
+                        board.Push(move.From, move.To);
+                        if (onMovePerformed != null)
+                            await onMovePerformed.Invoke(board);
+
+                        moveCount++;
                     }
                 }
                 catch (Exception ex)
@@ -141,34 +127,57 @@ namespace ChineseChessAI.Training
             return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount);
         }
 
-        /// <summary>
-        /// 执行坐标 180 度反转 (row, col) -> (9-row, 8-col)
-        /// </summary>
-        private Move FlipMove(Move m)
+        private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
         {
-            int fR = m.From / 9, fC = m.From % 9;
-            int tR = m.To / 9, tC = m.To % 9;
-            return new Move((9 - fR) * 9 + (8 - fC), (9 - tR) * 9 + (8 - tC));
-        }
+            var validMoves = new List<(Move move, double prob)>();
 
-        private Move SelectMoveByTemperature(float[] piData, double temperature)
-        {
-            if (temperature < 0.1)
+            foreach (var m in legalMoves)
             {
-                return Move.FromNetworkIndex(Array.IndexOf(piData, piData.Max()));
+                int idx = m.ToNetworkIndex();
+                if (idx >= 0 && idx < 8100)
+                {
+                    validMoves.Add((m, piData[idx]));
+                }
             }
 
-            double[] poweredPi = piData.Select(p => Math.Pow(p, 1.0 / temperature)).ToArray();
+            if (validMoves.Count == 0)
+                return legalMoves[_random.Next(legalMoves.Count)];
+            if (temperature < 0.1)
+                return validMoves.OrderByDescending(x => x.prob).First().move;
+
+            double[] poweredPi = validMoves.Select(x => Math.Pow(x.prob, 1.0 / temperature)).ToArray();
             double sum = poweredPi.Sum();
+
+            if (sum <= 0 || double.IsNaN(sum))
+                return validMoves.OrderByDescending(x => x.prob).First().move;
+
             double r = _random.NextDouble() * sum;
             double cumulative = 0;
             for (int i = 0; i < poweredPi.Length; i++)
             {
                 cumulative += poweredPi[i];
                 if (r <= cumulative)
-                    return Move.FromNetworkIndex(i);
+                    return validMoves[i].move;
             }
-            return Move.FromNetworkIndex(Array.IndexOf(piData, piData.Max()));
+            return validMoves.Last().move;
+        }
+
+        private float[] FlipPolicy(float[] originalPi)
+        {
+            float[] flippedPi = new float[8100];
+            for (int i = 0; i < 8100; i++)
+            {
+                if (originalPi[i] <= 0)
+                    continue;
+                int from = i / 90, to = i % 90;
+                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
+                int from_f = (9 - r1) * 9 + (8 - c1);
+                int to_f = (9 - r2) * 9 + (8 - c2);
+                int idx_f = from_f * 90 + to_f;
+                if (idx_f >= 0 && idx_f < 8100)
+                    flippedPi[idx_f] = originalPi[i];
+            }
+            return flippedPi;
         }
 
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)

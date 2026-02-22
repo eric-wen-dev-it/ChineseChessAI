@@ -13,7 +13,6 @@ namespace ChineseChessAI.Core
         /// </summary>
         public List<Move> GenerateLegalMoves(Board board)
         {
-            // 1. 生成所有伪合法走法 (Pseudo-Legal)
             var pseudoMoves = new List<Move>(64);
             bool isRed = board.IsRedTurn;
 
@@ -22,18 +21,15 @@ namespace ChineseChessAI.Core
                 sbyte piece = board.GetPiece(i);
                 if (piece == 0)
                     continue;
-
                 if ((isRed && piece > 0) || (!isRed && piece < 0))
                 {
                     GeneratePieceMoves(board, i, piece, pseudoMoves);
                 }
             }
 
-            // 2. 过滤非法走法
             var legalMoves = new List<Move>(pseudoMoves.Count);
             foreach (var move in pseudoMoves)
             {
-                // A. 试走并检查己方帅位安全（包括飞将检测）
                 sbyte captured = board.PerformMoveInternal(move.From, move.To);
                 bool safe = IsKingSafe(board, isRed);
                 board.UndoMoveInternal(move.From, move.To, captured);
@@ -41,13 +37,11 @@ namespace ChineseChessAI.Core
                 if (!safe)
                     continue;
 
-                // B. 长将与长捉检测 (重复局面判定)
                 if (board.GetRepetitionCount() >= 2)
                 {
                     if (IsForbiddenPerpetualMove(board, move))
                         continue;
                 }
-
                 legalMoves.Add(move);
             }
 
@@ -55,43 +49,61 @@ namespace ChineseChessAI.Core
         }
 
         /// <summary>
-        /// 【核心新增】判定某一动作是否能直接“击杀”对方老将。
-        /// 用于实现 AI 的强制击杀逻辑。
+        /// 【核心新增】获取直接击杀对方老将的动作。
+        /// 专门用于在对方“送将/未应将”时，强制执行吃将并结束游戏。
         /// </summary>
-        public bool CanCaptureKing(Board board, Move move)
+        public Move? GetCaptureKingMove(Board board)
         {
             bool isRedAttacker = board.IsRedTurn;
+            int enemyKingType = isRedAttacker ? -1 : 1;
+            int enemyKingIndex = -1;
 
-            // 1. 模拟走棋
-            sbyte captured = board.PerformMoveInternal(move.From, move.To);
+            // 1. 找到对方老将位置
+            for (int i = 0; i < 90; i++)
+            {
+                if (board.GetPiece(i) == enemyKingType)
+                {
+                    enemyKingIndex = i;
+                    break;
+                }
+            }
 
-            // 2. 检查对方老将是否在当前局面下处于被攻击状态（即老将不安全）
-            // 在象棋规则逻辑中，如果对方老将“不安全”，意味着这一步可以直接吃将
-            bool canCapture = !IsKingSafe(board, !isRedAttacker);
+            if (enemyKingIndex == -1)
+                return null;
 
-            // 3. 撤销模拟
-            board.UndoMoveInternal(move.From, move.To, captured);
+            // 2. 遍历所有己方棋子，看谁能走到对方老将的位置
+            var attacks = new List<Move>();
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte piece = board.GetPiece(i);
+                if (piece != 0 && ((isRedAttacker && piece > 0) || (!isRedAttacker && piece < 0)))
+                {
+                    GeneratePieceMoves(board, i, piece, attacks);
+                }
+            }
 
-            return canCapture;
+            foreach (var m in attacks)
+            {
+                // 只要有任何一步棋能走到对方老将头上，这就是击杀动作
+                if (m.To == enemyKingIndex)
+                    return m;
+            }
+
+            return null;
         }
 
         private bool IsForbiddenPerpetualMove(Board board, Move move)
         {
             board.Push(move.From, move.To);
             int count = board.GetRepetitionCount();
-
             bool isForbidden = false;
             if (count >= 3)
             {
                 bool isChecking = IsChecking(board, !board.IsRedTurn);
                 bool isChasing = IsChasing(board, move);
-
                 if (isChecking || isChasing)
-                {
                     isForbidden = true;
-                }
             }
-
             board.Pop();
             return isForbidden;
         }
@@ -107,7 +119,6 @@ namespace ChineseChessAI.Core
             if (attacker == 0)
                 return false;
             bool isRedAttacker = attacker > 0;
-
             var attacks = new List<Move>();
             GeneratePieceMoves(board, move.To, attacker, attacks);
 
@@ -116,14 +127,11 @@ namespace ChineseChessAI.Core
                 sbyte target = board.GetPiece(m.To);
                 if (target == 0)
                     continue;
-
                 int targetType = Math.Abs(target);
                 if ((isRedAttacker && target < 0) || (!isRedAttacker && target > 0))
                 {
-                    if (targetType >= 4 && targetType <= 6) // 4:马, 5:车, 6:炮
-                    {
+                    if (targetType >= 4 && targetType <= 6)
                         return true;
-                    }
                 }
             }
             return false;
@@ -142,13 +150,10 @@ namespace ChineseChessAI.Core
                     break;
                 }
             }
-
-            // 如果棋盘上已经没有将（被吃了），直接返回不安全
             if (kingIndex == -1)
                 return false;
 
             int kr = kingIndex / 9, kc = kingIndex % 9;
-
             return CheckLinearThreats(board, kr, kc, checkRed) &&
                    CheckKnightThreats(board, kr, kc, checkRed) &&
                    CheckPawnThreats(board, kr, kc, checkRed);
@@ -165,7 +170,6 @@ namespace ChineseChessAI.Core
                     int nr = r + dr[i] * step, nc = c + dc[i] * step;
                     if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
                         break;
-
                     sbyte p = board.GetPiece(nr, nc);
                     if (p == 0)
                         continue;

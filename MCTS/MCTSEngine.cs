@@ -28,14 +28,9 @@ namespace ChineseChessAI.MCTS
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
         {
             var root = new MCTSNode(null, 1.0);
-
-            // --- 1. 初次搜索/推理以展开根节点 ---
             await SearchAsync(root, CloneBoard(board));
-
-            // --- 2. 注入狄利克雷噪声 (仅在自对弈探索阶段) ---
             ApplyDirichletNoise(root);
 
-            // --- 3. 执行正式的大规模并行模拟 ---
             int numThreads = 24;
             int baseSims = (simulations - 1) / numThreads;
             int extraSims = (simulations - 1) % numThreads;
@@ -59,7 +54,6 @@ namespace ChineseChessAI.MCTS
                 return (legalMoves[0], new float[8100]);
             }
 
-            // 计算 Pi 概率分布
             float[] piData = new float[8100];
             double totalVisits = root.Children.Values.Sum(x => x.N);
 
@@ -84,40 +78,31 @@ namespace ChineseChessAI.MCTS
                 {
                     if (node.Children.IsEmpty)
                         return;
-
                     var bestChild = node.Children
                         .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
                         .First();
-
                     board.Push(bestChild.Key.From, bestChild.Key.To);
                     await SearchAsync(bestChild.Value, board);
                     board.Pop();
                     return;
                 }
 
-                // --- 1. 终局判定与合法走法获取 ---
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count == 0)
+                // --- 【核心防线 2：树搜索中的送将惩罚】 ---
+                // 如果当前轮到我走棋，但我发现对方老将被我将军
+                // 说明这条时间线里，对方上一步走了“送将”。我方直接必胜！
+                if (!_generator.IsKingSafe(board, !board.IsRedTurn))
                 {
-                    node.Update(-1.0);
+                    node.Update(1.0); // 必胜
                     return;
                 }
 
-                // --- 2. 【核心新增：贪婪击杀判定】 ---
-                // 如果发现能直接击杀对方将帅，立即终止搜索并判定必胜
-                foreach (var move in legalMoves)
+                var legalMoves = _generator.GenerateLegalMoves(board);
+                if (legalMoves.Count == 0)
                 {
-                    if (_generator.CanCaptureKing(board, move))
-                    {
-                        // 发现可以直接吃将，赋予该动作绝对权重并停止搜索
-                        var instantKillPolicy = new List<(Move move, double prob)> { (move, 1.0) };
-                        node.Expand(instantKillPolicy);
-                        node.Update(1.0); // 立即判定为当前搜索方的必胜局面
-                        return;
-                    }
+                    node.Update(-1.0); // 绝杀/困毙
+                    return;
                 }
 
-                // --- 3. 神经网络推理部分 ---
                 float[] inputData;
                 bool isRed = board.IsRedTurn;
 
@@ -133,7 +118,6 @@ namespace ChineseChessAI.MCTS
                 if (!isRed)
                     policyLogits = FlipPolicy(policyLogits);
 
-                // --- 4. 局面干预与概率过滤 ---
                 var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
                 double adjustedValue = value;
 
@@ -143,7 +127,7 @@ namespace ChineseChessAI.MCTS
                     if (board.WillCauseThreefoldRepetition(move.From, move.To))
                     {
                         rawPolicy[i] = (move, rawPolicy[i].prob * 0.0001);
-                        adjustedValue = -0.95; // 强制判负，诱导搜索树避让
+                        adjustedValue = -0.95;
                     }
                     else if (board.GetRepetitionCount() >= 2)
                     {
@@ -164,13 +148,10 @@ namespace ChineseChessAI.MCTS
         {
             if (root.Children.IsEmpty)
                 return;
-
             const double epsilon = 0.25;
             const double alpha = 0.3;
-
             var moves = root.Children.Keys.ToList();
             var noise = SampleDirichlet(moves.Count, alpha);
-
             for (int i = 0; i < moves.Count; i++)
             {
                 var node = root.Children[moves[i]];
