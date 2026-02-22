@@ -7,11 +7,6 @@ namespace ChineseChessAI.Core
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
     /// </summary>
-    /// <param name="From">起始位置索引</param>
-    /// <param name="To">目标位置索引</param>
-    /// <param name="Captured">被吃掉的棋子类型</param>
-    /// <param name="Hash">移动前的局面哈希值</param>
-    /// <param name="LastMoveBefore">移动前的最后一步记录，用于 Pop 时恢复 UI 高亮</param>
     public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore);
 
     public class Board
@@ -21,7 +16,7 @@ namespace ChineseChessAI.Core
         public readonly sbyte[] _cells = new sbyte[90];
         public bool IsRedTurn { get; private set; } = true;
 
-        // 【新增/保留】存储最后一步棋的起始和结束位置，供 UI 绘制红/绿方框
+        // 存储最后一步棋的起始和结束位置，供 UI 绘制红/绿方框
         public Move? LastMove
         {
             get; private set;
@@ -37,12 +32,12 @@ namespace ChineseChessAI.Core
         private readonly Stack<GameState> _history = new();
 
         // Zobrist 随机数表
-        private static readonly ulong[,] PieceKeys = new ulong[90, 15]; // 90个位置 x 15种可能(7黑+0+7红)
+        private static readonly ulong[,] PieceKeys = new ulong[90, 15];
         private static readonly ulong SideKey;
 
         static Board()
         {
-            var rnd = new Random(42); // 使用固定种子确保哈希一致性
+            var rnd = new Random(42);
             for (int i = 0; i < 90; i++)
             {
                 for (int j = 0; j < 15; j++)
@@ -84,86 +79,60 @@ namespace ChineseChessAI.Core
 
             IsRedTurn = true;
             _history.Clear();
-            LastMove = null; // 【重置】清除最后一步高亮记录
+            LastMove = null;
             CalculateFullHash();
         }
 
         public sbyte GetPiece(int row, int col) => _cells[row * 9 + col];
         public sbyte GetPiece(int index) => _cells[index];
 
-        /// <summary>
-        /// 核心：检测如果执行某一步，是否会导致三复局面
-        /// </summary>
         public bool WillCauseThreefoldRepetition(int from, int to)
         {
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
             ulong nextHash = CurrentHash;
 
-            // 增量模拟哈希变化
-            nextHash ^= PieceKeys[from, piece + 7];      // 移除起点棋子
+            nextHash ^= PieceKeys[from, piece + 7];
             if (captured != 0)
-                nextHash ^= PieceKeys[to, captured + 7]; // 移除被吃掉的棋子
-            nextHash ^= PieceKeys[to, piece + 7];        // 在终点放入棋子
-            nextHash ^= SideKey;                         // 切换走子方
+                nextHash ^= PieceKeys[to, captured + 7];
+            nextHash ^= PieceKeys[to, piece + 7];
+            nextHash ^= SideKey;
 
-            // 检查历史记录中该哈希值出现的次数
             int count = _history.Count(s => s.Hash == nextHash);
             return count >= 2;
         }
 
-        /// <summary>
-        /// 标准走棋：更新棋盘、切换回合、记录历史并更新哈希
-        /// </summary>
         public void Push(int from, int to)
         {
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
 
-            // 1. 记录当前状态（保存当前的 LastMove，以便撤销时恢复之前的方框位置）
             _history.Push(new GameState(from, to, captured, CurrentHash, LastMove));
-
-            // 2. 【更新】设置最后一步，供 UI 绘制方框
             LastMove = new Move(from, to);
 
-            // 3. 增量更新哈希
-            TogglePieceHash(from, piece);      // 移除起点
+            TogglePieceHash(from, piece);
             if (captured != 0)
-                TogglePieceHash(to, captured); // 移除被吃子
-            TogglePieceHash(to, piece);        // 放入终点
-            CurrentHash ^= SideKey;            // 切换回合
+                TogglePieceHash(to, captured);
+            TogglePieceHash(to, piece);
+            CurrentHash ^= SideKey;
 
-            // 4. 物理移动
             _cells[to] = piece;
             _cells[from] = 0;
             IsRedTurn = !IsRedTurn;
         }
 
-        /// <summary>
-        /// 撤销上一步走法
-        /// </summary>
         public void Pop()
         {
             if (_history.Count == 0)
                 return;
-
             var last = _history.Pop();
-
-            // 物理恢复棋盘
             _cells[last.From] = _cells[last.To];
             _cells[last.To] = last.Captured;
             IsRedTurn = !IsRedTurn;
-
-            // 恢复哈希
             CurrentHash = last.Hash;
-
-            // 【恢复】将 LastMove 恢复到执行此步之前的状态，确保 UI 高亮正确回退
             LastMove = last.LastMoveBefore;
         }
 
-        /// <summary>
-        /// 检测当前局面在历史中出现的次数
-        /// </summary>
         public int GetRepetitionCount()
         {
             int count = 1;
@@ -176,8 +145,6 @@ namespace ChineseChessAI.Core
         }
 
         public IEnumerable<GameState> GetHistory() => _history;
-
-        // --- 哈希逻辑 ---
 
         private void TogglePieceHash(int pos, sbyte piece)
         {
@@ -196,10 +163,13 @@ namespace ChineseChessAI.Core
                 CurrentHash ^= SideKey;
         }
 
-        // --- 走法文本转换 ---
+        // --- 核心修复：走法文本转换 ---
 
         public string GetChineseMoveName(int from, int to)
         {
+            if (from == to)
+                return "原地"; // 异常防御
+
             sbyte piece = _cells[from];
             if (piece == 0)
                 return "";
@@ -209,18 +179,36 @@ namespace ChineseChessAI.Core
             int toR = to / 9, toC = to % 9;
 
             string name = GetPieceName(piece);
+
+            // 【标准规则】路数计算
+            // 红方（底线在下）：从右往左数 1-9 (i列是1，a列是9) -> 公式: 9 - colIndex
+            // 黑方（底线在上）：从左往右数 1-9 (a列是1，i列是9) -> 公式: colIndex + 1
             int fromCol = isRed ? (9 - fromC) : (fromC + 1);
             int toCol = isRed ? (9 - toC) : (toC + 1);
 
-            string action = (toR == fromR) ? "平" :
-                            (isRed ? (toR < fromR ? "进" : "退") : (toR > fromR ? "进" : "退"));
+            // 动作判定
+            string action;
+            if (toR == fromR)
+                action = "平";
+            else if (isRed)
+                action = (toR < fromR) ? "进" : "退"; // 红方向上为进
+            else
+                action = (toR > fromR) ? "进" : "退";             // 黑方向下为进
 
+            // 目标数值计算
             int targetValue;
             int type = Math.Abs(piece);
-            if (type == 2 || type == 3 || type == 4) // 士、相、马
+
+            // 士、相、马：斜走棋子，终点永远记录目标路数
+            if (type == 2 || type == 3 || type == 4)
+            {
                 targetValue = toCol;
+            }
             else
+            {
+                // 车、炮、兵、帅：平移动作记路数，进退动作记步数
                 targetValue = (action == "平") ? toCol : Math.Abs(toR - fromR);
+            }
 
             return $"{name}{fromCol}{action}{targetValue}";
         }
@@ -239,13 +227,12 @@ namespace ChineseChessAI.Core
             var result = new List<string>();
             foreach (var state in historyList)
             {
+                // 必须在执行 Push 之前获取名称，因为名称依赖起始位置的棋子类型
                 result.Add(tempBoard.GetChineseMoveName(state.From, state.To));
                 tempBoard.Push(state.From, state.To);
             }
             return string.Join(" ", result);
         }
-
-        // --- 内部辅助方法 ---
 
         public sbyte PerformMoveInternal(int from, int to)
         {
@@ -269,16 +256,12 @@ namespace ChineseChessAI.Core
             this.IsRedTurn = isRedTurn;
             CalculateFullHash();
             _history.Clear();
-            LastMove = null; // 加载外部局面时，清除历史动作高亮
+            LastMove = null;
         }
 
-        /// <summary>
-        /// 用于克隆或搜索时同步历史记录
-        /// </summary>
         public void RecordHistory(GameState state)
         {
             _history.Push(state);
-            // 同步更新 LastMove，确保搜索树深处的局面也有动作高亮数据
             LastMove = new Move(state.From, state.To);
         }
     }

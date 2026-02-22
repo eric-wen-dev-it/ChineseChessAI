@@ -2,10 +2,12 @@
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Training;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using Path = System.IO.Path;
 
 namespace ChineseChessAI
 {
@@ -18,6 +20,7 @@ namespace ChineseChessAI
         {
             InitializeComponent();
             InitializeBoardUI();
+            // 订阅加载事件以绘制棋盘线条
             this.Loaded += (s, e) => DrawBoardLines();
         }
 
@@ -79,10 +82,6 @@ namespace ChineseChessAI
             ChessLinesCanvas.Children.Add(line);
         }
 
-        /// <summary>
-        /// 【核心修正】分步动画逻辑：
-        /// 确保两次 UI 更新之间释放控制权，让 WPF 能够渲染第一阶段。
-        /// </summary>
         private async Task UpdateBoardWithAnimation(Board board)
         {
             var move = board.LastMove;
@@ -92,45 +91,27 @@ namespace ChineseChessAI
                 return;
             }
 
-            // === 阶段 1：在 UI 线程绘制“起手”状态并渲染 ===
             Dispatcher.Invoke(() =>
             {
-                // 先整体刷一遍物理位置
                 RefreshBoardOnly(board);
-
-                // 核心视觉欺骗：
-                // 1. 获取刚才动的那颗子（当前已在终点）
                 sbyte movingPiece = board.GetPiece(move.Value.To);
-
-                // 2. 将终点强行设为空，将起点强行恢复为该棋子
                 _cellButtons[move.Value.To].Content = "";
                 _cellButtons[move.Value.From].Content = Board.GetPieceName(movingPiece);
                 _cellButtons[move.Value.From].Foreground = movingPiece > 0 ? Brushes.Red : Brushes.Black;
-
-                // 3. 仅亮起起点红框
                 _cellButtons[move.Value.From].Tag = "From";
                 _cellButtons[move.Value.To].Tag = null;
             });
 
-            // === 阶段 2：在后台线程等待，给 UI 线程渲染红框的时间 ===
-            // 此时 UI 线程已空闲，可以完成上一轮设置的“红框+原位棋子”的绘制
-            await Task.Delay(200);
+            await Task.Delay(600); // 每步走子的动画间隔
 
-            // === 阶段 3：在 UI 线程执行“落子”并亮起绿框 ===
             Dispatcher.Invoke(() =>
             {
-                // 再次物理刷新，此时棋子会跳到真实的终点
                 RefreshBoardOnly(board);
-
-                // 同时补上起止点的方框标记
                 _cellButtons[move.Value.From].Tag = "From";
                 _cellButtons[move.Value.To].Tag = "To";
             });
         }
 
-        /// <summary>
-        /// 基础物理刷新，不处理动画延迟，不包含 Tag 逻辑
-        /// </summary>
         private void RefreshBoardOnly(Board board)
         {
             for (int i = 0; i < 90; i++)
@@ -157,9 +138,9 @@ namespace ChineseChessAI
                     Log("=== 进化循环已启动 ===");
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                    string modelPath = System.IO.Path.Combine(baseDir, "best_model.pt");
+                    string modelPath = Path.Combine(baseDir, "best_model.pt");
 
-                    if (System.IO.File.Exists(modelPath))
+                    if (File.Exists(modelPath))
                     {
                         model.load(modelPath);
                         Log("[系统] 已加载现有模型权重。");
@@ -177,20 +158,37 @@ namespace ChineseChessAI
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
-                        // 必须 await 动画方法，确保本步动作演示完再进行下一步 MCTS 搜索
                         GameResult result = await selfPlay.RunGameAsync(async b => await UpdateBoardWithAnimation(b));
 
-                        buffer.AddRange(result.Examples);
+                        // 【新增】终局画面停留 1000ms 供观察结果
+                        await Task.Delay(10000);
 
-                        Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 收集样本: {result.Examples.Count}");
+                        // 【修复】在 UI 线程安全获取文本，防止 InvalidOperationException
+                        string currentMoveList = "";
+                        Dispatcher.Invoke(() => {
+                            currentMoveList = MoveListLog.Text;
+                        });
+
+                        // 保存棋谱到本地文件
+                        SaveMoveListToFile(currentMoveList, result.ResultStr, result.EndReason);
+
+                        if (result.MoveCount > 10)
+                        {
+                            buffer.AddRange(result.Examples);
+                            Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 样本已存入缓存");
+                        }
+                        else
+                        {
+                            Log($"[对弈] 警告: 步数过短({result.MoveCount})，视为无效博弈，样本已舍弃。");
+                        }
 
                         if (buffer.Count >= 4096)
                         {
-                            Log("[训练] 开始梯度下降...");
+                            Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
                             float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
                             ModelManager.SaveModel(model, modelPath);
-                            Log($"[训练] 完成，Loss: {loss:F4}");
+                            Log($"[训练] 完成，当前 Loss: {loss:F4}");
                         }
                     }
                 }
@@ -201,6 +199,31 @@ namespace ChineseChessAI
                     Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
                 }
             });
+        }
+
+        private void SaveMoveListToFile(string moveList, string result, string reason)
+        {
+            try
+            {
+                string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs");
+                if (!Directory.Exists(logDir))
+                    Directory.CreateDirectory(logDir);
+
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string filePath = Path.Combine(logDir, $"game_{timestamp}.txt");
+
+                string content = $"时间: {DateTime.Now}\n" +
+                                 $"结果: {result}\n" +
+                                 $"原因: {reason}\n" +
+                                 $"棋谱: {moveList}\n" +
+                                 new string('-', 40) + "\n";
+
+                File.WriteAllText(filePath, content);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[系统] 保存棋谱文件失败: {ex.Message}");
+            }
         }
 
         private void Log(string msg)
