@@ -138,44 +138,68 @@ namespace ChineseChessAI
                 try
                 {
                     Log("=== 进化循环已启动 ===");
+
+                    // 1. 初始化模型与环境
                     var model = new CChessNet();
-                    if (System.IO.File.Exists("best_model.pt"))
-                        model.load("best_model.pt");
+                    string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+                    string modelPath = System.IO.Path.Combine(baseDir, "best_model.pt");
+
+                    if (System.IO.File.Exists(modelPath))
+                    {
+                        model.load(modelPath);
+                        Log("[系统] 已加载现有模型权重。");
+                    }
 
                     var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine);
-                    var buffer = new ReplayBuffer(50000);
+
+                    // 2. 初始化 ReplayBuffer 并加载磁盘旧样本
+                    // 增大容量至 100,000 以支持更长期的经验回放
+                    var buffer = new ReplayBuffer(100000);
+                    Log("[系统] 正在扫描磁盘旧样本...");
+
+                    // 调用您新添加的 LoadOldSamples 方法，从 data/self_play_data 恢复进度
+                    buffer.LoadOldSamples();
+
                     var trainer = new Trainer(model);
 
+                    // 3. 进入进化循环
                     for (int iter = 1; iter <= 10000; iter++)
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
-                        // 接收 GameResult 对象，UpdateBoard 内部会处理 LastMove 高亮
+                        // 执行自对弈：UpdateBoard 会处理 LastMove 的起始/结束位置方框高亮
                         GameResult result = await selfPlay.RunGameAsync(b => UpdateBoard(b));
 
+                        // 将新样本加入缓存，并自动序列化到磁盘
                         buffer.AddRange(result.Examples);
 
-                        // 输出结束原因、结果和步数
+                        // 日志输出详细的局终信息
                         Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 收集样本: {result.Examples.Count}");
 
+                        // 4. 触发训练：当累积样本达到 4096 条时
                         if (buffer.Count >= 4096)
                         {
-                            Log("[训练] 开始梯度下降...");
+                            Log($"[训练] 正在从 {buffer.Count} 个样本中随机采样并开始梯度下降...");
+
+                            // 进行 15 个 Epoch 的强化学习
                             float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
+
+                            // 更新 UI 上的平均 Loss 显示
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
 
-                            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                            string fullPath = System.IO.Path.Combine(baseDir, "best_model.pt");
+                            // 保存进化后的最佳模型并创建备份
+                            ModelManager.SaveModel(model, modelPath);
 
-                            ModelManager.SaveModel(model, fullPath);
-                            Log($"[训练] 完成，Loss: {loss:F4}");
+                            Log($"[训练] 完成，当前 Loss: {loss:F4}");
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"[错误] {ex.Message}");
+                    Log($"[致命错误] {ex.Message}");
+                    _isTraining = false; // 允许重新开始
+                    Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
                 }
             });
         }
