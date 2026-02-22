@@ -83,9 +83,9 @@
                         ToolTip="选择本地的 game_xxx.txt 棋谱文件并进行演示"/>
             </UniformGrid>
 
-            <Button x:Name="LoadCsvBtn" Content="导入 CSV 数据集学习" Height="35" FontSize="14" FontWeight="Bold"
-                    Click="OnLoadCsvDatasetClick" Background="#9C27B0" Foreground="White" Margin="0,0,0,15"
-                    ToolTip="批量导入 Kaggle 等平台的 WXF 格式 CSV 数据集进行高强度监督学习"/>
+            <Button x:Name="LoadDatasetBtn" Content="导入数据集 (自动识别 CSV / PGN / TXT)" Height="35" FontSize="14" FontWeight="Bold"
+                    Click="OnLoadDatasetClick" Background="#9C27B0" Foreground="White" Margin="0,0,0,15"
+                    ToolTip="系统将自动识别格式并选择最优引擎：支持 Kaggle 乱序 CSV、UCCI PGN 巨型库等"/>
 
             <TextBlock Text="平均 Loss:" Foreground="White" FontSize="14" Margin="0,0,0,5"/>
             <TextBlock x:Name="LossLabel" Text="0.0000" Foreground="Yellow" FontSize="18" FontWeight="Bold" Margin="0,0,0,10"/>
