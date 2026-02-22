@@ -7,7 +7,7 @@ namespace ChineseChessAI.Core
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
     /// </summary>
-    public record GameState(int From, int To, sbyte Captured, ulong Hash);
+    public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore);
 
     public class Board
     {
@@ -15,6 +15,12 @@ namespace ChineseChessAI.Core
         // 1:帅, 2:仕, 3:相, 4:马, 5:车, 6:炮, 7:兵
         public readonly sbyte[] _cells = new sbyte[90];
         public bool IsRedTurn { get; private set; } = true;
+
+        // 【新增】存储最后一步棋的起始和结束位置
+        public Move? LastMove
+        {
+            get; private set;
+        }
 
         // 当前局面的 Zobrist 哈希值
         public ulong CurrentHash
@@ -73,6 +79,7 @@ namespace ChineseChessAI.Core
 
             IsRedTurn = true;
             _history.Clear();
+            LastMove = null; // 【重置】最后一步为空
             CalculateFullHash();
         }
 
@@ -109,17 +116,20 @@ namespace ChineseChessAI.Core
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
 
-            // 1. 记录当前状态（记录移动前的哈希）
-            _history.Push(new GameState(from, to, captured, CurrentHash));
+            // 1. 记录当前状态，包括当前的 LastMove 以便后续 Pop
+            _history.Push(new GameState(from, to, captured, CurrentHash, LastMove));
 
-            // 2. 增量更新哈希
+            // 2. 【更新】最后一步移动
+            LastMove = new Move(from, to);
+
+            // 3. 增量更新哈希
             TogglePieceHash(from, piece);      // 移除起点棋子
             if (captured != 0)
                 TogglePieceHash(to, captured); // 移除被吃掉的棋子
             TogglePieceHash(to, piece);        // 在终点放入棋子
             CurrentHash ^= SideKey;            // 切换回合哈希
 
-            // 3. 物理移动
+            // 4. 物理移动
             _cells[to] = piece;
             _cells[from] = 0;
             IsRedTurn = !IsRedTurn;
@@ -140,8 +150,9 @@ namespace ChineseChessAI.Core
             _cells[last.To] = last.Captured;
             IsRedTurn = !IsRedTurn;
 
-            // 恢复哈希
+            // 恢复哈希和最后一步状态
             CurrentHash = last.Hash;
+            LastMove = last.LastMoveBefore; // 【恢复】恢复到移动前的最后一步
         }
 
         /// <summary>
@@ -252,15 +263,15 @@ namespace ChineseChessAI.Core
             this.IsRedTurn = isRedTurn;
             CalculateFullHash();
             _history.Clear();
+            LastMove = null; // 加载新状态时清除最后一步
         }
 
         // 在 Board.cs 中添加
         public void RecordHistory(GameState state)
         {
             _history.Push(state);
-            // 注意：这里不需要修改 CurrentHash 和 _cells，
-            // 因为 LoadState 已经根据当前棋盘计算了最新的 Hash。
-            // 我们只是为了让重复检测 GetRepetitionCount() 能找到之前的 Hash。
+            // 记录历史时同步更新 LastMove
+            LastMove = new Move(state.From, state.To);
         }
     }
 }

@@ -36,7 +36,8 @@ namespace ChineseChessAI
                     FontSize = 26,
                     FontFamily = new FontFamily("KaiTi"),
                     FontWeight = FontWeights.Bold,
-                    Margin = new Thickness(2)
+                    Margin = new Thickness(2),
+                    Tag = null // 初始化 Tag 为空
                 };
                 _cellButtons[i] = btn;
                 ChessBoardGrid.Children.Add(btn);
@@ -83,8 +84,6 @@ namespace ChineseChessAI
             ChessLinesCanvas.Children.Add(line);
         }
 
-        // MainWindow.xaml.cs
-
         private void UpdateBoard(Board board)
         {
             Dispatcher.Invoke(() =>
@@ -94,9 +93,30 @@ namespace ChineseChessAI
                     sbyte p = board.GetPiece(i);
                     _cellButtons[i].Content = GetPieceChar(p);
                     _cellButtons[i].Foreground = p > 0 ? Brushes.Red : Brushes.Black;
+
+                    // --- 【核心修改：通过 Tag 标记起止位置以显示方框】 ---
+                    if (board.LastMove != null)
+                    {
+                        if (i == board.LastMove.Value.From)
+                        {
+                            _cellButtons[i].Tag = "From"; // 触发 XAML 中的起始方框（如橙红色）
+                        }
+                        else if (i == board.LastMove.Value.To)
+                        {
+                            _cellButtons[i].Tag = "To";   // 触发 XAML 中的结束方框（如翠绿色）
+                        }
+                        else
+                        {
+                            _cellButtons[i].Tag = null;   // 清除其他位置的标记
+                        }
+                    }
+                    else
+                    {
+                        _cellButtons[i].Tag = null;       // 局面重置时清除所有标记
+                    }
                 }
 
-                // 自动更新为 "兵1进1" 格式的序列
+                // 自动更新棋谱序列
                 MoveListLog.Text = board.GetMoveHistoryString();
             });
         }
@@ -106,7 +126,6 @@ namespace ChineseChessAI
             return Board.GetPieceName(p);
         }
 
-        // MainWindow.xaml.cs 内部逻辑修改
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
         {
             if (_isTraining)
@@ -132,12 +151,12 @@ namespace ChineseChessAI
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
-                        // 【关键修改】接收 GameResult 对象
+                        // 接收 GameResult 对象，UpdateBoard 内部会处理 LastMove 高亮
                         GameResult result = await selfPlay.RunGameAsync(b => UpdateBoard(b));
 
                         buffer.AddRange(result.Examples);
 
-                        // 【日志增强】输出结束原因、结果和步数
+                        // 输出结束原因、结果和步数
                         Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 收集样本: {result.Examples.Count}");
 
                         if (buffer.Count >= 4096)
@@ -145,13 +164,10 @@ namespace ChineseChessAI
                             Log("[训练] 开始梯度下降...");
                             float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-                            // 1. 获取程序运行的绝对基准路径
-                            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
 
-                            // 2. 拼接成绝对路径
+                            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                             string fullPath = System.IO.Path.Combine(baseDir, "best_model.pt");
 
-                            // 3. 使用绝对路径调用您的 ModelManager
                             ModelManager.SaveModel(model, fullPath);
                             Log($"[训练] 完成，Loss: {loss:F4}");
                         }
