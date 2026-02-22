@@ -352,5 +352,261 @@ namespace ChineseChessAI
                 LogBox.ScrollToEnd();
             });
         }
+
+
+        // ================= CSV 数据集批量监督学习模块 =================
+
+        private async void OnLoadCsvDatasetClick(object sender, RoutedEventArgs e)
+        {
+            if (_isTraining)
+            {
+                MessageBox.Show("请先停止当前训练！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var openFileDialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "选择 Kaggle CSV 数据集",
+                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+            };
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                StartBtn.IsEnabled = false;
+                Log($"[监督学习] 正在读取 CSV 文件: {Path.GetFileName(openFileDialog.FileName)} ...");
+
+                await Task.Run(() => ProcessCsvDataset(openFileDialog.FileName));
+
+                StartBtn.IsEnabled = true;
+            }
+        }
+
+        private void ProcessCsvDataset(string filePath)
+        {
+            var lines = File.ReadAllLines(filePath);
+            var games = new Dictionary<string, SortedDictionary<int, string>>();
+
+            // 1. 清洗并分组 CSV 数据
+            Log("[监督学习] 正在归类对局数据...");
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("gameID", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var parts = line.Split(',');
+                if (parts.Length >= 4)
+                {
+                    string gameId = parts[0];
+                    if (int.TryParse(parts[1], out int turn))
+                    {
+                        string move = parts[3].Trim();
+                        if (!games.ContainsKey(gameId))
+                            games[gameId] = new SortedDictionary<int, string>();
+                        games[gameId][turn] = move;
+                    }
+                }
+            }
+
+            Log($"[监督学习] 成功解析到 {games.Count} 局大师对战，开始提取神经网络特征...");
+
+            var buffer = new ReplayBuffer(200000);
+            var generator = new MoveGenerator();
+            int successGames = 0;
+
+            // 2. 将代数记谱推演为训练样本
+            foreach (var kvp in games)
+            {
+                var board = new Board();
+                board.Reset();
+                var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
+                bool isGameValid = true;
+
+                foreach (var moveKvp in kvp.Value)
+                {
+                    string wxfMove = moveKvp.Value;
+                    Move? parsedMove = ParseWxfMove(board, wxfMove, generator);
+
+                    if (parsedMove == null)
+                    {
+                        isGameValid = false;
+                        break; // 遇到无法解析的异常谱（可能是残缺数据），放弃该局
+                    }
+
+                    // 构造 One-Hot 完美策略
+                    bool isRed = board.IsRedTurn;
+                    var stateTensor = StateEncoder.Encode(board);
+                    float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
+
+                    float[] piData = new float[8100];
+                    int netIdx = parsedMove.Value.ToNetworkIndex();
+                    if (netIdx >= 0 && netIdx < 8100)
+                        piData[netIdx] = 1.0f;
+
+                    float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
+                    gameHistory.Add((stateData, trainingPi, isRed));
+
+                    board.Push(parsedMove.Value.From, parsedMove.Value.To);
+                }
+
+                if (isGameValid && gameHistory.Count > 10)
+                {
+                    // 使用子力评估作为胜负标签（红多于黑则红胜）
+                    float resultValue = GetMaterialValue(board);
+                    var examples = gameHistory.Select(step =>
+                        new TrainingExample(step.state, step.policy, step.isRedTurn ? resultValue : -resultValue)
+                    ).ToList();
+
+                    buffer.AddRange(examples);
+                    successGames++;
+                }
+            }
+
+            Log($"[监督学习] 提取完毕！共成功提取 {successGames} 局，生成了 {buffer.Count} 个黄金样本！");
+            Log($"[监督学习] 开始高强度反向传播 (这可能需要几分钟)...");
+
+            // 3. 开启暴力训练
+            try
+            {
+                var model = new CChessNet();
+                string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+                if (File.Exists(modelPath))
+                    model.load(modelPath);
+
+                var trainer = new Trainer(model);
+
+                // 数据非常宝贵，我们循环榨干它的价值 (跑 10 个 Epoch)
+                for (int epoch = 1; epoch <= 10; epoch++)
+                {
+                    float loss = trainer.Train(buffer.Sample(buffer.Count), epochs: 1);
+                    Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
+                    Log($"[监督学习] Epoch {epoch}/10 完成，Loss: {loss:F4}");
+                }
+
+                ModelManager.SaveModel(model, modelPath);
+                Log($"[监督学习] 大功告成！AI 已经吸收了这批对局的精华，棋力大增！");
+            }
+            catch (Exception ex)
+            {
+                Log($"[训练错误] {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 智能 WXF 代数谱解码器 (利用 MoveGenerator 反推)
+        /// </summary>
+        private Move? ParseWxfMove(Board board, string wxf, MoveGenerator generator)
+        {
+            var legalMoves = generator.GenerateLegalMoves(board);
+            bool isRed = board.IsRedTurn;
+            var candidates = new List<Move>();
+
+            wxf = wxf.Trim().ToUpper();
+
+            foreach (var move in legalMoves)
+            {
+                sbyte piece = board.GetPiece(move.From);
+                int type = Math.Abs(piece);
+                char pieceChar = type switch
+                {
+                    1 => 'K',
+                    2 => 'A',
+                    3 => 'E',
+                    4 => 'H',
+                    5 => 'R',
+                    6 => 'C',
+                    7 => 'P',
+                    _ => '?'
+                };
+
+                if (!wxf.Contains(pieceChar))
+                    continue;
+
+                int fromRow = move.From / 9, fromCol = move.From % 9;
+                int toRow = move.To / 9, toCol = move.To % 9;
+
+                int startFile = isRed ? (9 - fromCol) : (fromCol + 1);
+                int endFile = isRed ? (9 - toCol) : (toCol + 1);
+
+                char direction = fromRow == toRow ? '.' : ((isRed && toRow < fromRow) || (!isRed && toRow > fromRow) ? '+' : '-');
+                if (!wxf.Contains(direction))
+                    continue;
+
+                int endValue = (type == 2 || type == 3 || type == 4 || direction == '.') ? endFile : Math.Abs(toRow - fromRow);
+
+                var digits = wxf.Where(char.IsDigit).ToArray();
+                if (digits.Length >= 2)
+                {
+                    int expectedStartFile = digits[0] - '0';
+                    int expectedEndVal = digits[1] - '0';
+                    if (startFile == expectedStartFile && endValue == expectedEndVal)
+                        candidates.Add(move);
+                }
+            }
+
+            if (candidates.Count == 1)
+                return candidates[0];
+
+            // 解决双炮/双兵同列的歧义 (+C2.5 前炮平五, -C2.5 后炮平五)
+            if (candidates.Count > 1)
+            {
+                bool isFront = wxf.StartsWith("+") || wxf.StartsWith("F");
+                bool isBack = wxf.StartsWith("-") || wxf.StartsWith("B");
+
+                if (isFront || isBack)
+                {
+                    var sorted = candidates.OrderBy(m => m.From / 9).ToList();
+                    if (isRed)
+                        return isFront ? sorted.First() : sorted.Last();
+                    else
+                        return isFront ? sorted.Last() : sorted.First();
+                }
+                return candidates[0];
+            }
+            return null;
+        }
+
+        private float GetMaterialValue(Board board)
+        {
+            float red = 0, black = 0;
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte p = board.GetPiece(i);
+                if (p == 0)
+                    continue;
+                float val = Math.Abs(p) switch
+                {
+                    2 => 2,
+                    3 => 2,
+                    4 => 4,
+                    5 => 9,
+                    6 => 4.5f,
+                    7 => 1,
+                    _ => 0
+                };
+                if (p > 0)
+                    red += val;
+                else
+                    black += val;
+            }
+            return red > black + 1.0f ? 1.0f : (black > red + 1.0f ? -1.0f : 0.0f);
+        }
+
+        private float[] FlipPolicyForDataset(float[] originalPi)
+        {
+            float[] flippedPi = new float[8100];
+            for (int i = 0; i < 8100; i++)
+            {
+                if (originalPi[i] <= 0)
+                    continue;
+                int from = i / 90, to = i % 90;
+                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
+                int idx_f = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
+                if (idx_f >= 0 && idx_f < 8100)
+                    flippedPi[idx_f] = originalPi[i];
+            }
+            return flippedPi;
+        }
+
+
     }
 }

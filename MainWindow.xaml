@@ -74,7 +74,7 @@
             <Button x:Name="StartBtn" Content="开始进化" Height="45" FontSize="16" FontWeight="Bold"
                     Click="OnStartTrainingClick" Margin="0,0,0,10" Background="#4CAF50" Foreground="White"/>
 
-            <UniformGrid Columns="2" Margin="0,0,0,15">
+            <UniformGrid Columns="2" Margin="0,0,0,10">
                 <Button x:Name="ReplayLastBtn" Content="观看最新一局" Height="35" FontSize="14" FontWeight="Bold"
                         Click="OnReplayLastClick" Background="#2196F3" Foreground="White" Margin="0,0,5,0"
                         ToolTip="从后台训练队列中提取最新的一局完整对战进行演示"/>
@@ -83,13 +83,17 @@
                         ToolTip="选择本地的 game_xxx.txt 棋谱文件并进行演示"/>
             </UniformGrid>
 
+            <Button x:Name="LoadCsvBtn" Content="导入 CSV 数据集学习" Height="35" FontSize="14" FontWeight="Bold"
+                    Click="OnLoadCsvDatasetClick" Background="#9C27B0" Foreground="White" Margin="0,0,0,15"
+                    ToolTip="批量导入 Kaggle 等平台的 WXF 格式 CSV 数据集进行高强度监督学习"/>
+
             <TextBlock Text="平均 Loss:" Foreground="White" FontSize="14" Margin="0,0,0,5"/>
             <TextBlock x:Name="LossLabel" Text="0.0000" Foreground="Yellow" FontSize="18" FontWeight="Bold" Margin="0,0,0,10"/>
             <TextBlock Text="训练日志:" Foreground="White" Margin="0,0,0,5"/>
-            <TextBox x:Name="LogBox" Height="250" VerticalScrollBarVisibility="Auto" IsReadOnly="True" 
+            <TextBox x:Name="LogBox" Height="230" VerticalScrollBarVisibility="Auto" IsReadOnly="True" 
                      Background="Black" Foreground="Lime" FontFamily="Consolas" FontSize="11" Margin="0,0,0,10" TextWrapping="Wrap"/>
             <TextBlock Text="标准化 UCCI 棋谱:" Foreground="White" Margin="0,0,0,5"/>
-            <TextBox x:Name="MoveListLog" Height="100" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" 
+            <TextBox x:Name="MoveListLog" Height="90" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" 
                      IsReadOnly="True" Background="#222" Foreground="White" Padding="5" FontSize="11"/>
         </StackPanel>
     </Grid>
