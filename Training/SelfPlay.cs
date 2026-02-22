@@ -21,16 +21,12 @@ namespace ChineseChessAI.Training
             _generator = new MoveGenerator();
         }
 
-        /// <summary>
-        /// 执行一局自对弈过程
-        /// </summary>
-        /// <param name="onMovePerformed">异步回调，用于 UI 演示动画</param>
         public async Task<GameResult> RunGameAsync(Func<Board, Task>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
 
-            // --- 1. 随机开局：前 4 步完全随机，确保每一局阵型不同 ---
+            // --- 1. 随机开局 ---
             for (int i = 0; i < 4; i++)
             {
                 var legalMoves = _generator.GenerateLegalMoves(board);
@@ -44,7 +40,7 @@ namespace ChineseChessAI.Training
             }
 
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
-            int moveCount = 4; // 从第 5 步正式开始
+            int moveCount = board.GetHistory().Count();
             float finalResult = 0;
             string endReason = "进行中";
 
@@ -57,18 +53,17 @@ namespace ChineseChessAI.Training
                     {
                         bool isRed = board.IsRedTurn;
 
-                        // 编码当前局面
+                        // 编码局面：如果是黑方，StateEncoder 内部会自动翻转物理棋盘
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        // MCTS 搜索获取走法概率分布 (3200次模拟)
-                        (Move bestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
+                        // MCTS 搜索：返回基于“当前方视角”的概率分布
+                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
 
-                        // 记录训练数据（黑方视角需翻转）
-                        float[] trainingPi = isRed ? piData : FlipPolicy(piData);
-                        gameHistory.Add((stateData, trainingPi, isRed));
+                        // 记录样本：Policy 必须对应当前视角，无需额外翻转
+                        gameHistory.Add((stateData, piData, isRed));
 
-                        // --- 【核心逻辑：强制击杀检测】 ---
+                        // --- 【关键修复：坐标映射与反转】 ---
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         Move? killMove = legalMoves.FirstOrDefault(m => _generator.CanCaptureKing(board, m));
 
@@ -77,57 +72,58 @@ namespace ChineseChessAI.Training
 
                         if (killMove != null)
                         {
-                            // 发现送吃情况，强制执行击杀动作
                             move = killMove.Value;
                             isInstantKill = true;
                         }
                         else
                         {
-                            // 否则按正常温度系数采样
                             double temperature = (moveCount < 150) ? 1.0 : 0.4;
+                            // 从概率分布中采样选出一个基于“视角坐标”的动作
                             move = SelectMoveByTemperature(piData, temperature);
+
+                            // 【核心修复点】如果是黑方，必须将视角坐标映射回逻辑棋盘物理坐标
+                            if (!isRed)
+                            {
+                                move = FlipMove(move);
+                            }
+
+                            // 安全拦截：如果采样动作原地踏步或不合法，强制纠正
+                            if (move.From == move.To || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
+                            {
+                                move = legalMoves[_random.Next(legalMoves.Count)];
+                            }
                         }
 
-                        // 执行物理走子
+                        // 执行走子
                         board.Push(move.From, move.To);
 
-                        // 触发 UI 动画回调（此处会进入 MainWindow 的分步演示逻辑）
                         if (onMovePerformed != null)
                             await onMovePerformed.Invoke(board);
 
                         moveCount++;
 
-                        // --- 3. 终局判定：在 break 前增加等待，确保 UI 锁定最后一帧 ---
-
-                        // A. 判定是否刚刚完成了“吃将”击杀
+                        // --- 3. 终局判定 ---
                         if (isInstantKill)
                         {
-                            // 停留 1000ms 供用户观察最后一步击杀动作
-                            await Task.Delay(1000);
-
+                            await Task.Delay(1000); // 终局停留观察
                             endReason = "老将被击杀";
-                            // 判定获胜方：因为已经执行了 Push，当前回合方是输家
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
                             break;
                         }
 
-                        // B. 常规绝杀或困毙判定（无法走子）
                         var remainingMoves = _generator.GenerateLegalMoves(board);
                         if (remainingMoves.Count == 0)
                         {
-                            await Task.Delay(1000); // 终局停留
-
+                            await Task.Delay(1000);
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
                             break;
                         }
 
-                        // C. 平局判定 (长将重复 8 次或达到 600 步限制)
                         if (board.GetRepetitionCount() >= 8 || moveCount >= 600)
                         {
-                            await Task.Delay(1000); // 终局停留
-
+                            await Task.Delay(1000);
                             endReason = moveCount >= 600 ? "步数限制" : "八次重复";
                             finalResult = 0.0f;
                             break;
@@ -142,9 +138,17 @@ namespace ChineseChessAI.Training
             }
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
-
-            // 构造带子力分评估的训练样本
             return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount);
+        }
+
+        /// <summary>
+        /// 执行坐标 180 度反转 (row, col) -> (9-row, 8-col)
+        /// </summary>
+        private Move FlipMove(Move m)
+        {
+            int fR = m.From / 9, fC = m.From % 9;
+            int tR = m.To / 9, tC = m.To % 9;
+            return new Move((9 - fR) * 9 + (8 - fC), (9 - tR) * 9 + (8 - tC));
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature)
@@ -156,7 +160,6 @@ namespace ChineseChessAI.Training
 
             double[] poweredPi = piData.Select(p => Math.Pow(p, 1.0 / temperature)).ToArray();
             double sum = poweredPi.Sum();
-
             double r = _random.NextDouble() * sum;
             double cumulative = 0;
             for (int i = 0; i < poweredPi.Length; i++)
@@ -168,29 +171,6 @@ namespace ChineseChessAI.Training
             return Move.FromNetworkIndex(Array.IndexOf(piData, piData.Max()));
         }
 
-        private float[] FlipPolicy(float[] originalPi)
-        {
-            float[] flippedPi = new float[8100];
-            for (int i = 0; i < 8100; i++)
-            {
-                if (originalPi[i] <= 0)
-                    continue;
-
-                int from = i / 90, to = i % 90;
-                // 修正：180度中心对称翻转 (r,c) -> (9-r, 8-c)
-                int r1 = from / 9, c1 = from % 9;
-                int r2 = to / 9, c2 = to % 9;
-
-                int from_f = (9 - r1) * 9 + (8 - c1);
-                int to_f = (9 - r2) * 9 + (8 - c2);
-
-                int idx_f = from_f * 90 + to_f;
-                if (idx_f >= 0 && idx_f < 8100)
-                    flippedPi[idx_f] = originalPi[i];
-            }
-            return flippedPi;
-        }
-
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
         {
             var examples = new List<TrainingExample>();
@@ -200,7 +180,6 @@ namespace ChineseChessAI.Training
             {
                 float redMaterial = CalculateMaterialScore(finalBoard, true);
                 float blackMaterial = CalculateMaterialScore(finalBoard, false);
-
                 if (redMaterial > blackMaterial)
                     adjustedResult = 0.15f;
                 else if (blackMaterial > redMaterial)
@@ -231,13 +210,13 @@ namespace ChineseChessAI.Training
                     int type = Math.Abs(p);
                     score += type switch
                     {
-                        1 => 0,    // 帅
-                        2 => 2,    // 仕
-                        3 => 2,    // 相
-                        4 => 4,    // 马
-                        5 => 9,    // 车
-                        6 => 4.5f, // 炮
-                        7 => 1,    // 兵
+                        1 => 0,
+                        2 => 2,
+                        3 => 2,
+                        4 => 4,
+                        5 => 9,
+                        6 => 4.5f,
+                        7 => 1,
                         _ => 0
                     };
                 }
