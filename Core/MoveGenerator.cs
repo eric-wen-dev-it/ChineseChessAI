@@ -48,17 +48,12 @@ namespace ChineseChessAI.Core
             return legalMoves;
         }
 
-        /// <summary>
-        /// 【核心新增】获取直接击杀对方老将的动作。
-        /// 专门用于在对方“送将/未应将”时，强制执行吃将并结束游戏。
-        /// </summary>
         public Move? GetCaptureKingMove(Board board)
         {
             bool isRedAttacker = board.IsRedTurn;
             int enemyKingType = isRedAttacker ? -1 : 1;
             int enemyKingIndex = -1;
 
-            // 1. 找到对方老将位置
             for (int i = 0; i < 90; i++)
             {
                 if (board.GetPiece(i) == enemyKingType)
@@ -71,7 +66,6 @@ namespace ChineseChessAI.Core
             if (enemyKingIndex == -1)
                 return null;
 
-            // 2. 遍历所有己方棋子，看谁能走到对方老将的位置
             var attacks = new List<Move>();
             for (int i = 0; i < 90; i++)
             {
@@ -84,7 +78,6 @@ namespace ChineseChessAI.Core
 
             foreach (var m in attacks)
             {
-                // 只要有任何一步棋能走到对方老将头上，这就是击杀动作
                 if (m.To == enemyKingIndex)
                     return m;
             }
@@ -193,19 +186,44 @@ namespace ChineseChessAI.Core
             return true;
         }
 
+        /// <summary>
+        /// 【核心修复】精准的马后炮/马将威胁判定
+        /// </summary>
         private bool CheckKnightThreats(Board board, int r, int c, bool isRedKing)
         {
-            int[] dr = { -2, -2, -1, -1, 1, 1, 2, 2 }, dc = { -1, 1, -2, 2, -2, 2, -1, 1 };
-            int[] lr = { -1, -1, 0, 0, 0, 0, 1, 1 }, lc = { 0, 0, -1, 1, -1, 1, 0, 0 };
+            int[] dr = { -2, -2, -1, -1, 1, 1, 2, 2 };
+            int[] dc = { -1, 1, -2, 2, -2, 2, -1, 1 };
+
             for (int i = 0; i < 8; i++)
             {
-                int nr = r + dr[i], nc = c + dc[i];
+                int nr = r + dr[i];
+                int nc = c + dc[i];
+
                 if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS)
                 {
+                    // 找到了一个可以跳到老将位置的敌方马
                     if (IsEnemy(isRedKing, board.GetPiece(nr, nc), 4))
                     {
-                        if (board.GetPiece(r + lr[i], c + lc[i]) == 0)
+                        // 计算马腿坐标：马腿永远在紧贴着马(nr, nc)的前进方向上
+                        int legR = nr;
+                        int legC = nc;
+
+                        if (Math.Abs(dr[i]) == 2)
+                        {
+                            // 马竖着跳了2格，说明马腿在它的垂直方向上
+                            legR -= dr[i] / 2;
+                        }
+                        else
+                        {
+                            // 马横着跳了2格，说明马腿在它的水平方向上
+                            legC -= dc[i] / 2;
+                        }
+
+                        // 如果马腿位置是空的，说明确实被将军了！
+                        if (board.GetPiece(legR, legC) == 0)
+                        {
                             return false;
+                        }
                     }
                 }
             }

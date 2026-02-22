@@ -6,6 +6,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
@@ -20,14 +21,22 @@ namespace ChineseChessAI
         private Button[] _cellButtons = new Button[90];
         private bool _isTraining = false;
 
-        // 【新增】观战状态锁，防止多个动画同时抢占 UI
-        private bool _isReplaying = false;
+        private Channel<List<Move>> _replayChannel;
 
         public MainWindow()
         {
             InitializeComponent();
             InitializeBoardUI();
             this.Loaded += (s, e) => DrawBoardLines();
+
+            // 频道容量为 1，总是丢弃旧数据，只保留最新
+            _replayChannel = Channel.CreateBounded<List<Move>>(new BoundedChannelOptions(1)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest
+            });
+
+            // 【架构升级】：窗口启动时，就让播放器作为全局守护进程跑起来
+            _ = Task.Run(StartReplayLoopAsync);
         }
 
         private void InitializeBoardUI()
@@ -84,58 +93,66 @@ namespace ChineseChessAI
         }
 
         /// <summary>
-        /// 【全新独立复盘任务】
-        /// 接收完整的一局棋走法，使用一个完全独立的 Board 进行慢动作演示。
-        /// 不会干扰后台的高速训练。
+        /// 全局守护进程：永远在等待频道里的数据
         /// </summary>
-        private async Task ReplayGameAsync(List<Move> historyMoves)
+        private async Task StartReplayLoopAsync()
         {
-            _isReplaying = true;
+            try
+            {
+                // 无论是否在训练，播放器永远在线等待数据
+                await foreach (var gameMoves in _replayChannel.Reader.ReadAllAsync())
+                {
+                    Log($"[观战] 开始播放新对局，步数: {gameMoves.Count}");
+                    await ReplayGameInternalAsync(gameMoves);
+                }
+            }
+            catch (ChannelClosedException) { }
+        }
 
-            // 1. 创建 UI 专用的棋盘，绝对不会和训练线程冲突
+        private async Task ReplayGameInternalAsync(List<Move> historyMoves)
+        {
             Board uiBoard = new Board();
             uiBoard.Reset();
 
             Dispatcher.Invoke(() => RefreshBoardOnly(uiBoard));
 
-            // 2. 慢慢回放这局棋
             foreach (var move in historyMoves)
             {
-                // 先拿到被吃的子（如果有的话）
-                sbyte capturedPiece = uiBoard.GetPiece(move.To);
+                // 【核心打断机制】：看一眼频道，如果有新棋局被塞进来了，立刻停止当前的旧局播放！
+                if (_replayChannel.Reader.Count > 0)
+                {
+                    Log("[观战] 接收到最新战况，强制中断旧回放...");
+                    break;
+                }
 
-                // 阶段 1：起手（不改变底层数据，只做 UI 视觉欺骗）
                 Dispatcher.Invoke(() =>
                 {
                     RefreshBoardOnly(uiBoard);
-                    sbyte movingPiece = uiBoard.GetPiece(move.From);
-
-                    _cellButtons[move.From].Foreground = movingPiece > 0 ? Brushes.Red : Brushes.Black;
                     _cellButtons[move.From].Tag = "From";
-
-                    if (capturedPiece != 0)
-                    {
-                        _cellButtons[move.To].Content = Board.GetPieceName(capturedPiece);
-                        _cellButtons[move.To].Foreground = capturedPiece > 0 ? Brushes.Red : Brushes.Black;
-                    }
                 });
 
-                // 悬停动画等待
-                await Task.Delay(600);
+                await Task.Delay(400);
 
-                // 阶段 2：正式落子
-                uiBoard.Push(move.From, move.To); // 更新底层 UI 棋盘数据
+                // 再次检查是否被新数据打断
+                if (_replayChannel.Reader.Count > 0)
+                    break;
+
+                uiBoard.Push(move.From, move.To);
                 Dispatcher.Invoke(() =>
                 {
                     RefreshBoardOnly(uiBoard);
                     _cellButtons[move.From].Tag = "From";
                     _cellButtons[move.To].Tag = "To";
                 });
+
+                await Task.Delay(600);
             }
 
-            // 终局停留 2 秒供观察结果
-            await Task.Delay(2000);
-            _isReplaying = false; // 释放锁，允许播放下一局
+            // 如果没有新数据打断它，终局停留一下
+            if (_replayChannel.Reader.Count == 0)
+            {
+                await Task.Delay(3000);
+            }
         }
 
         private void RefreshBoardOnly(Board board)
@@ -149,6 +166,8 @@ namespace ChineseChessAI
             }
             MoveListLog.Text = board.GetMoveHistoryString();
         }
+
+        // ================= 控制区事件 =================
 
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
         {
@@ -181,19 +200,19 @@ namespace ChineseChessAI
 
                     for (int iter = 1; iter <= 10000; iter++)
                     {
+                        if (!_isTraining)
+                            break;
+
                         Log($"\n--- [迭代: 第 {iter} 轮] 正在后台极速对弈... ---");
 
-                        // 【核心改动】：传入 null，关闭训练过程中的同步动画回调，让它全速奔跑！
                         GameResult result = await selfPlay.RunGameAsync(null);
 
-                        // 【核心改动】：对弈瞬间完成，如果前台处于空闲状态，就把这局丢给前台慢慢播放 (Fire and Forget)
-                        if (!_isReplaying && result.MoveHistory != null && result.MoveHistory.Count > 0)
+                        // 后台跑完一局，把棋谱丢进频道！
+                        if (result.MoveHistory != null && result.MoveHistory.Count > 0)
                         {
-                            Log($"[观战] 提取本局棋谱投射至 UI 进行慢动作演示...");
-                            _ = ReplayGameAsync(result.MoveHistory);
+                            _replayChannel.Writer.TryWrite(result.MoveHistory);
                         }
 
-                        // 保存棋谱等常规操作 (依然在后台飞速进行)
                         string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
                         SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason);
 
@@ -220,10 +239,88 @@ namespace ChineseChessAI
                 catch (Exception ex)
                 {
                     Log($"[致命错误] {ex.Message}");
+                }
+                finally
+                {
                     _isTraining = false;
                     Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
                 }
             });
+        }
+
+        private void OnReplayLastClick(object sender, RoutedEventArgs e)
+        {
+            MessageBox.Show("极速模式下，后台的最新对局已经自动推送至棋盘频道循环播放。");
+        }
+
+        /// <summary>
+        /// 【完美契合您的思路】读取文件 -> 转换成 List<Move> -> 丢入频道！
+        /// </summary>
+        private void OnLoadFileClick(object sender, RoutedEventArgs e)
+        {
+            if (_isTraining)
+            {
+                MessageBox.Show("训练正在全速运行中！请先停止训练，以免后台棋谱覆盖您导入的文件。", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var openFileDialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "选择棋谱文件",
+                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs")
+            };
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                try
+                {
+                    string fileContent = File.ReadAllText(openFileDialog.FileName);
+
+                    // 解析文件中的 UCCI 字符串
+                    string ucciRecord = "";
+                    var lines = fileContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines)
+                    {
+                        if (line.StartsWith("棋谱:"))
+                        {
+                            ucciRecord = line.Substring(3).Trim();
+                            break;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(ucciRecord))
+                    {
+                        MessageBox.Show("未能从文件中解析出棋谱数据！", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                        return;
+                    }
+
+                    Log($"[系统] 成功读取本地文件: {Path.GetFileName(openFileDialog.FileName)}");
+
+                    // 将 UCCI 字符串转换为 List<Move> 棋局
+                    var moveList = new List<Move>();
+                    var movesStr = ucciRecord.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var mStr in movesStr)
+                    {
+                        if (mStr.Length == 4)
+                        {
+                            int fC = mStr[0] - 'a';
+                            int fR = 9 - (mStr[1] - '0');
+                            int tC = mStr[2] - 'a';
+                            int tR = 9 - (mStr[3] - '0');
+                            moveList.Add(new Move(fR * 9 + fC, tR * 9 + tC));
+                        }
+                    }
+
+                    // 【最关键的一步】：清空当前演示（隐含在机制里），直接把棋局丢入频道展示！
+                    _replayChannel.Writer.TryWrite(moveList);
+                    Log($"[回放] 棋局已送入展示频道。");
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"读取或解析棋谱失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
         }
 
         private void SaveMoveListToFile(string moveList, string result, string reason)
