@@ -84,41 +84,57 @@ namespace ChineseChessAI
             ChessLinesCanvas.Children.Add(line);
         }
 
-        private void UpdateBoard(Board board)
+        /// <summary>
+        /// 【核心修改】带分步动画的棋盘更新逻辑
+        /// </summary>
+        private async Task UpdateBoardWithAnimation(Board board)
         {
-            Dispatcher.Invoke(() =>
+            var move = board.LastMove;
+
+            // 如果是开局或重置，直接刷新
+            if (move == null)
             {
-                for (int i = 0; i < 90; i++)
-                {
-                    sbyte p = board.GetPiece(i);
-                    _cellButtons[i].Content = GetPieceChar(p);
-                    _cellButtons[i].Foreground = p > 0 ? Brushes.Red : Brushes.Black;
+                await Dispatcher.InvokeAsync(() => RefreshBoardOnly(board));
+                return;
+            }
 
-                    // --- 【核心修改：通过 Tag 标记起止位置以显示方框】 ---
-                    if (board.LastMove != null)
-                    {
-                        if (i == board.LastMove.Value.From)
-                        {
-                            _cellButtons[i].Tag = "From"; // 触发 XAML 中的起始方框（如橙红色）
-                        }
-                        else if (i == board.LastMove.Value.To)
-                        {
-                            _cellButtons[i].Tag = "To";   // 触发 XAML 中的结束方框（如翠绿色）
-                        }
-                        else
-                        {
-                            _cellButtons[i].Tag = null;   // 清除其他位置的标记
-                        }
-                    }
-                    else
-                    {
-                        _cellButtons[i].Tag = null;       // 局面重置时清除所有标记
-                    }
-                }
+            // 在 UI 线程执行分步演示
+            await Dispatcher.InvokeAsync(async () =>
+            {
+                // 1. 恢复之前的物理状态（棋子在原位），仅绘制红色起始方框
+                // 注意：这里需要先手动“撤销”视觉上的移动，展示起点
+                sbyte movingPiece = board.GetPiece(move.Value.To);
+                sbyte capturedPiece = board.GetPiece(move.Value.From); // 虽然已经是0，但在逻辑上它是起点
 
-                // 自动更新棋谱序列
-                MoveListLog.Text = board.GetMoveHistoryString();
+                // 强制将起点设为红框
+                _cellButtons[move.Value.From].Tag = "From";
+                _cellButtons[move.Value.To].Tag = null;
+
+                // 等待让用户看清“起手”
+                await Task.Delay(200);
+
+                // 2. 正式移动棋子并绘制结束位置
+                RefreshBoardOnly(board);
+
+                // 确保起止点高亮同时存在
+                _cellButtons[move.Value.From].Tag = "From";
+                _cellButtons[move.Value.To].Tag = "To";
             });
+        }
+
+        /// <summary>
+        /// 仅刷新棋子物理位置，不处理动画延迟
+        /// </summary>
+        private void RefreshBoardOnly(Board board)
+        {
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte p = board.GetPiece(i);
+                _cellButtons[i].Content = Board.GetPieceName(p);
+                _cellButtons[i].Foreground = p > 0 ? Brushes.Red : Brushes.Black;
+                _cellButtons[i].Tag = null; // 重置标记
+            }
+            MoveListLog.Text = board.GetMoveHistoryString();
         }
 
         private string GetPieceChar(sbyte p)
@@ -139,7 +155,7 @@ namespace ChineseChessAI
                 {
                     Log("=== 进化循环已启动 ===");
 
-                    // 1. 初始化模型与环境
+                    // 1. 初始化模型
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                     string modelPath = System.IO.Path.Combine(baseDir, "best_model.pt");
@@ -153,44 +169,32 @@ namespace ChineseChessAI
                     var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine);
 
-                    // 2. 初始化 ReplayBuffer 并加载磁盘旧样本
-                    // 增大容量至 100,000 以支持更长期的经验回放
+                    // 2. 初始化缓存并加载旧样本
                     var buffer = new ReplayBuffer(100000);
                     Log("[系统] 正在扫描磁盘旧样本...");
-
-                    // 调用您新添加的 LoadOldSamples 方法，从 data/self_play_data 恢复进度
                     buffer.LoadOldSamples();
 
                     var trainer = new Trainer(model);
 
-                    // 3. 进入进化循环
+                    // 3. 进入循环
                     for (int iter = 1; iter <= 10000; iter++)
                     {
                         Log($"\n--- [迭代: 第 {iter} 轮] ---");
 
-                        // 执行自对弈：UpdateBoard 会处理 LastMove 的起始/结束位置方框高亮
-                        GameResult result = await selfPlay.RunGameAsync(b => UpdateBoard(b));
+                        // 【修改】回调改为异步函数以支持动画演示
+                        GameResult result = await selfPlay.RunGameAsync(async b => await UpdateBoardWithAnimation(b));
 
-                        // 将新样本加入缓存，并自动序列化到磁盘
                         buffer.AddRange(result.Examples);
 
-                        // 日志输出详细的局终信息
                         Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 收集样本: {result.Examples.Count}");
 
-                        // 4. 触发训练：当累积样本达到 4096 条时
                         if (buffer.Count >= 4096)
                         {
-                            Log($"[训练] 正在从 {buffer.Count} 个样本中随机采样并开始梯度下降...");
-
-                            // 进行 15 个 Epoch 的强化学习
+                            Log("[训练] 开始梯度下降...");
                             float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
-
-                            // 更新 UI 上的平均 Loss 显示
                             Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
 
-                            // 保存进化后的最佳模型并创建备份
                             ModelManager.SaveModel(model, modelPath);
-
                             Log($"[训练] 完成，当前 Loss: {loss:F4}");
                         }
                     }
@@ -198,7 +202,7 @@ namespace ChineseChessAI
                 catch (Exception ex)
                 {
                     Log($"[致命错误] {ex.Message}");
-                    _isTraining = false; // 允许重新开始
+                    _isTraining = false;
                     Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
                 }
             });
