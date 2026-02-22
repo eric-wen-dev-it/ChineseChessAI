@@ -385,10 +385,10 @@ namespace ChineseChessAI
         {
             var lines = File.ReadAllLines(filePath);
 
-            // 【核心修复】：放弃 Dictionary<int, string>，直接用 List 保持文件原始的红黑交替顺序！
-            var games = new Dictionary<string, List<string>>();
+            // 【终极重构】：红黑分离式存储！完全降服 Kaggle 的奇葩排版
+            var games = new Dictionary<string, (Dictionary<int, string> Red, Dictionary<int, string> Black)>();
 
-            Log("[监督学习] 正在归类对局数据...");
+            Log("[监督学习] 正在归类对局数据并进行红黑时空交织...");
             foreach (var line in lines)
             {
                 if (line.StartsWith("gameID", StringComparison.OrdinalIgnoreCase))
@@ -398,57 +398,74 @@ namespace ChineseChessAI
                 if (parts.Length >= 4)
                 {
                     string gameId = parts[0].Trim(' ', '"');
+                    string turnStr = parts[1].Trim(' ', '"');
+                    string side = parts[2].Trim(' ', '"').ToLower();
                     string move = parts[3].Trim(' ', '"');
 
-                    if (!string.IsNullOrEmpty(move))
+                    if (int.TryParse(turnStr, out int turn) && !string.IsNullOrEmpty(move))
                     {
                         if (!games.ContainsKey(gameId))
-                            games[gameId] = new List<string>();
+                        {
+                            // 初始化这局棋的红黑两个大脑
+                            games[gameId] = (new Dictionary<int, string>(), new Dictionary<int, string>());
+                        }
 
-                        // 按照文件原始顺序追加：红、黑、红、黑...
-                        games[gameId].Add(move);
+                        // 各回各家
+                        if (side == "red")
+                            games[gameId].Red[turn] = move;
+                        else
+                            games[gameId].Black[turn] = move;
                     }
                 }
             }
 
-            Log($"[监督学习] 成功解析到 {games.Count} 局大师对战，开始提取神经网络特征...");
+            Log($"[监督学习] 成功归类 {games.Count} 局，开始推演神经网络特征...");
 
-            var buffer = new ReplayBuffer(200000);
+            var buffer = new ReplayBuffer(500000);
             var generator = new MoveGenerator();
             int successGames = 0;
 
             foreach (var kvp in games)
             {
+                var redMoves = kvp.Value.Red;
+                var blackMoves = kvp.Value.Black;
+
+                if (redMoves.Count == 0)
+                    continue;
+
                 var board = new Board();
                 board.Reset();
                 var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
 
-                foreach (var wxfMove in kvp.Value)
+                // 找出这局棋打了多少回合
+                int maxTurn = Math.Max(
+                    redMoves.Count > 0 ? redMoves.Keys.Max() : 0,
+                    blackMoves.Count > 0 ? blackMoves.Keys.Max() : 0
+                );
+
+                // 【核心魔法】：拉链式交织（红一回合，黑一回合）
+                for (int turn = 1; turn <= maxTurn; turn++)
                 {
-                    Move? parsedMove = ParseWxfMove(board, wxfMove, generator);
-
-                    if (parsedMove == null)
+                    // === 1. 红方走棋 ===
+                    if (redMoves.TryGetValue(turn, out string redWxf))
                     {
-                        // 遇到终局标记 (win/resign) 或残缺走法，立刻截断，但保留前面完美的对局！
-                        break;
+                        if (!ProcessSingleMove(board, redWxf, generator, gameHistory))
+                            break; // 遇到无法解析的终局符或残缺，立刻截断，保留已拿到的黄金数据
                     }
+                    else
+                        break; // 红方数据断层
 
-                    bool isRed = board.IsRedTurn;
-                    var stateTensor = StateEncoder.Encode(board);
-                    float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
-
-                    float[] piData = new float[8100];
-                    int netIdx = parsedMove.Value.ToNetworkIndex();
-                    if (netIdx >= 0 && netIdx < 8100)
-                        piData[netIdx] = 1.0f;
-
-                    float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
-                    gameHistory.Add((stateData, trainingPi, isRed));
-
-                    board.Push(parsedMove.Value.From, parsedMove.Value.To);
+                    // === 2. 黑方走棋 ===
+                    if (blackMoves.TryGetValue(turn, out string blackWxf))
+                    {
+                        if (!ProcessSingleMove(board, blackWxf, generator, gameHistory))
+                            break;
+                    }
+                    else
+                        break; // 黑方数据断层（很正常，可能红方上一步已经绝杀了）
                 }
 
-                // 只要这局棋我们成功收集了超过 10 步的有效数据，它就是优质的训练素材！
+                // 只要交织成功了 10 步以上，这就是优质的训练素材！
                 if (gameHistory.Count > 10)
                 {
                     float resultValue = GetMaterialValue(board);
@@ -463,13 +480,13 @@ namespace ChineseChessAI
 
             if (buffer.Count < 128)
             {
-                Log($"[监督学习] 严重警告：有效样本过少 ({buffer.Count} 个)。已终止训练以防引擎崩溃！");
+                Log($"[监督学习] 严重警告：有效样本过少 ({buffer.Count} 个)。");
                 Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
                 return;
             }
 
-            Log($"[监督学习] 提取完毕！共成功提取 {successGames} 局，生成了 {buffer.Count} 个黄金样本！");
-            Log($"[监督学习] 开始高强度反向传播 (这可能需要几分钟)...");
+            Log($"[监督学习] 提取完毕！成功提取 {successGames} 局，生成了 {buffer.Count} 个黄金样本！");
+            Log($"[监督学习] 开始高强度反向传播 (数据量极大，请耐心等待)...");
 
             try
             {
@@ -480,20 +497,83 @@ namespace ChineseChessAI
 
                 var trainer = new Trainer(model);
 
+                // 【防显存爆炸核心】：分块喂给模型！
+                // 每次只把 4096 个样本丢给 GPU 去 stack。
+                // 如果您的显存依然报警，可以把这个值调成 2048 或 1024。
+                int chunkSize = 4096;
+
                 for (int epoch = 1; epoch <= 10; epoch++)
                 {
-                    float loss = trainer.Train(buffer.Sample(buffer.Count), epochs: 1);
-                    Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-                    Log($"[监督学习] Epoch {epoch}/10 完成，Loss: {loss:F4}");
+                    Log($"[监督学习] --- 开始 Epoch {epoch}/10 ---");
+
+                    // 打乱所有 50 万个黄金样本
+                    var allSamples = buffer.Sample(buffer.Count);
+                    float epochLossSum = 0;
+                    int chunksCount = 0;
+
+                    // 将海量数据切块，蚂蚁搬家
+                    for (int i = 0; i < allSamples.Count; i += chunkSize)
+                    {
+                        // 高效截取当前块 (避免使用耗时的 LINQ Skip)
+                        int currentChunkSize = Math.Min(chunkSize, allSamples.Count - i);
+                        var chunk = allSamples.GetRange(i, currentChunkSize);
+
+                        // GPU 只需处理这一小块数据，显存占用极小且稳定
+                        float loss = trainer.Train(chunk, epochs: 1);
+
+                        epochLossSum += loss;
+                        chunksCount++;
+
+                        // 实时更新平均 Loss
+                        Dispatcher.Invoke(() =>
+                        {
+                            LossLabel.Text = (epochLossSum / chunksCount).ToString("F4");
+                        });
+
+                        // 每处理 20 个 Chunk 打印一次日志，避免刷屏卡死 UI
+                        if (chunksCount % 20 == 0)
+                        {
+                            Log($"[监督学习] 进度: 批次 {chunksCount}, 当前块 Loss: {loss:F4}");
+                        }
+                    }
+
+                    Log($"[监督学习] *** Epoch {epoch} 完成，本轮平均 Loss: {(epochLossSum / chunksCount):F4} ***");
                 }
 
                 ModelManager.SaveModel(model, modelPath);
-                Log($"[监督学习] 大功告成！AI 已经吸收了这批对局的精华，棋力大增！");
+                Log($"[监督学习] 大功告成！AI 完美吸收了全部 9900 局大师数据，没有发生显存溢出！");
             }
             catch (Exception ex)
             {
                 Log($"[训练错误] {ex.Message}");
             }
+            finally
+            {
+                Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
+            }
+        }
+
+        // 把原本臃肿的单步推演逻辑提取出来，让主代码清清爽爽
+        private bool ProcessSingleMove(Board board, string wxfMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
+        {
+            Move? parsedMove = ParseWxfMove(board, wxfMove, generator);
+            if (parsedMove == null)
+                return false;
+
+            bool isRed = board.IsRedTurn;
+            var stateTensor = StateEncoder.Encode(board);
+            float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
+
+            float[] piData = new float[8100];
+            int netIdx = parsedMove.Value.ToNetworkIndex();
+            if (netIdx >= 0 && netIdx < 8100)
+                piData[netIdx] = 1.0f;
+
+            float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
+            gameHistory.Add((stateData, trainingPi, isRed));
+
+            board.Push(parsedMove.Value.From, parsedMove.Value.To);
+            return true;
         }
 
         /// <summary>

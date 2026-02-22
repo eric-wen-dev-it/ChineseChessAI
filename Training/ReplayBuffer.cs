@@ -1,7 +1,8 @@
-﻿using System.IO;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
-using TorchSharp;
-using static TorchSharp.torch;
 
 namespace ChineseChessAI.Training
 {
@@ -24,7 +25,7 @@ namespace ChineseChessAI.Training
                 Directory.CreateDirectory(_dataDir);
         }
 
-        // --- 【新增】保存单局样本到磁盘 ---
+        // --- 保存单局样本到磁盘 ---
         public void SaveExamples(List<TrainingExample> examples)
         {
             try
@@ -40,7 +41,7 @@ namespace ChineseChessAI.Training
             }
         }
 
-        // --- 【新增】从磁盘加载已有样本 ---
+        // --- 从磁盘加载已有样本 ---
         public void LoadOldSamples()
         {
             if (!Directory.Exists(_dataDir))
@@ -85,36 +86,23 @@ namespace ChineseChessAI.Training
             }
         }
 
-        // ... 原有的 Sample 方法保持不变 ...
-        public (Tensor States, Tensor Policies, Tensor Values) Sample(int batchSize)
+        /// <summary>
+        /// 【核心修改】：不再直接返回 Tensor 导致爆显存，而是返回原始的 List<TrainingExample>，
+        /// 供外部进行 Chunk 切片后再交由 Trainer 转为 Tensor。
+        /// </summary>
+        public List<TrainingExample> Sample(int batchSize)
         {
             int count = Math.Min(batchSize, _count);
-            var batchStates = new List<Tensor>();
-            var batchPolicies = new List<Tensor>();
-            var batchValues = new List<float>();
+            var batch = new List<TrainingExample>(count);
 
             for (int i = 0; i < count; i++)
             {
+                // 随机抽取样本
                 int index = _random.Next(_count);
-                var example = _buffer[index];
-
-                batchStates.Add(torch.tensor(example.State, new long[] { 14, 10, 9 }));
-                batchPolicies.Add(torch.tensor(example.Policy, new long[] { 8100 }));
-                batchValues.Add(example.Value);
+                batch.Add(_buffer[index]);
             }
 
-            var states = torch.stack(batchStates);
-            var policies = torch.stack(batchPolicies);
-            var values = torch.tensor(batchValues.ToArray(), ScalarType.Float32);
-
-            if (cuda.is_available())
-            {
-                states = states.to(DeviceType.CUDA);
-                policies = policies.to(DeviceType.CUDA);
-                values = values.to(DeviceType.CUDA);
-            }
-
-            return (states, policies, values);
+            return batch;
         }
 
         public int Count => _count;

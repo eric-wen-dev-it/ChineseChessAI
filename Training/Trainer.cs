@@ -1,7 +1,10 @@
 ﻿using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using static TorchSharp.torch;
-using static TorchSharp.torch.optim.lr_scheduler; // 【新增】引用调度器命名空间
+using static TorchSharp.torch.optim.lr_scheduler;
 
 namespace ChineseChessAI.Training
 {
@@ -9,10 +12,10 @@ namespace ChineseChessAI.Training
     {
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
-        private LRScheduler _scheduler; // 【新增】学习率调度器实例
+        private LRScheduler _scheduler; // 学习率调度器实例
         private readonly double _learningRate = 0.001;
 
-        // 【优化】记录迭代次数，用于触发学习率更新
+        // 记录迭代次数，用于触发学习率更新
         private int _iterationCount = 0;
 
         public Trainer(CChessNet model)
@@ -30,29 +33,61 @@ namespace ChineseChessAI.Training
             // 1. 初始化 Adam 优化器
             _optimizer = torch.optim.Adam(parameters, _learningRate, weight_decay: 1e-4);
 
-            // 2. 【新增】初始化学习率调度器
-            // 每隔 50 次训练调用 (step_size)，学习率变为原来的 50% (gamma)
-            // 你可以根据日志观察，如果 Loss 持续不降，可以把 step_size 调小
-            _scheduler = StepLR(_optimizer, step_size: 50, gamma: 0.5);
+            // 2. 初始化学习率调度器
+            // 注意：由于引入了 Chunk 切片机制，每次调用 Train 只处理几千个样本。
+            // 设定 step_size: 500 意味着每训练 500 个 Chunk (约两百万数据)，学习率变为原来的 50%
+            _scheduler = StepLR(_optimizer, step_size: 500, gamma: 0.5);
         }
 
-        // 供 MainWindow 调用的多轮训练接口
-        public float Train((Tensor States, Tensor Policies, Tensor Values) batch, int epochs)
+        /// <summary>
+        /// 供 MainWindow 调用的多轮训练接口（完美对接 List<TrainingExample> 切片）
+        /// </summary>
+        public float Train(List<TrainingExample> examples, int epochs)
         {
-            double totalLoss = 0;
-            for (int e = 0; e < epochs; e++)
+            if (examples == null || examples.Count == 0)
+                return 0f;
+
+            // 1. 将 List 转换为 Tensor (安全！因为外部已经做了 Chunk 限制，这里不会爆显存)
+            var statesList = new List<Tensor>(examples.Count);
+            var policiesList = new List<Tensor>(examples.Count);
+            var valuesList = new List<Tensor>(examples.Count);
+
+            foreach (var ex in examples)
             {
-                totalLoss += TrainStep(batch.States, batch.Policies, batch.Values);
+                // 确保 state 的维度形状匹配模型输入（通常是 1x10x9）
+                statesList.Add(tensor(ex.State).view(1, 10, 9));
+                policiesList.Add(tensor(ex.Policy));
+                valuesList.Add(tensor(ex.Value));
             }
 
-            // 【关键】每一轮训练（Iteration）结束后，更新学习率调度器状态
+            using var statesTensor = stack(statesList);
+            using var policiesTensor = stack(policiesList);
+            using var valuesTensor = stack(valuesList);
+
+            double totalLoss = 0;
+
+            // 2. 循环训练指定轮次
+            for (int e = 0; e < epochs; e++)
+            {
+                totalLoss += TrainStep(statesTensor, policiesTensor, valuesTensor);
+            }
+
+            // 3. 释放临时列表中的 Tensor 防止内存泄漏
+            foreach (var t in statesList)
+                t.Dispose();
+            foreach (var t in policiesList)
+                t.Dispose();
+            foreach (var t in valuesList)
+                t.Dispose();
+
+            // 4. 更新学习率调度器状态
             _iterationCount++;
             _scheduler.step();
 
             return (float)(totalLoss / epochs);
         }
 
-        public double TrainStep(Tensor states, Tensor targetPolicies, Tensor targetValues)
+        private double TrainStep(Tensor states, Tensor targetPolicies, Tensor targetValues)
         {
             using var scope = torch.NewDisposeScope();
 
@@ -67,8 +102,11 @@ namespace ChineseChessAI.Training
 
             var (policyLogits, valuePred) = _model.forward(x);
 
-            // Loss 计算逻辑
+            // === Loss 计算逻辑 ===
+            // Value Loss: 均方误差 (MSE)
             var vLoss = torch.nn.functional.mse_loss(valuePred, y_value.view(-1, 1));
+
+            // Policy Loss: 交叉熵 (CrossEntropy) 的手动实现
             var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
             var pLoss = -(y_policy * logProbs).sum(1).mean();
 
@@ -79,17 +117,18 @@ namespace ChineseChessAI.Training
                 throw new Exception($"计算图断裂！参数状态: {_model.parameters().First().requires_grad}");
             }
 
+            // 反向传播与优化
             totalLoss.backward();
             _optimizer.step();
 
             return totalLoss.item<float>();
         }
 
-        // 【修正后】获取当前学习率的方法
+        /// <summary>
+        /// 获取当前实际运行中的学习率
+        /// </summary>
         public double GetCurrentLR()
         {
-            // TorchSharp 中，Adam 优化器的 Options 存储了初始学习率
-            // 而实际运行中的学习率需要通过这种方式访问：
             var groups = _optimizer.ParamGroups;
             if (groups != null && groups.Any())
             {
