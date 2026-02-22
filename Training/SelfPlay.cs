@@ -11,7 +11,8 @@ namespace ChineseChessAI.Training
 {
     public record TrainingExample(float[] State, float[] Policy, float Value);
 
-    public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount);
+    // 【修改点 1】增加 List<Move> MoveHistory，用于将本局所有动作传回给 UI 进行异步复盘
+    public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
 
     public class SelfPlay
     {
@@ -30,13 +31,20 @@ namespace ChineseChessAI.Training
             var board = new Board();
             board.Reset();
 
+            // 【修改点 2】初始化当前对局的动作记录器
+            var moveHistory = new List<Move>();
+
+            // --- 1. 随机开局 ---
             for (int i = 0; i < 4; i++)
             {
                 var initMoves = _generator.GenerateLegalMoves(board);
                 if (initMoves.Count > 0)
                 {
                     var randomMove = initMoves[_random.Next(initMoves.Count)];
+
+                    moveHistory.Add(randomMove); // 记录随机开局走法
                     board.Push(randomMove.From, randomMove.To);
+
                     if (onMovePerformed != null)
                         await onMovePerformed.Invoke(board);
                 }
@@ -47,6 +55,7 @@ namespace ChineseChessAI.Training
             float finalResult = 0;
             string endReason = "进行中";
 
+            // --- 2. 正式对弈循环 ---
             while (true)
             {
                 try
@@ -56,18 +65,20 @@ namespace ChineseChessAI.Training
                         bool isRed = board.IsRedTurn;
 
                         // --- 【防线 1：送将必败拦截】 ---
-                        // 在这回合开始时，看一眼能不能直接吃掉对方的老将。
-                        // 如果能，说明对方上一回合犯了致命错误：“送将”或“没有应将”。
                         Move? instantKillMove = _generator.GetCaptureKingMove(board);
                         if (instantKillMove != null)
                         {
                             Console.WriteLine($"[规则裁判] 发现对方送将/未应将！执行绝杀: {instantKillMove.Value}");
-                            // 强行把老将吃掉作为最后一步演示
-                            board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
-                            if (onMovePerformed != null)
-                                await onMovePerformed.Invoke(board);
 
-                            await Task.Delay(1000);
+                            moveHistory.Add(instantKillMove.Value); // 记录击杀动作
+                            board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
+
+                            if (onMovePerformed != null)
+                            {
+                                await onMovePerformed.Invoke(board);
+                                await Task.Delay(1000); // 仅在同步观战模式下才进行延时
+                            }
+
                             endReason = "对方送将/未应将，老将被击杀";
                             finalResult = isRed ? 1.0f : -1.0f; // 当前方赢
                             break;
@@ -77,7 +88,9 @@ namespace ChineseChessAI.Training
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
-                            await Task.Delay(1000);
+                            if (onMovePerformed != null)
+                                await Task.Delay(1000);
+
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
@@ -86,7 +99,9 @@ namespace ChineseChessAI.Training
 
                         if (board.GetRepetitionCount() >= 8 || moveCount >= 600)
                         {
-                            await Task.Delay(1000);
+                            if (onMovePerformed != null)
+                                await Task.Delay(1000);
+
                             endReason = moveCount >= 600 ? "步数限制" : "八次重复";
                             finalResult = 0.0f;
                             break;
@@ -109,7 +124,9 @@ namespace ChineseChessAI.Training
                             move = legalMoves[_random.Next(legalMoves.Count)];
                         }
 
+                        moveHistory.Add(move); // 记录正式对弈走法
                         board.Push(move.From, move.To);
+
                         if (onMovePerformed != null)
                             await onMovePerformed.Invoke(board);
 
@@ -124,7 +141,9 @@ namespace ChineseChessAI.Training
             }
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
-            return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount);
+
+            // 【修改点 3】将包含完整对战记录的 moveHistory 一并返回给调用者
+            return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount, moveHistory);
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
