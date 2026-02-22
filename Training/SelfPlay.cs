@@ -11,7 +11,6 @@ namespace ChineseChessAI.Training
 {
     public record TrainingExample(float[] State, float[] Policy, float Value);
 
-    // 【修改点 1】增加 List<Move> MoveHistory，用于将本局所有动作传回给 UI 进行异步复盘
     public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
 
     public class SelfPlay
@@ -31,10 +30,9 @@ namespace ChineseChessAI.Training
             var board = new Board();
             board.Reset();
 
-            // 【修改点 2】初始化当前对局的动作记录器
             var moveHistory = new List<Move>();
 
-            // --- 1. 随机开局 ---
+            // --- 1. 随机开局 (增加开局多样性) ---
             for (int i = 0; i < 4; i++)
             {
                 var initMoves = _generator.GenerateLegalMoves(board);
@@ -55,6 +53,10 @@ namespace ChineseChessAI.Training
             float finalResult = 0;
             string endReason = "进行中";
 
+            // === 【裁判的记忆本】 ===
+            var positionHistory = new Dictionary<ulong, int>();
+            int noProgressCount = 0;
+
             // --- 2. 正式对弈循环 ---
             while (true)
             {
@@ -70,21 +72,21 @@ namespace ChineseChessAI.Training
                         {
                             Console.WriteLine($"[规则裁判] 发现对方送将/未应将！执行绝杀: {instantKillMove.Value}");
 
-                            moveHistory.Add(instantKillMove.Value); // 记录击杀动作
+                            moveHistory.Add(instantKillMove.Value);
                             board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
 
                             if (onMovePerformed != null)
                             {
                                 await onMovePerformed.Invoke(board);
-                                await Task.Delay(1000); // 仅在同步观战模式下才进行延时
+                                await Task.Delay(1000);
                             }
 
                             endReason = "对方送将/未应将，老将被击杀";
-                            finalResult = isRed ? 1.0f : -1.0f; // 当前方赢
+                            finalResult = isRed ? 1.0f : -1.0f;
                             break;
                         }
 
-                        // 常规逻辑继续...
+                        // --- 获取合法走法 ---
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
@@ -97,16 +99,18 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        if (board.GetRepetitionCount() >= 8 || moveCount >= 600)
+                        // --- 兜底防线：防止宇宙级死循环 ---
+                        if (moveCount >= 600)
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
 
-                            endReason = moveCount >= 600 ? "步数限制" : "八次重复";
+                            endReason = "步数限制(强制平局)";
                             finalResult = 0.0f;
                             break;
                         }
 
+                        // --- MCTS 神经网络思考 ---
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
@@ -124,13 +128,53 @@ namespace ChineseChessAI.Training
                             move = legalMoves[_random.Next(legalMoves.Count)];
                         }
 
-                        moveHistory.Add(move); // 记录正式对弈走法
+                        // === 【铁血裁判机制 1：不可逆动作检测】 ===
+                        sbyte pieceToMove = board.GetPiece(move.From);
+                        bool isCapture = board.GetPiece(move.To) != 0;
+                        bool isPawnAdvance = Math.Abs(pieceToMove) == 7;
+
+                        if (isCapture || isPawnAdvance)
+                        {
+                            noProgressCount = 0;
+                            positionHistory.Clear();
+                        }
+                        else
+                        {
+                            noProgressCount++;
+                        }
+
+                        // 执行走法
+                        moveHistory.Add(move);
                         board.Push(move.From, move.To);
 
                         if (onMovePerformed != null)
                             await onMovePerformed.Invoke(board);
 
                         moveCount++;
+
+                        // === 【铁血裁判机制 2：三次重复局面判平】 ===
+                        // 修正：调用 Board.cs 中的 CurrentHash 而不是 ZobristKey
+                        ulong currentHash = board.CurrentHash;
+                        if (!positionHistory.ContainsKey(currentHash))
+                        {
+                            positionHistory[currentHash] = 0;
+                        }
+                        positionHistory[currentHash]++;
+
+                        if (positionHistory[currentHash] >= 3)
+                        {
+                            endReason = "三次重复局面(平局)";
+                            finalResult = 0.0f;
+                            break;
+                        }
+
+                        // === 【铁血裁判机制 3：自然限着规则】 ===
+                        if (noProgressCount >= 100)
+                        {
+                            endReason = "自然限着百步无进展(平局)";
+                            finalResult = 0.0f;
+                            break;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -142,7 +186,6 @@ namespace ChineseChessAI.Training
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
 
-            // 【修改点 3】将包含完整对战记录的 moveHistory 一并返回给调用者
             return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount, moveHistory);
         }
 

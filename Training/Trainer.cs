@@ -54,8 +54,8 @@ namespace ChineseChessAI.Training
 
             foreach (var ex in examples)
             {
-                // 确保 state 的维度形状匹配模型输入（通常是 1x10x9）
-                statesList.Add(tensor(ex.State).view(1, 10, 9));
+                // 【修复】：State 的真实维度是 14 个特征平面，也就是 14 * 10 * 9
+                statesList.Add(tensor(ex.State).view(14, 10, 9));
                 policiesList.Add(tensor(ex.Policy));
                 valuesList.Add(tensor(ex.Value));
             }
