@@ -384,9 +384,10 @@ namespace ChineseChessAI
         private void ProcessCsvDataset(string filePath)
         {
             var lines = File.ReadAllLines(filePath);
-            var games = new Dictionary<string, SortedDictionary<int, string>>();
 
-            // 1. 清洗并分组 CSV 数据
+            // 【核心修复】：放弃 Dictionary<int, string>，直接用 List 保持文件原始的红黑交替顺序！
+            var games = new Dictionary<string, List<string>>();
+
             Log("[监督学习] 正在归类对局数据...");
             foreach (var line in lines)
             {
@@ -397,14 +398,15 @@ namespace ChineseChessAI
                 if (parts.Length >= 4)
                 {
                     string gameId = parts[0].Trim(' ', '"');
-                    string turnStr = parts[1].Trim(' ', '"');
+                    string move = parts[3].Trim(' ', '"');
 
-                    if (int.TryParse(turnStr, out int turn))
+                    if (!string.IsNullOrEmpty(move))
                     {
-                        string move = parts[3].Trim(' ', '"');
                         if (!games.ContainsKey(gameId))
-                            games[gameId] = new SortedDictionary<int, string>();
-                        games[gameId][turn] = move;
+                            games[gameId] = new List<string>();
+
+                        // 按照文件原始顺序追加：红、黑、红、黑...
+                        games[gameId].Add(move);
                     }
                 }
             }
@@ -415,38 +417,22 @@ namespace ChineseChessAI
             var generator = new MoveGenerator();
             int successGames = 0;
 
-            // 2. 将代数记谱推演为训练样本
             foreach (var kvp in games)
             {
                 var board = new Board();
                 board.Reset();
                 var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
 
-                int expectedTurn = 1;
-
-                foreach (var moveKvp in kvp.Value)
+                foreach (var wxfMove in kvp.Value)
                 {
-                    if (moveKvp.Key != expectedTurn)
-                    {
-                        // 发现跳步（可能有人掉线漏记了），直接截断，但保留前面完美的数据！
-                        break;
-                    }
-                    expectedTurn++;
-
-                    string wxfMove = moveKvp.Value;
                     Move? parsedMove = ParseWxfMove(board, wxfMove, generator);
 
                     if (parsedMove == null)
                     {
-                        // 遇到无法解析的动作（通常是 win, 1-0, timeout 等终局标记）
-                        if (successGames == 0 && gameHistory.Count > 0)
-                        {
-                            Log($"[拦截日志] 在第 {moveKvp.Key} 步遇到终止符 '{wxfMove}'，已成功截获并保留前面的 {gameHistory.Count} 步有效数据！");
-                        }
-                        break; // 停止解析该局，保留已有的历史记录
+                        // 遇到终局标记 (win/resign) 或残缺走法，立刻截断，但保留前面完美的对局！
+                        break;
                     }
 
-                    // 构造 One-Hot 完美策略
                     bool isRed = board.IsRedTurn;
                     var stateTensor = StateEncoder.Encode(board);
                     float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
@@ -465,7 +451,6 @@ namespace ChineseChessAI
                 // 只要这局棋我们成功收集了超过 10 步的有效数据，它就是优质的训练素材！
                 if (gameHistory.Count > 10)
                 {
-                    // 使用子力评估作为胜负标签（红多于黑则红胜）
                     float resultValue = GetMaterialValue(board);
                     var examples = gameHistory.Select(step =>
                         new TrainingExample(step.state, step.policy, step.isRedTurn ? resultValue : -resultValue)
@@ -476,7 +461,6 @@ namespace ChineseChessAI
                 }
             }
 
-            // 【防崩溃保护】：如果样本太少，绝对不能喂给 PyTorch
             if (buffer.Count < 128)
             {
                 Log($"[监督学习] 严重警告：有效样本过少 ({buffer.Count} 个)。已终止训练以防引擎崩溃！");
@@ -487,7 +471,6 @@ namespace ChineseChessAI
             Log($"[监督学习] 提取完毕！共成功提取 {successGames} 局，生成了 {buffer.Count} 个黄金样本！");
             Log($"[监督学习] 开始高强度反向传播 (这可能需要几分钟)...");
 
-            // 3. 开启暴力训练
             try
             {
                 var model = new CChessNet();
@@ -497,7 +480,6 @@ namespace ChineseChessAI
 
                 var trainer = new Trainer(model);
 
-                // 数据非常宝贵，我们循环榨干它的价值 (跑 10 个 Epoch)
                 for (int epoch = 1; epoch <= 10; epoch++)
                 {
                     float loss = trainer.Train(buffer.Sample(buffer.Count), epochs: 1);
