@@ -396,10 +396,12 @@ namespace ChineseChessAI
                 var parts = line.Split(',');
                 if (parts.Length >= 4)
                 {
-                    string gameId = parts[0];
-                    if (int.TryParse(parts[1], out int turn))
+                    string gameId = parts[0].Trim(' ', '"');
+                    string turnStr = parts[1].Trim(' ', '"');
+
+                    if (int.TryParse(turnStr, out int turn))
                     {
-                        string move = parts[3].Trim();
+                        string move = parts[3].Trim(' ', '"');
                         if (!games.ContainsKey(gameId))
                             games[gameId] = new SortedDictionary<int, string>();
                         games[gameId][turn] = move;
@@ -419,17 +421,29 @@ namespace ChineseChessAI
                 var board = new Board();
                 board.Reset();
                 var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
-                bool isGameValid = true;
+
+                int expectedTurn = 1;
 
                 foreach (var moveKvp in kvp.Value)
                 {
+                    if (moveKvp.Key != expectedTurn)
+                    {
+                        // 发现跳步（可能有人掉线漏记了），直接截断，但保留前面完美的数据！
+                        break;
+                    }
+                    expectedTurn++;
+
                     string wxfMove = moveKvp.Value;
                     Move? parsedMove = ParseWxfMove(board, wxfMove, generator);
 
                     if (parsedMove == null)
                     {
-                        isGameValid = false;
-                        break; // 遇到无法解析的异常谱（可能是残缺数据），放弃该局
+                        // 遇到无法解析的动作（通常是 win, 1-0, timeout 等终局标记）
+                        if (successGames == 0 && gameHistory.Count > 0)
+                        {
+                            Log($"[拦截日志] 在第 {moveKvp.Key} 步遇到终止符 '{wxfMove}'，已成功截获并保留前面的 {gameHistory.Count} 步有效数据！");
+                        }
+                        break; // 停止解析该局，保留已有的历史记录
                     }
 
                     // 构造 One-Hot 完美策略
@@ -448,7 +462,8 @@ namespace ChineseChessAI
                     board.Push(parsedMove.Value.From, parsedMove.Value.To);
                 }
 
-                if (isGameValid && gameHistory.Count > 10)
+                // 只要这局棋我们成功收集了超过 10 步的有效数据，它就是优质的训练素材！
+                if (gameHistory.Count > 10)
                 {
                     // 使用子力评估作为胜负标签（红多于黑则红胜）
                     float resultValue = GetMaterialValue(board);
@@ -459,6 +474,14 @@ namespace ChineseChessAI
                     buffer.AddRange(examples);
                     successGames++;
                 }
+            }
+
+            // 【防崩溃保护】：如果样本太少，绝对不能喂给 PyTorch
+            if (buffer.Count < 128)
+            {
+                Log($"[监督学习] 严重警告：有效样本过少 ({buffer.Count} 个)。已终止训练以防引擎崩溃！");
+                Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
+                return;
             }
 
             Log($"[监督学习] 提取完毕！共成功提取 {successGames} 局，生成了 {buffer.Count} 个黄金样本！");
@@ -501,6 +524,7 @@ namespace ChineseChessAI
             var candidates = new List<Move>();
 
             wxf = wxf.Trim().ToUpper();
+            wxf = wxf.Replace('=', '.'); // 兼容某些用 = 代替 . 的平移记法
 
             foreach (var move in legalMoves)
             {
@@ -518,6 +542,10 @@ namespace ChineseChessAI
                     _ => '?'
                 };
 
+                // 兼容某些 Kaggle 谱用 B (Bishop) 代替 E (Elephant)
+                if (type == 3 && !wxf.Contains('E') && wxf.Contains('B'))
+                    pieceChar = 'B';
+
                 if (!wxf.Contains(pieceChar))
                     continue;
 
@@ -533,20 +561,31 @@ namespace ChineseChessAI
 
                 int endValue = (type == 2 || type == 3 || type == 4 || direction == '.') ? endFile : Math.Abs(toRow - fromRow);
 
+                // 【核心修复】：动态数字解析器，完美支持前后炮 (+C.5) 的单数字情况
                 var digits = wxf.Where(char.IsDigit).ToArray();
+                if (digits.Length == 0)
+                    continue;
+
+                // 最后一个数字永远是 目标列 或 步数
+                int expectedEndVal = digits.Last() - '0';
+                if (endValue != expectedEndVal)
+                    continue;
+
+                // 如果有两个数字，第一个永远是起始列
                 if (digits.Length >= 2)
                 {
-                    int expectedStartFile = digits[0] - '0';
-                    int expectedEndVal = digits[1] - '0';
-                    if (startFile == expectedStartFile && endValue == expectedEndVal)
-                        candidates.Add(move);
+                    int expectedStartFile = digits.First() - '0';
+                    if (startFile != expectedStartFile)
+                        continue;
                 }
+
+                candidates.Add(move);
             }
 
             if (candidates.Count == 1)
                 return candidates[0];
 
-            // 解决双炮/双兵同列的歧义 (+C2.5 前炮平五, -C2.5 后炮平五)
+            // 解决双炮/双兵同列的歧义 (+C.5 前炮平五, -C.5 后炮平五)
             if (candidates.Count > 1)
             {
                 bool isFront = wxf.StartsWith("+") || wxf.StartsWith("F");
@@ -556,14 +595,15 @@ namespace ChineseChessAI
                 {
                     var sorted = candidates.OrderBy(m => m.From / 9).ToList();
                     if (isRed)
-                        return isFront ? sorted.First() : sorted.Last();
+                        return isFront ? sorted.First() : sorted.Last(); // 红方在下方，行号越小越靠前
                     else
-                        return isFront ? sorted.Last() : sorted.First();
+                        return isFront ? sorted.Last() : sorted.First(); // 黑方在上方，行号越大越靠前
                 }
-                return candidates[0];
+                return candidates[0]; // 极端情况下返回第一个，防止彻底崩溃
             }
             return null;
         }
+
 
         private float GetMaterialValue(Board board)
         {
