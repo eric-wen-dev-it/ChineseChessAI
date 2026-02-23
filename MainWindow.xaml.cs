@@ -1,12 +1,9 @@
 ﻿using ChineseChessAI.Core;
-using ChineseChessAI.MCTS;
-using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Training;
-using ChineseChessAI.Utils; // 引入我们新建的万能转换器
+using ChineseChessAI.Utils;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using System.Windows;
@@ -20,9 +17,10 @@ namespace ChineseChessAI
     public partial class MainWindow : Window
     {
         private Button[] _cellButtons = new Button[90];
-        private bool _isTraining = false;
-
         private Channel<List<Move>> _replayChannel;
+
+        // 核心：引入独立于 UI 的业务大脑
+        private TrainingOrchestrator _orchestrator;
 
         public MainWindow()
         {
@@ -35,8 +33,18 @@ namespace ChineseChessAI
                 FullMode = BoundedChannelFullMode.DropOldest
             });
 
+            // 初始化总指挥官，并订阅它的事件汇报
+            _orchestrator = new TrainingOrchestrator();
+            _orchestrator.OnLog += msg => AppendLog(msg);
+            _orchestrator.OnLossUpdated += loss => Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
+            _orchestrator.OnReplayRequested += moves => _replayChannel.Writer.TryWrite(moves);
+            _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
+            _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
+
             _ = Task.Run(StartReplayLoopAsync);
         }
+
+        // ================= 1. 纯 UI 渲染模块 =================
 
         private void InitializeBoardUI()
         {
@@ -91,13 +99,24 @@ namespace ChineseChessAI
             ChessLinesCanvas.Children.Add(new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = Brushes.Black, StrokeThickness = 1.2 });
         }
 
+        private void AppendLog(string msg)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {msg}\n");
+                LogBox.ScrollToEnd();
+            });
+        }
+
+        // ================= 2. 动画播放模块 =================
+
         private async Task StartReplayLoopAsync()
         {
             try
             {
                 await foreach (var gameMoves in _replayChannel.Reader.ReadAllAsync())
                 {
-                    Log($"[观战] 开始播放新对局，步数: {gameMoves.Count}");
+                    AppendLog($"[观战] 开始播放对局动画，步数: {gameMoves.Count}");
                     await ReplayGameInternalAsync(gameMoves);
                 }
             }
@@ -115,7 +134,7 @@ namespace ChineseChessAI
             {
                 if (_replayChannel.Reader.Count > 0)
                 {
-                    Log("[观战] 接收到最新战况，强制中断旧回放...");
+                    AppendLog("[观战] 接收到最新战况，强制中断旧回放...");
                     break;
                 }
 
@@ -157,82 +176,16 @@ namespace ChineseChessAI
             MoveListLog.Text = board.GetMoveHistoryString();
         }
 
-        // ================= 单局功能事件 =================
+        // ================= 3. 按钮交互模块 (事件委派给指挥官) =================
 
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
         {
-            if (_isTraining)
+            if (_orchestrator.IsTraining)
                 return;
-            _isTraining = true;
+
             StartBtn.IsEnabled = false;
-
-            await Task.Run(async () =>
-            {
-                try
-                {
-                    Log("=== 进化循环已启动 (极速模式) ===");
-                    var model = new CChessNet();
-                    string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                    string modelPath = Path.Combine(baseDir, "best_model.pt");
-
-                    if (File.Exists(modelPath))
-                    {
-                        model.load(modelPath);
-                        Log("[系统] 已加载现有模型权重。");
-                    }
-
-                    var engine = new MCTSEngine(model, batchSize: 512);
-                    var selfPlay = new SelfPlay(engine);
-                    var buffer = new ReplayBuffer(100000);
-                    buffer.LoadOldSamples();
-
-                    var trainer = new Trainer(model);
-
-                    for (int iter = 1; iter <= 10000; iter++)
-                    {
-                        if (!_isTraining)
-                            break;
-
-                        Log($"\n--- [迭代: 第 {iter} 轮] 正在后台极速对弈... ---");
-
-                        GameResult result = await selfPlay.RunGameAsync(null);
-
-                        if (result.MoveHistory != null && result.MoveHistory.Count > 0)
-                            _replayChannel.Writer.TryWrite(result.MoveHistory);
-
-                        string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
-                        SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason);
-
-                        if (result.MoveCount > 10)
-                        {
-                            buffer.AddRange(result.Examples);
-                            Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 样本已存入");
-                        }
-                        else
-                        {
-                            Log($"[对弈] 警告: 步数过短，视为无效博弈。");
-                        }
-
-                        if (buffer.Count >= 4096)
-                        {
-                            Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
-                            float loss = trainer.Train(buffer.Sample(4096), epochs: 15);
-                            Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-                            ModelManager.SaveModel(model, modelPath);
-                            Log($"[训练] 完成，当前 Loss: {loss:F4}");
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Log($"[致命错误] {ex.Message}");
-                }
-                finally
-                {
-                    _isTraining = false;
-                    Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
-                }
-            });
+            // 通知总指挥官去开启线程干活，UI立即返回不阻塞
+            await _orchestrator.StartSelfPlayAsync();
         }
 
         private void OnReplayLastClick(object sender, RoutedEventArgs e)
@@ -242,8 +195,11 @@ namespace ChineseChessAI
 
         private void OnLoadFileClick(object sender, RoutedEventArgs e)
         {
-            if (_isTraining)
+            if (_orchestrator.IsTraining)
+            {
+                MessageBox.Show("训练期间无法手动载入棋谱。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
+            }
 
             var openFileDialog = new Microsoft.Win32.OpenFileDialog
             {
@@ -281,16 +237,14 @@ namespace ChineseChessAI
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"解析失败: {ex.Message}");
+                    MessageBox.Show($"解析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
         }
 
-        // ================= 万能监督学习入口 (智能格式路由) =================
-
         private async void OnLoadDatasetClick(object sender, RoutedEventArgs e)
         {
-            if (_isTraining)
+            if (_orchestrator.IsTraining)
             {
                 MessageBox.Show("请先停止当前训练！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
@@ -305,374 +259,11 @@ namespace ChineseChessAI
             if (openFileDialog.ShowDialog() == true)
             {
                 StartBtn.IsEnabled = false;
-                string filePath = openFileDialog.FileName;
-                string extension = Path.GetExtension(filePath).ToLower();
+                AppendLog($"[系统] 准备处理文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
 
-                Log($"[系统] 正在分析文件格式: {Path.GetFileName(filePath)} ...");
-
-                await Task.Run(() =>
-                {
-                    try
-                    {
-                        // 智能路由策略
-                        if (extension == ".csv")
-                        {
-                            Log("[系统] 格式识别为: CSV 乱序对局表。已分配至【时空交织引擎】...");
-                            ProcessCsvDataset(filePath);
-                        }
-                        else if (extension == ".pgn" || extension == ".txt")
-                        {
-                            Log("[系统] 格式识别为: PGN/TXT 巨型库。已分配至【流式吞噬引擎】...");
-                            ProcessPgnDatasetStreaming(filePath);
-                        }
-                        else
-                        {
-                            Log($"[错误] 不支持的文件扩展名: {extension}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"[解析致命错误] {ex.Message}");
-                    }
-                });
-
-                StartBtn.IsEnabled = true;
+                // 将繁重的文件解析任务外包给指挥官
+                await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
             }
-        }
-
-        // ================= 核心推演与训练引擎 =================
-
-        /// <summary>
-        /// 核心方法：不论输入的是 WXF 还是 PGN UCCI，一律通过转换器翻译成标准 UCCI 提取
-        /// </summary>
-        private bool ProcessSingleMove(Board board, string rawMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
-        {
-            // 1. 万能翻译机：转换为标准 UCCI
-            string ucciMove = NotationConverter.ConvertToUcci(board, rawMove, generator);
-            if (string.IsNullOrEmpty(ucciMove))
-                return false;
-
-            // 2. 将 UCCI 转换为内部物理引擎坐标
-            Move? parsedMove = NotationConverter.UcciToMove(ucciMove);
-            if (parsedMove == null)
-                return false;
-
-            // 3. 绝对物理法则校验
-            var legalMoves = generator.GenerateLegalMoves(board);
-            if (!legalMoves.Any(m => m.From == parsedMove.Value.From && m.To == parsedMove.Value.To))
-                return false;
-
-            // 4. 生成完美的 AI 特征张量
-            bool isRed = board.IsRedTurn;
-            var stateTensor = StateEncoder.Encode(board);
-            float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
-
-            float[] piData = new float[8100];
-            int netIdx = parsedMove.Value.ToNetworkIndex();
-            if (netIdx >= 0 && netIdx < 8100)
-                piData[netIdx] = 1.0f;
-
-            float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
-            gameHistory.Add((stateData, trainingPi, isRed));
-
-            board.Push(parsedMove.Value.From, parsedMove.Value.To);
-            return true;
-        }
-
-        private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs)
-        {
-            try
-            {
-                var model = new CChessNet();
-                string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
-                if (File.Exists(modelPath))
-                    model.load(modelPath);
-
-                var trainer = new Trainer(model);
-                int chunkSize = 4096;
-
-                for (int epoch = 1; epoch <= epochs; epoch++)
-                {
-                    var allSamples = bufferToTrain.Sample(bufferToTrain.Count);
-                    float epochLossSum = 0;
-                    int chunksCount = 0;
-
-                    for (int i = 0; i < allSamples.Count; i += chunkSize)
-                    {
-                        int currentChunkSize = Math.Min(chunkSize, allSamples.Count - i);
-                        var chunk = allSamples.GetRange(i, currentChunkSize);
-
-                        float loss = trainer.Train(chunk, epochs: 1);
-                        epochLossSum += loss;
-                        chunksCount++;
-
-                        Dispatcher.Invoke(() => LossLabel.Text = (epochLossSum / chunksCount).ToString("F4"));
-                    }
-                    Log($"    -> Epoch {epoch}/{epochs} 完毕，当前内存块 Loss: {(epochLossSum / chunksCount):F4}");
-                }
-
-                ModelManager.SaveModel(model, modelPath);
-            }
-            catch (Exception ex)
-            {
-                Log($"[训练错误] {ex.Message}");
-            }
-        }
-
-        // ================= 引擎 1：巨型 PGN / TXT 流式吞噬者 =================
-
-        private void ProcessPgnDatasetStreaming(string filePath)
-        {
-            Log("[PGN 吞噬者] 正在将巨型文件读入内存...");
-            string content = File.ReadAllText(filePath);
-
-            var gameBlocks = content.Split(new[] { "[Event " }, StringSplitOptions.RemoveEmptyEntries);
-            Log($"[PGN 吞噬者] 成功切割出 {gameBlocks.Length} 局大师对战！准备开启流式训练...");
-
-            var generator = new MoveGenerator();
-            int maxBufferSize = 200000; // 内存安全水位线
-            var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
-
-            int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
-
-            foreach (var block in gameBlocks)
-            {
-                float resultValue = 0.0f;
-                bool hasExplicitResult = false;
-                var resultMatch = System.Text.RegularExpressions.Regex.Match(block, @"\[Result\s+""(.*?)""\]");
-                if (resultMatch.Success)
-                {
-                    string resStr = resultMatch.Groups[1].Value;
-                    if (resStr == "1-0")
-                    {
-                        resultValue = 1.0f;
-                        hasExplicitResult = true;
-                    }
-                    else if (resStr == "0-1")
-                    {
-                        resultValue = -1.0f;
-                        hasExplicitResult = true;
-                    }
-                    else if (resStr == "1/2-1/2")
-                    {
-                        resultValue = 0.0f;
-                        hasExplicitResult = true;
-                    }
-                }
-
-                string moveText = System.Text.RegularExpressions.Regex.Replace(block, @"\[.*?\]", "");
-                moveText = System.Text.RegularExpressions.Regex.Replace(moveText, @"\b\d+\.", "");
-                moveText = moveText.Replace("1-0", "").Replace("0-1", "").Replace("1/2-1/2", "").Replace("*", "");
-
-                var moveStrings = moveText.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-
-                var board = new Board();
-                board.Reset();
-                var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
-                bool isGameValid = true;
-
-                foreach (var rawMove in moveStrings)
-                {
-                    if (string.IsNullOrEmpty(rawMove.Trim()))
-                        continue;
-
-                    if (!ProcessSingleMove(board, rawMove, generator, gameHistory))
-                    {
-                        isGameValid = false;
-                        break;
-                    }
-                }
-
-                if (!hasExplicitResult)
-                    resultValue = GetMaterialValue(board);
-
-                if (isGameValid && gameHistory.Count > 10)
-                {
-                    var examples = gameHistory.Select(step =>
-                        new TrainingExample(step.state, step.policy, step.isRedTurn ? resultValue : -resultValue)
-                    ).ToList();
-
-                    currentBuffer.AddRange(examples, saveToDisk: false);
-                    totalProcessedGames++;
-                    currentBatchGames++;
-                }
-
-                if (currentBuffer.Count >= maxBufferSize)
-                {
-                    Log($"[PGN 吞噬者] 阶段 {trainingPhase}：缓存池已满 ({currentBuffer.Count} 样本)。开始消化...");
-                    ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2);
-                    Log($"[PGN 吞噬者] 阶段 {trainingPhase} 消化完毕！累计吸收 {totalProcessedGames} 局。清空肠胃...");
-
-                    currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
-                    currentBatchGames = 0;
-                    trainingPhase++;
-                    GC.Collect();
-                }
-            }
-
-            if (currentBuffer.Count > 1000)
-            {
-                Log($"[PGN 吞噬者] 终章：清空剩余的 {currentBuffer.Count} 个样本...");
-                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2);
-            }
-
-            Log($"[PGN 吞噬者] 终极封神！总共吞噬了 {totalProcessedGames} 局高质量大师谱！您的 AI 已经无人能敌！");
-        }
-
-        // ================= 引擎 2：Kaggle CSV 乱序提取器 =================
-
-        private void ProcessCsvDataset(string filePath)
-        {
-            var lines = File.ReadAllLines(filePath);
-            var games = new Dictionary<string, (Dictionary<int, string> Red, Dictionary<int, string> Black)>();
-
-            Log("[监督学习] 正在归类对局并交织时空...");
-            foreach (var line in lines)
-            {
-                if (line.StartsWith("gameID", StringComparison.OrdinalIgnoreCase))
-                    continue;
-                var parts = line.Split(',');
-                if (parts.Length >= 4)
-                {
-                    string gameId = parts[0].Trim(' ', '"');
-                    string turnStr = parts[1].Trim(' ', '"');
-                    string side = parts[2].Trim(' ', '"').ToLower();
-                    string move = parts[3].Trim(' ', '"');
-
-                    if (int.TryParse(turnStr, out int turn) && !string.IsNullOrEmpty(move))
-                    {
-                        if (!games.ContainsKey(gameId))
-                            games[gameId] = (new Dictionary<int, string>(), new Dictionary<int, string>());
-                        if (side == "red")
-                            games[gameId].Red[turn] = move;
-                        else
-                            games[gameId].Black[turn] = move;
-                    }
-                }
-            }
-
-            var buffer = new ReplayBuffer(500000);
-            var generator = new MoveGenerator();
-            int successGames = 0;
-
-            foreach (var kvp in games)
-            {
-                var redMoves = kvp.Value.Red;
-                var blackMoves = kvp.Value.Black;
-                if (redMoves.Count == 0)
-                    continue;
-
-                var board = new Board();
-                board.Reset();
-                var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
-
-                int maxTurn = Math.Max(redMoves.Count > 0 ? redMoves.Keys.Max() : 0, blackMoves.Count > 0 ? blackMoves.Keys.Max() : 0);
-
-                for (int turn = 1; turn <= maxTurn; turn++)
-                {
-                    if (redMoves.TryGetValue(turn, out string redRaw))
-                    {
-                        if (!ProcessSingleMove(board, redRaw, generator, gameHistory))
-                            break;
-                    }
-                    else
-                        break;
-
-                    if (blackMoves.TryGetValue(turn, out string blackRaw))
-                    {
-                        if (!ProcessSingleMove(board, blackRaw, generator, gameHistory))
-                            break;
-                    }
-                    else
-                        break;
-                }
-
-                if (gameHistory.Count > 10)
-                {
-                    float resultValue = GetMaterialValue(board);
-                    var examples = gameHistory.Select(step =>
-                        new TrainingExample(step.state, step.policy, step.isRedTurn ? resultValue : -resultValue)
-                    ).ToList();
-                    buffer.AddRange(examples, saveToDisk: false);
-                    successGames++;
-                }
-            }
-
-            if (buffer.Count < 128)
-            {
-                Log($"[监督学习] 严重警告：有效样本过少 ({buffer.Count} 个)。");
-                return;
-            }
-
-            Log($"[监督学习] 提取完毕！提取 {successGames} 局，生成 {buffer.Count} 个黄金样本！");
-            ExecuteSupervisedTrainingChunk(buffer, epochs: 10);
-        }
-
-        // ================= 辅助方法 =================
-
-        private void SaveMoveListToFile(string moveList, string result, string reason)
-        {
-            try
-            {
-                string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs");
-                if (!Directory.Exists(logDir))
-                    Directory.CreateDirectory(logDir);
-                string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
-                string content = $"时间: {DateTime.Now}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n" + new string('-', 40) + "\n";
-                File.WriteAllText(filePath, content);
-            }
-            catch (Exception) { }
-        }
-
-        private void Log(string msg)
-        {
-            Dispatcher.Invoke(() =>
-            {
-                LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {msg}\n");
-                LogBox.ScrollToEnd();
-            });
-        }
-
-        private float GetMaterialValue(Board board)
-        {
-            float red = 0, black = 0;
-            for (int i = 0; i < 90; i++)
-            {
-                sbyte p = board.GetPiece(i);
-                if (p == 0)
-                    continue;
-                float val = Math.Abs(p) switch
-                {
-                    2 => 2,
-                    3 => 2,
-                    4 => 4,
-                    5 => 9,
-                    6 => 4.5f,
-                    7 => 1,
-                    _ => 0
-                };
-                if (p > 0)
-                    red += val;
-                else
-                    black += val;
-            }
-            return red > black + 1.0f ? 1.0f : (black > red + 1.0f ? -1.0f : 0.0f);
-        }
-
-        private float[] FlipPolicyForDataset(float[] originalPi)
-        {
-            float[] flippedPi = new float[8100];
-            for (int i = 0; i < 8100; i++)
-            {
-                if (originalPi[i] <= 0)
-                    continue;
-                int from = i / 90, to = i % 90;
-                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
-                int idx_f = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
-                if (idx_f >= 0 && idx_f < 8100)
-                    flippedPi[idx_f] = originalPi[i];
-            }
-            return flippedPi;
         }
     }
 }
