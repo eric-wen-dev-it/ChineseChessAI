@@ -13,7 +13,7 @@ namespace ChineseChessAI.Training
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
         private LRScheduler _scheduler; // 学习率调度器实例
-        private readonly double _learningRate = 0.001;
+        private readonly double _learningRate = 0.0002;
 
         // 记录迭代次数，用于触发学习率更新
         private int _iterationCount = 0;
