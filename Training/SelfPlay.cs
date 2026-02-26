@@ -33,7 +33,7 @@ namespace ChineseChessAI.Training
             var moveHistory = new List<Move>();
 
             // --- 1. 随机开局 (增加开局多样性) ---
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 8; i++)
             {
                 var initMoves = _generator.GenerateLegalMoves(board);
                 if (initMoves.Count > 0)
@@ -119,7 +119,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        double temperature = (moveCount < 30) ? 1.0 : 0.1;
+                        double temperature = (moveCount < 20) ? 1.0 : 0.05;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
@@ -244,25 +244,40 @@ namespace ChineseChessAI.Training
 
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
         {
-            var examples = new List<TrainingExample>();
+            var examples = new List<TrainingExample>(history.Count);
             float adjustedResult = finalResult;
 
+            // --- 逻辑修正部分 ---
             if (Math.Abs(finalResult) < 0.001f)
             {
                 float redMaterial = CalculateMaterialScore(finalBoard, true);
                 float blackMaterial = CalculateMaterialScore(finalBoard, false);
+
+                // 这种微调(Small Bias)可以帮助网络在早期破局，但后期建议移除
+                float materialBias = 0.05f; // 降低权重，不要让它喧宾夺主
+
                 if (redMaterial > blackMaterial)
-                    adjustedResult = 0.15f;
+                    adjustedResult = materialBias;
                 else if (blackMaterial > redMaterial)
-                    adjustedResult = -0.15f;
+                    adjustedResult = -materialBias;
                 else
-                    adjustedResult = -0.1f;
+                    adjustedResult = 0.0f; // 修正：均势就是0，不要惩罚
             }
+            // --------------------
+
+            // 可选：衰减因子 (让 AI 偏向于更短步数获胜)
+            // float discountFactor = 0.99f; 
+            // 注意：AlphaZero通常不用decay，但如果你是做 Q-Learning 则需要。
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
+
+                // 计算当前玩家的价值
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
+
+                // 可选：如果是每步衰减，需要倒序遍历并累乘 discountFactor
+
                 examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
             }
             return examples;
