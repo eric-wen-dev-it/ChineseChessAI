@@ -100,7 +100,7 @@ namespace ChineseChessAI.Training
                         }
 
                         // --- 兜底防线：防止宇宙级死循环 ---
-                        if (moveCount >= 600)
+                        if (moveCount >= 250)
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
@@ -119,7 +119,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        double temperature = (moveCount < 20) ? 1.0 : 0.05;
+                        double temperature = (moveCount < 125) ? 1.0 : 0.05;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
@@ -254,7 +254,7 @@ namespace ChineseChessAI.Training
                 float blackMaterial = CalculateMaterialScore(finalBoard, false);
 
                 // 这种微调(Small Bias)可以帮助网络在早期破局，但后期建议移除
-                float materialBias = 0.05f; // 降低权重，不要让它喧宾夺主
+                float materialBias = 0.3f; // 降低权重，不要让它喧宾夺主
 
                 if (redMaterial > blackMaterial)
                     adjustedResult = materialBias;
