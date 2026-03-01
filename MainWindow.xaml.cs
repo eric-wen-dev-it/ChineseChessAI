@@ -19,8 +19,10 @@ namespace ChineseChessAI
         private Button[] _cellButtons = new Button[90];
         private Channel<List<Move>> _replayChannel;
 
-        // 核心：引入独立于 UI 的业务大脑
         private TrainingOrchestrator _orchestrator;
+
+        // 【核心修复 1】新增标志位：阻断后台抢占焦点
+        private volatile bool _isManualReplayActive = false;
 
         public MainWindow()
         {
@@ -33,11 +35,19 @@ namespace ChineseChessAI
                 FullMode = BoundedChannelFullMode.DropOldest
             });
 
-            // 初始化总指挥官，并订阅它的事件汇报
             _orchestrator = new TrainingOrchestrator();
             _orchestrator.OnLog += msg => AppendLog(msg);
             _orchestrator.OnLossUpdated += loss => Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-            _orchestrator.OnReplayRequested += moves => _replayChannel.Writer.TryWrite(moves);
+
+            // 【核心修复 2】后台完成对局时，只有在非手动模式下，才推送到前台
+            _orchestrator.OnReplayRequested += moves =>
+            {
+                if (!_isManualReplayActive)
+                {
+                    _replayChannel.Writer.TryWrite(moves);
+                }
+            };
+
             _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
             _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
 
@@ -134,7 +144,7 @@ namespace ChineseChessAI
             {
                 if (_replayChannel.Reader.Count > 0)
                 {
-                    AppendLog("[观战] 接收到最新战况，强制中断旧回放...");
+                    AppendLog("[观战] 接收到最新指令，中断当前回放...");
                     break;
                 }
 
@@ -160,8 +170,16 @@ namespace ChineseChessAI
                 await Task.Delay(600);
             }
 
+            // 【核心修复 3】如果完整播完了（没有被新的手动谱打断），解除锁定恢复后台推送
             if (_replayChannel.Reader.Count == 0)
+            {
                 await Task.Delay(3000);
+                if (_isManualReplayActive)
+                {
+                    _isManualReplayActive = false;
+                    AppendLog("[观战] 手动棋谱播放完毕，已恢复接收后台最新实战对局...");
+                }
+            }
         }
 
         private void RefreshBoardOnly(Board board)
@@ -176,7 +194,7 @@ namespace ChineseChessAI
             MoveListLog.Text = board.GetMoveHistoryString();
         }
 
-        // ================= 3. 按钮交互模块 (事件委派给指挥官) =================
+        // ================= 3. 按钮交互模块 =================
 
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
         {
@@ -184,27 +202,31 @@ namespace ChineseChessAI
                 return;
 
             StartBtn.IsEnabled = false;
-            // 通知总指挥官去开启线程干活，UI立即返回不阻塞
             await _orchestrator.StartSelfPlayAsync();
         }
 
         private void OnReplayLastClick(object sender, RoutedEventArgs e)
         {
-            MessageBox.Show("极速模式下，后台的最新对局已经自动推送至棋盘频道。");
+            // 复用此按钮作为“取消手动模式，立刻恢复后台直播”的开关
+            if (_isManualReplayActive)
+            {
+                _isManualReplayActive = false;
+                AppendLog("[系统] 用户手动恢复了后台观战推送。");
+                MessageBox.Show("已恢复接收后台最新对局！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show("极速模式下，后台的最新对局已经自动推送至棋盘频道。");
+            }
         }
 
         private void OnLoadFileClick(object sender, RoutedEventArgs e)
         {
-            if (_orchestrator.IsTraining)
-            {
-                MessageBox.Show("训练期间无法手动载入棋谱。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-
+            // 【核心修复 4】彻底删除 _orchestrator.IsTraining 限制，实现随时载入
             var openFileDialog = new Microsoft.Win32.OpenFileDialog
             {
                 Title = "选择棋谱文件",
-                Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*",
+                Filter = "Text/PGN files (*.txt;*.pgn)|*.txt;*.pgn|All files (*.*)|*.*",
                 InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs")
             };
 
@@ -213,27 +235,63 @@ namespace ChineseChessAI
                 try
                 {
                     string fileContent = File.ReadAllText(openFileDialog.FileName);
-                    string ucciRecord = "";
-                    var lines = fileContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var line in lines)
+                    string movesStr = "";
+
+                    // 【核心修复 5】智能解析引擎：不仅兼容系统 Log，更兼容外部的中文/PGN格式
+                    if (fileContent.Contains("棋谱:"))
                     {
-                        if (line.StartsWith("棋谱:"))
+                        var lines = fileContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                        foreach (var line in lines)
                         {
-                            ucciRecord = line.Substring(3).Trim();
-                            break;
+                            if (line.StartsWith("棋谱:"))
+                            {
+                                movesStr = line.Substring(3).Trim();
+                                break;
+                            }
                         }
+                    }
+                    else
+                    {
+                        // 剥离 PGN 头部标签，只保留着法区
+                        movesStr = System.Text.RegularExpressions.Regex.Replace(fileContent, @"\[[^\]]*\]", "");
+                        movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\{[^}]*\}", "");
+                        movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\b\d+\.", "");
+                        movesStr = movesStr.Replace("1-0", "").Replace("0-1", "").Replace("1/2-1/2", "").Replace("*", "");
                     }
 
                     var moveList = new List<Move>();
-                    var movesStr = ucciRecord.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var mStr in movesStr)
+                    var rawMoves = movesStr.Split(new[] { ' ', '\n', '\r', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    var tempBoard = new Board();
+                    tempBoard.Reset();
+                    var generator = new MoveGenerator();
+
+                    foreach (var mStr in rawMoves)
                     {
-                        var move = NotationConverter.UcciToMove(mStr);
-                        if (move != null)
-                            moveList.Add(move.Value);
+                        // 接入万能转换器，支持 "炮二平五" 和 "h2e2" 混用
+                        string ucci = NotationConverter.ConvertToUcci(tempBoard, mStr, generator);
+                        if (!string.IsNullOrEmpty(ucci))
+                        {
+                            var move = NotationConverter.UcciToMove(ucci);
+                            if (move != null)
+                            {
+                                moveList.Add(move.Value);
+                                tempBoard.Push(move.Value.From, move.Value.To);
+                            }
+                        }
                     }
 
-                    _replayChannel.Writer.TryWrite(moveList);
+                    if (moveList.Count > 0)
+                    {
+                        // 【核心修复 6】阻断后台推送，专心为用户播放当前文件
+                        _isManualReplayActive = true;
+                        AppendLog($"[观战] 已成功导入并解析 {moveList.Count} 步棋谱，开启纯净回放模式...");
+                        _replayChannel.Writer.TryWrite(moveList);
+                    }
+                    else
+                    {
+                        MessageBox.Show("未能解析出有效的走法，请检查文件内容是否包含正常的棋谱序列！", "解析失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -246,22 +304,20 @@ namespace ChineseChessAI
         {
             if (_orchestrator.IsTraining)
             {
-                MessageBox.Show("请先停止当前训练！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("全量数据集训练极度消耗性能，请先停止当前训练再导入！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             var openFileDialog = new Microsoft.Win32.OpenFileDialog
             {
-                Title = "选择棋谱数据集",
+                Title = "选择巨型棋谱数据集",
                 Filter = "支持的数据集 (*.csv;*.pgn;*.txt)|*.csv;*.pgn;*.txt|All files (*.*)|*.*"
             };
 
             if (openFileDialog.ShowDialog() == true)
             {
                 StartBtn.IsEnabled = false;
-                AppendLog($"[系统] 准备处理文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
-
-                // 将繁重的文件解析任务外包给指挥官
+                AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
                 await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
             }
         }
