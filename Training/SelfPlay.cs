@@ -19,10 +19,20 @@ namespace ChineseChessAI.Training
         private readonly MoveGenerator _generator;
         private readonly Random _random = new Random();
 
-        public SelfPlay(MCTSEngine engine)
+        // 接收从 UI 传导过来的动态超参数
+        private readonly int _maxMoves;
+        private readonly int _exploreMoves;
+        private readonly float _materialBias;
+
+        public SelfPlay(MCTSEngine engine, int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
         {
             _engine = engine;
             _generator = new MoveGenerator();
+
+            // 初始化超参数
+            _maxMoves = maxMoves;
+            _exploreMoves = exploreMoves;
+            _materialBias = materialBias;
         }
 
         public async Task<GameResult> RunGameAsync(Func<Board, Task>? onMovePerformed = null)
@@ -33,18 +43,13 @@ namespace ChineseChessAI.Training
             var moveHistory = new List<Move>();
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
 
-            // 注意：这里已经彻底移除了“8步随机开局”逻辑，确保 AI 从标准的初始阵型开始下棋。
-            // AI 将利用 MCTS 前20步的高 temperature 机制来产生丰富且合理的大师级开局。
-
             int moveCount = 0;
             float finalResult = 0;
             string endReason = "进行中";
 
-            // === 【裁判的记忆本】 ===
             var positionHistory = new Dictionary<ulong, int>();
             int noProgressCount = 0;
 
-            // --- 正式对弈循环 ---
             while (true)
             {
                 try
@@ -53,7 +58,6 @@ namespace ChineseChessAI.Training
                     {
                         bool isRed = board.IsRedTurn;
 
-                        // --- 【防线 1：送将必败拦截】 ---
                         Move? instantKillMove = _generator.GetCaptureKingMove(board);
                         if (instantKillMove != null)
                         {
@@ -73,7 +77,6 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // --- 获取合法走法 ---
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
@@ -86,8 +89,8 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // --- 兜底防线：防止宇宙级死循环 ---
-                        if (moveCount >= 250)
+                        // 【动态参数】：使用界面传入的强制平局步数
+                        if (moveCount >= _maxMoves)
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
@@ -97,7 +100,6 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // --- MCTS 神经网络思考 ---
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
@@ -106,8 +108,8 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        // 前20步保持高探索(1.0)增加开局多样性，20步之后进入冷酷的计算击杀模式(0.05)
-                        double temperature = (moveCount < 20) ? 1.0 : 0.05;
+                        // 【动态参数】：使用界面传入的高温探索步数
+                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.05;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
@@ -116,7 +118,6 @@ namespace ChineseChessAI.Training
                             move = legalMoves[_random.Next(legalMoves.Count)];
                         }
 
-                        // === 【铁血裁判机制 1：不可逆动作检测 (自然限着计算)】 ===
                         sbyte pieceToMove = board.GetPiece(move.From);
                         bool isCapture = board.GetPiece(move.To) != 0;
                         bool isPawnAdvance = Math.Abs(pieceToMove) == 7;
@@ -131,7 +132,6 @@ namespace ChineseChessAI.Training
                             noProgressCount++;
                         }
 
-                        // 执行走法
                         moveHistory.Add(move);
                         board.Push(move.From, move.To);
 
@@ -140,7 +140,6 @@ namespace ChineseChessAI.Training
 
                         moveCount++;
 
-                        // === 【铁血裁判机制 2：三次重复局面判平】 ===
                         ulong currentHash = board.CurrentHash;
                         if (!positionHistory.ContainsKey(currentHash))
                         {
@@ -155,7 +154,6 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        // === 【铁血裁判机制 3：自然限着规则】 ===
                         if (noProgressCount >= 100)
                         {
                             endReason = "自然限着百步无进展(平局)";
@@ -237,24 +235,30 @@ namespace ChineseChessAI.Training
             // --- 逻辑修正部分 ---
             if (Math.Abs(finalResult) < 0.001f)
             {
-                // 彻底移除平局时的子力引导奖励，让 AI 不再做“吃子分奴”，强迫它去寻求真正的绝杀
-                adjustedResult = 0.0f;
+                float redMaterial = CalculateMaterialScore(finalBoard, true);
+                float blackMaterial = CalculateMaterialScore(finalBoard, false);
+
+                // 【动态参数】：使用界面传入的破冰微调偏置
+                float materialBias = _materialBias;
+
+                if (redMaterial > blackMaterial)
+                    adjustedResult = materialBias;
+                else if (blackMaterial > redMaterial)
+                    adjustedResult = -materialBias;
+                else
+                    adjustedResult = 0.0f;
             }
             // --------------------
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-
-                // 计算当前玩家的价值
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
-
                 examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
             }
             return examples;
         }
 
-        // 保留此方法以备未来可能需要评估棋盘使用，但在当前标准 AlphaZero 训练中已不再使用它来干预平局分数
         private float CalculateMaterialScore(Board board, bool isRed)
         {
             float score = 0;
