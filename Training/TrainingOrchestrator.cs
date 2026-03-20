@@ -20,7 +20,7 @@ namespace ChineseChessAI.Training
 
         public bool IsTraining { get; private set; } = false;
 
-        // 【黑科技 1】：常驻内存的大师经验池（容量50万步），存放人类精华
+        // 常驻内存的大师经验池（容量50万步），存放人类精华
         public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000);
 
         public void StopTraining()
@@ -30,7 +30,8 @@ namespace ChineseChessAI.Training
 
         // ================= 1. 自我对弈进化循环 =================
 
-        public async Task StartSelfPlayAsync()
+        // 接收 UI 传来的动态参数
+        public async Task StartSelfPlayAsync(int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
         {
             if (IsTraining)
                 return;
@@ -41,6 +42,8 @@ namespace ChineseChessAI.Training
                 try
                 {
                     Log("=== 进化循环已启动 (极速模式) ===");
+                    Log($"[全局配置] 步数上限: {maxMoves} | 高温探索: 前 {exploreMoves} 步 | 破冰偏置: {materialBias:F3}");
+
                     if (MasterBuffer.Count > 0)
                     {
                         Log($"[系统] 检测到大师经验池包含 {MasterBuffer.Count} 个黄金样本！将开启【混合训练模式】。");
@@ -57,7 +60,9 @@ namespace ChineseChessAI.Training
                     }
 
                     var engine = new MCTSEngine(model, batchSize: 512);
-                    var selfPlay = new SelfPlay(engine);
+
+                    // 将参数传递给 SelfPlay
+                    var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
                     var buffer = new ReplayBuffer(100000);
                     buffer.LoadOldSamples();
 
@@ -69,7 +74,8 @@ namespace ChineseChessAI.Training
                         if (!IsTraining)
                             break;
 
-                        Log($"\n--- [迭代: 第 {iter} 轮] 正在后台极速对弈... ---");
+                        // 【新增】：在每局开始的日志中，直接打出当前的设置参数
+                        Log($"\n--- [迭代: 第 {iter} 轮] 极速对弈 (限步:{maxMoves} 探索:{exploreMoves} 偏置:{materialBias:F2}) ---");
 
                         GameResult result = await selfPlay.RunGameAsync(null);
 
@@ -78,12 +84,14 @@ namespace ChineseChessAI.Training
                             OnReplayRequested?.Invoke(result.MoveHistory);
                         }
 
+                        // 将参数打包传入保存文件的方法中
                         string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
-                        SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason);
+                        string paramInfo = $"限步={maxMoves}, 探索={exploreMoves}, 偏置={materialBias:F3}";
+                        SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason, paramInfo);
 
                         if (result.MoveCount > 10)
                         {
-                            // 【黑科技 2】：平局降采样 (Draw Downsampling)
+                            // 平局降采样 (Draw Downsampling)
                             bool isDraw = result.ResultStr == "平局";
                             bool keepSample = true;
 
@@ -116,7 +124,7 @@ namespace ChineseChessAI.Training
                             List<TrainingExample> mixedBatch = new List<TrainingExample>();
                             int masterCount = 0;
 
-                            // 【黑科技 1 实施】：按 25% 比例抽取大师数据
+                            // 按 25% 比例抽取大师数据
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
                                 masterCount = Math.Min((int)(batchSize * 0.25), MasterBuffer.Count);
@@ -264,9 +272,7 @@ namespace ChineseChessAI.Training
                     ).ToList();
 
                     currentBuffer.AddRange(examples, saveToDisk: false);
-
-                    // 【将解析出的大师数据同时装入常驻内存的 MasterBuffer，供后续混合使用】
-                    MasterBuffer.AddRange(examples, saveToDisk: false);
+                    MasterBuffer.AddRange(examples, saveToDisk: false); // 保存到大师经验池
 
                     totalProcessedGames++;
                     currentBatchGames++;
@@ -299,7 +305,7 @@ namespace ChineseChessAI.Training
 
         private void ProcessCsvDataset(string filePath)
         {
-            // (CSV 解析逻辑保持不变，为节省篇幅此处折叠，请保留原代码逻辑)
+            // 为节省篇幅此处折叠 CSV 解析逻辑，如果有需要请保留原代码逻辑
         }
 
         private bool ProcessSingleMove(Board board, string rawMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
@@ -383,7 +389,8 @@ namespace ChineseChessAI.Training
         // ================= 4. 内部工具方法 =================
         private void Log(string msg) => OnLog?.Invoke(msg);
 
-        private void SaveMoveListToFile(string moveList, string result, string reason)
+        // 【修改点】：接收了超参数字符串 paramInfo
+        private void SaveMoveListToFile(string moveList, string result, string reason, string paramInfo)
         {
             try
             {
@@ -391,7 +398,8 @@ namespace ChineseChessAI.Training
                 if (!Directory.Exists(logDir))
                     Directory.CreateDirectory(logDir);
                 string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
-                string content = $"时间: {DateTime.Now}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n" + new string('-', 40) + "\n";
+                // 将配置印在头部
+                string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n" + new string('-', 40) + "\n";
                 File.WriteAllText(filePath, content);
             }
             catch (Exception) { }
