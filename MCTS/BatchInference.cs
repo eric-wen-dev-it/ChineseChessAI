@@ -2,26 +2,28 @@
 using System.Collections.Concurrent;
 using TorchSharp;
 using static TorchSharp.torch;
+using System.Threading; // 添加此引用
 
 namespace ChineseChessAI.MCTS
 {
-    public class BatchInference
+    public class BatchInference : IDisposable
     {
         private readonly CChessNet _model;
         private readonly int _batchSize;
         private readonly BlockingCollection<InferenceTask> _taskQueue = new();
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
 
-        // 预计算输入维度：14通道 * 10行 * 9列 = 1260
         private const int INPUT_SIZE = 14 * 10 * 9;
 
         public BatchInference(CChessNet model, int batchSize = 16)
         {
             _model = model;
             _batchSize = batchSize;
-            Task.Run(InferenceLoop);
+
+            // 【核心修复】：传入取消令牌
+            Task.Run(() => InferenceLoop(_cts.Token));
         }
 
-        // 修改：接收 float[] 数组，彻底切断 Tensor 的线程依赖
         public async Task<(float[] Policy, float Value)> PredictAsync(float[] inputData)
         {
             if (inputData.Length != INPUT_SIZE)
@@ -32,19 +34,28 @@ namespace ChineseChessAI.MCTS
             return await tcs.Task;
         }
 
-        private void InferenceLoop()
+        private void InferenceLoop(CancellationToken token)
         {
-            while (true)
+            // 【核心修复】：循环条件监听取消令牌
+            while (!token.IsCancellationRequested)
             {
                 var batchTasks = new List<InferenceTask>();
 
-                if (_taskQueue.TryTake(out var firstTask, Timeout.Infinite))
+                try
                 {
-                    batchTasks.Add(firstTask);
-                    while (batchTasks.Count < _batchSize && _taskQueue.TryTake(out var nextTask))
+                    // 使用超时时间防止死锁，以便定期检查 token
+                    if (_taskQueue.TryTake(out var firstTask, 50, token))
                     {
-                        batchTasks.Add(nextTask);
+                        batchTasks.Add(firstTask);
+                        while (batchTasks.Count < _batchSize && _taskQueue.TryTake(out var nextTask))
+                        {
+                            batchTasks.Add(nextTask);
+                        }
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    break; // 收到取消信号，退出循环
                 }
 
                 if (batchTasks.Count > 0)
@@ -74,25 +85,19 @@ namespace ChineseChessAI.MCTS
             {
                 using (var noGrad = torch.no_grad())
                 {
-                    // 1. 构建 Batch 数据 (在 CPU 端拼装大数组)
                     int batchCount = tasks.Count;
                     float[] batchData = new float[batchCount * INPUT_SIZE];
 
-                    // 使用 BlockCopy 极速拷贝
                     for (int i = 0; i < batchCount; i++)
                     {
                         Buffer.BlockCopy(tasks[i].InputData, 0, batchData, i * INPUT_SIZE * sizeof(float), INPUT_SIZE * sizeof(float));
                     }
 
-                    // 2. 创建 Tensor 并一次性传输到 GPU
-                    // 注意形状：[Batch, 14, 10, 9]
                     var inputCPU = torch.tensor(batchData, new long[] { batchCount, 14, 10, 9 });
                     var inputGPU = torch.cuda.is_available() ? inputCPU.to(DeviceType.CUDA) : inputCPU;
 
-                    // 3. 推理
                     var (pLogitsGPU, vTensorsGPU) = _model.forward(inputGPU);
 
-                    // 4. 结果搬回 CPU
                     var pLogitsCPU = pLogitsGPU.cpu();
                     var vTensorsCPU = vTensorsGPU.cpu();
 
@@ -104,6 +109,14 @@ namespace ChineseChessAI.MCTS
                     }
                 }
             }
+        }
+
+        // 实现 IDisposable 以便优雅关闭
+        public void Dispose()
+        {
+            _cts.Cancel();
+            _cts.Dispose();
+            _taskQueue.Dispose();
         }
 
         private record InferenceTask(float[] InputData, TaskCompletionSource<(float[], float)> Tcs);

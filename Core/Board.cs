@@ -16,22 +16,20 @@ namespace ChineseChessAI.Core
         public readonly sbyte[] _cells = new sbyte[90];
         public bool IsRedTurn { get; private set; } = true;
 
-        // 存储最后一步棋的起始和结束位置，供 UI 绘制红/绿方框
         public Move? LastMove
         {
             get; private set;
         }
-
-        // 当前局面的 Zobrist 哈希值
         public ulong CurrentHash
         {
             get; private set;
         }
 
-        // 历史记录栈
         private readonly Stack<GameState> _history = new();
 
-        // Zobrist 随机数表
+        // 【核心提速修复】：增加 O(1) 的哈希计数表，彻底消灭历史遍历的性能黑洞
+        private readonly Dictionary<ulong, int> _hashCounts = new();
+
         private static readonly ulong[,] PieceKeys = new ulong[90, 15];
         private static readonly ulong SideKey;
 
@@ -70,7 +68,7 @@ namespace ChineseChessAI.Core
             // --- 摆放红方 (第 6-9 行) ---
             for (int i = 0; i < 9; i += 2)
                 _cells[6 * 9 + i] = 7;  // 红兵
-            _cells[7 * 9 + 1] = _cells[7 * 9 + 7] = 6;            // 红炮
+            _cells[7 * 9 + 1] = _cells[7 * 9 + 7] = 6; // 红炮
             _cells[9 * 9 + 0] = _cells[9 * 9 + 8] = 5; // 红车
             _cells[9 * 9 + 1] = _cells[9 * 9 + 7] = 4; // 红马
             _cells[9 * 9 + 2] = _cells[9 * 9 + 6] = 3; // 红相
@@ -79,8 +77,11 @@ namespace ChineseChessAI.Core
 
             IsRedTurn = true;
             _history.Clear();
+            _hashCounts.Clear(); // 清空计数表
             LastMove = null;
+
             CalculateFullHash();
+            _hashCounts[CurrentHash] = 1; // 初始局面计数为 1
         }
 
         public sbyte GetPiece(int row, int col) => _cells[row * 9 + col];
@@ -98,7 +99,8 @@ namespace ChineseChessAI.Core
             nextHash ^= PieceKeys[to, piece + 7];
             nextHash ^= SideKey;
 
-            int count = _history.Count(s => s.Hash == nextHash);
+            // 【核心提速修复】：O(1) 字典瞬间查询，替换原有的 O(n) LINQ 遍历
+            _hashCounts.TryGetValue(nextHash, out int count);
             return count >= 2;
         }
 
@@ -119,28 +121,39 @@ namespace ChineseChessAI.Core
             _cells[to] = piece;
             _cells[from] = 0;
             IsRedTurn = !IsRedTurn;
+
+            // 【核心提速修复】：走子后，将新局面的哈希计数 O(1) 增加
+            if (!_hashCounts.TryGetValue(CurrentHash, out int c))
+                c = 0;
+            _hashCounts[CurrentHash] = c + 1;
         }
 
         public void Pop()
         {
             if (_history.Count == 0)
                 return;
+
+            // 【核心提速修复】：撤销前，将当前局面的哈希计数 O(1) 减少
+            if (_hashCounts.TryGetValue(CurrentHash, out int c))
+            {
+                if (c <= 1)
+                    _hashCounts.Remove(CurrentHash);
+                else
+                    _hashCounts[CurrentHash] = c - 1;
+            }
+
             var last = _history.Pop();
             _cells[last.From] = _cells[last.To];
             _cells[last.To] = last.Captured;
             IsRedTurn = !IsRedTurn;
-            CurrentHash = last.Hash;
+            CurrentHash = last.Hash; // 恢复旧局面的 Hash
             LastMove = last.LastMoveBefore;
         }
 
         public int GetRepetitionCount()
         {
-            int count = 1;
-            foreach (var state in _history)
-            {
-                if (state.Hash == CurrentHash)
-                    count++;
-            }
+            // 【核心提速修复】：O(1) 字典查询
+            _hashCounts.TryGetValue(CurrentHash, out int count);
             return count;
         }
 
@@ -163,12 +176,10 @@ namespace ChineseChessAI.Core
                 CurrentHash ^= SideKey;
         }
 
-        // --- 核心修复：走法文本转换 ---
-
         public string GetChineseMoveName(int from, int to)
         {
             if (from == to)
-                return "原地"; // 异常防御
+                return "原地";
 
             sbyte piece = _cells[from];
             if (piece == 0)
@@ -180,33 +191,26 @@ namespace ChineseChessAI.Core
 
             string name = GetPieceName(piece);
 
-            // 【标准规则】路数计算
-            // 红方（底线在下）：从右往左数 1-9 (i列是1，a列是9) -> 公式: 9 - colIndex
-            // 黑方（底线在上）：从左往右数 1-9 (a列是1，i列是9) -> 公式: colIndex + 1
             int fromCol = isRed ? (9 - fromC) : (fromC + 1);
             int toCol = isRed ? (9 - toC) : (toC + 1);
 
-            // 动作判定
             string action;
             if (toR == fromR)
                 action = "平";
             else if (isRed)
-                action = (toR < fromR) ? "进" : "退"; // 红方向上为进
+                action = (toR < fromR) ? "进" : "退";
             else
-                action = (toR > fromR) ? "进" : "退";             // 黑方向下为进
+                action = (toR > fromR) ? "进" : "退";
 
-            // 目标数值计算
             int targetValue;
             int type = Math.Abs(piece);
 
-            // 士、相、马：斜走棋子，终点永远记录目标路数
             if (type == 2 || type == 3 || type == 4)
             {
                 targetValue = toCol;
             }
             else
             {
-                // 车、炮、兵、帅：平移动作记路数，进退动作记步数
                 targetValue = (action == "平") ? toCol : Math.Abs(toR - fromR);
             }
 
@@ -227,7 +231,6 @@ namespace ChineseChessAI.Core
             var result = new List<string>();
             foreach (var state in historyList)
             {
-                // 必须在执行 Push 之前获取名称，因为名称依赖起始位置的棋子类型
                 result.Add(tempBoard.GetChineseMoveName(state.From, state.To));
                 tempBoard.Push(state.From, state.To);
             }
@@ -255,13 +258,21 @@ namespace ChineseChessAI.Core
             Array.Copy(state, _cells, 90);
             this.IsRedTurn = isRedTurn;
             CalculateFullHash();
+
             _history.Clear();
+            _hashCounts.Clear();
+            _hashCounts[CurrentHash] = 1; // 载入新局面时初始化计数
             LastMove = null;
         }
 
         public void RecordHistory(GameState state)
         {
             _history.Push(state);
+            // 手动推入历史时，也要同步维护哈希表
+            if (!_hashCounts.TryGetValue(state.Hash, out int c))
+                c = 0;
+            _hashCounts[state.Hash] = c + 1;
+
             LastMove = new Move(state.From, state.To);
         }
     }

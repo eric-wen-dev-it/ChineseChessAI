@@ -81,25 +81,29 @@ namespace ChineseChessAI.MCTS
                     var bestChild = node.Children
                         .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
                         .First();
+
+                    // 【核心修复】：线程选中分支下潜前，挂上虚拟损失（原子操作防并发）
+                    Interlocked.Increment(ref bestChild.Value.VirtualLoss);
+
                     board.Push(bestChild.Key.From, bestChild.Key.To);
                     await SearchAsync(bestChild.Value, board);
                     board.Pop();
+
+                    // 【核心修复】：回溯时，扣除虚拟损失
+                    Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
                     return;
                 }
 
-                // --- 【核心防线 2：树搜索中的送将惩罚】 ---
-                // 如果当前轮到我走棋，但我发现对方老将被我将军
-                // 说明这条时间线里，对方上一步走了“送将”。我方直接必胜！
                 if (!_generator.IsKingSafe(board, !board.IsRedTurn))
                 {
-                    node.Update(1.0); // 必胜
+                    node.Update(1.0);
                     return;
                 }
 
                 var legalMoves = _generator.GenerateLegalMoves(board);
                 if (legalMoves.Count == 0)
                 {
-                    node.Update(-1.0); // 绝杀/困毙
+                    node.Update(-1.0);
                     return;
                 }
 
@@ -255,9 +259,7 @@ namespace ChineseChessAI.MCTS
             var newBoard = new Board();
             newBoard.LoadState(original.GetState(), original.IsRedTurn);
             foreach (var state in original.GetHistory().Reverse())
-            {
                 newBoard.RecordHistory(state);
-            }
             return newBoard;
         }
     }

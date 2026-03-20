@@ -19,13 +19,10 @@ namespace ChineseChessAI.Training
         {
             _capacity = capacity;
             _buffer = new TrainingExample[capacity];
-
-            // 确保目录存在
             if (!Directory.Exists(_dataDir))
                 Directory.CreateDirectory(_dataDir);
         }
 
-        // --- 保存单局样本到磁盘 ---
         public void SaveExamples(List<TrainingExample> examples)
         {
             try
@@ -35,13 +32,9 @@ namespace ChineseChessAI.Training
                 string json = JsonSerializer.Serialize(examples);
                 File.WriteAllText(filePath, json);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}");
-            }
+            catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        // --- 从磁盘加载已有样本 ---
         public void LoadOldSamples()
         {
             if (!Directory.Exists(_dataDir))
@@ -50,7 +43,7 @@ namespace ChineseChessAI.Training
             var files = Directory.GetFiles(_dataDir, "*.json")
                                  .Select(f => new FileInfo(f))
                                  .OrderByDescending(f => f.CreationTime)
-                                 .Take(200) // 仅加载最近的 200 局，避免内存撑爆
+                                 .Take(200)
                                  .ToList();
 
             int totalLoaded = 0;
@@ -62,7 +55,7 @@ namespace ChineseChessAI.Training
                     var examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
                     if (examples != null)
                     {
-                        this.AddRange(examples, saveToDisk: false); // 加载时不重复保存
+                        this.AddRange(examples, saveToDisk: false);
                         totalLoaded += examples.Count;
                     }
                 }
@@ -71,7 +64,6 @@ namespace ChineseChessAI.Training
             Console.WriteLine($"[ReplayBuffer] 已从磁盘预加载 {totalLoaded} 条样本");
         }
 
-        // 修改 AddRange，增加是否保存的开关
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)
         {
             if (saveToDisk)
@@ -86,19 +78,15 @@ namespace ChineseChessAI.Training
             }
         }
 
-        /// <summary>
-        /// 【核心修改】：不再直接返回 Tensor 导致爆显存，而是返回原始的 List<TrainingExample>，
-        /// 供外部进行 Chunk 切片后再交由 Trainer 转为 Tensor。
-        /// </summary>
         public List<TrainingExample> Sample(int batchSize)
         {
             int count = Math.Min(batchSize, _count);
             var batch = new List<TrainingExample>(count);
 
-            for (int i = 0; i < count; i++)
+            // 【核心修复】：无放回采样 (Fisher-Yates 洗牌算法变体)，避免过度拟合同一状态
+            var indices = Enumerable.Range(0, _count).OrderBy(x => _random.Next()).Take(count);
+            foreach (var index in indices)
             {
-                // 随机抽取样本
-                int index = _random.Next(_count);
                 batch.Add(_buffer[index]);
             }
 

@@ -19,8 +19,6 @@ namespace ChineseChessAI.Training
         public event Action<string> OnError;
 
         public bool IsTraining { get; private set; } = false;
-
-        // 常驻内存的大师经验池（容量50万步），存放人类精华
         public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000);
 
         public void StopTraining()
@@ -28,9 +26,7 @@ namespace ChineseChessAI.Training
             IsTraining = false;
         }
 
-        // ================= 1. 自我对弈进化循环 =================
-
-        // 接收 UI 传来的动态参数
+        // ================= 1. 自我对弈进化循环 (保持原样即可) =================
         public async Task StartSelfPlayAsync(int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
         {
             if (IsTraining)
@@ -45,9 +41,7 @@ namespace ChineseChessAI.Training
                     Log($"[全局配置] 步数上限: {maxMoves} | 高温探索: 前 {exploreMoves} 步 | 破冰偏置: {materialBias:F3}");
 
                     if (MasterBuffer.Count > 0)
-                    {
                         Log($"[系统] 检测到大师经验池包含 {MasterBuffer.Count} 个黄金样本！将开启【混合训练模式】。");
-                    }
 
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -60,8 +54,6 @@ namespace ChineseChessAI.Training
                     }
 
                     var engine = new MCTSEngine(model, batchSize: 512);
-
-                    // 将参数传递给 SelfPlay
                     var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
                     var buffer = new ReplayBuffer(100000);
                     buffer.LoadOldSamples();
@@ -74,31 +66,24 @@ namespace ChineseChessAI.Training
                         if (!IsTraining)
                             break;
 
-                        // 【新增】：在每局开始的日志中，直接打出当前的设置参数
                         Log($"\n--- [迭代: 第 {iter} 轮] 极速对弈 (限步:{maxMoves} 探索:{exploreMoves} 偏置:{materialBias:F2}) ---");
 
                         GameResult result = await selfPlay.RunGameAsync(null);
 
                         if (result.MoveHistory != null && result.MoveHistory.Count > 0)
-                        {
                             OnReplayRequested?.Invoke(result.MoveHistory);
-                        }
 
-                        // 将参数打包传入保存文件的方法中
                         string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
                         string paramInfo = $"限步={maxMoves}, 探索={exploreMoves}, 偏置={materialBias:F3}";
                         SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason, paramInfo);
 
                         if (result.MoveCount > 10)
                         {
-                            // 平局降采样 (Draw Downsampling)
                             bool isDraw = result.ResultStr == "平局";
                             bool keepSample = true;
 
-                            if (isDraw && rnd.NextDouble() > 0.10) // 90% 的平局录像将被无情丢弃
-                            {
+                            if (isDraw && rnd.NextDouble() > 0.10)
                                 keepSample = false;
-                            }
 
                             if (keepSample)
                             {
@@ -115,7 +100,6 @@ namespace ChineseChessAI.Training
                             Log($"[对弈] 警告: 步数过短，视为无效博弈。");
                         }
 
-                        // 将触发训练的阈值降到 3000，因为我们要混入大师数据
                         if (buffer.Count >= 3000)
                         {
                             Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
@@ -124,18 +108,15 @@ namespace ChineseChessAI.Training
                             List<TrainingExample> mixedBatch = new List<TrainingExample>();
                             int masterCount = 0;
 
-                            // 按 25% 比例抽取大师数据
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
                                 masterCount = Math.Min((int)(batchSize * 0.25), MasterBuffer.Count);
                                 mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
                             }
 
-                            // 剩余 75% 额度由最新的自我对弈数据填补
                             int selfPlayCount = Math.Min(batchSize - masterCount, buffer.Count);
                             mixedBatch.AddRange(buffer.Sample(selfPlayCount));
 
-                            // 充分打乱混合后的样本
                             mixedBatch = mixedBatch.OrderBy(x => rnd.Next()).ToList();
 
                             float loss = trainer.Train(mixedBatch, epochs: 15);
@@ -159,7 +140,6 @@ namespace ChineseChessAI.Training
         }
 
         // ================= 2. 万能数据集智能路由 =================
-
         public async Task ProcessDatasetAsync(string filePath)
         {
             if (IsTraining)
@@ -199,18 +179,24 @@ namespace ChineseChessAI.Training
         }
 
         // ================= 3. 数据集解析与训练实现细节 =================
-
         private void ProcessPgnDatasetStreaming(string filePath)
         {
             Log("[PGN 吞噬者] 正在将巨型文件读入内存...");
             string content = File.ReadAllText(filePath);
-
             var gameBlocks = content.Split(new[] { "[Event " }, StringSplitOptions.RemoveEmptyEntries);
             Log($"[PGN 吞噬者] 成功切割出 {gameBlocks.Length} 局大师对战！准备开启流式训练...");
 
             var generator = new MoveGenerator();
             int maxBufferSize = 200000;
             var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
+
+            // 【核心修复】：将 Model 和 Trainer 提取到整个解析周期的最外层！
+            // 这保证了吃掉几十万个谱的过程中，Adam 优化器的动量 (Momentum) 和学习率衰减不被清零。
+            var model = new CChessNet();
+            string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+            if (File.Exists(modelPath))
+                model.load(modelPath);
+            var trainer = new Trainer(model);
 
             int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
 
@@ -272,7 +258,7 @@ namespace ChineseChessAI.Training
                     ).ToList();
 
                     currentBuffer.AddRange(examples, saveToDisk: false);
-                    MasterBuffer.AddRange(examples, saveToDisk: false); // 保存到大师经验池
+                    MasterBuffer.AddRange(examples, saveToDisk: false);
 
                     totalProcessedGames++;
                     currentBatchGames++;
@@ -281,7 +267,8 @@ namespace ChineseChessAI.Training
                 if (currentBuffer.Count >= maxBufferSize)
                 {
                     Log($"[PGN 吞噬者] 阶段 {trainingPhase}：缓存池已满 ({currentBuffer.Count} 样本)。开始消化...");
-                    ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2);
+                    // 把提取出来的全局 model 和 trainer 传进去
+                    ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
                     Log($"[PGN 吞噬者] 阶段 {trainingPhase} 消化完毕！累计吸收 {totalProcessedGames} 局。清空肠胃...");
 
                     currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
@@ -294,7 +281,7 @@ namespace ChineseChessAI.Training
             if (currentBuffer.Count > 1000 && IsTraining)
             {
                 Log($"[PGN 吞噬者] 终章：清空剩余的 {currentBuffer.Count} 个样本...");
-                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2);
+                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
             }
 
             if (IsTraining)
@@ -305,7 +292,6 @@ namespace ChineseChessAI.Training
 
         private void ProcessCsvDataset(string filePath)
         {
-            // 为节省篇幅此处折叠 CSV 解析逻辑，如果有需要请保留原代码逻辑
         }
 
         private bool ProcessSingleMove(Board board, string rawMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
@@ -328,8 +314,24 @@ namespace ChineseChessAI.Training
 
             float[] piData = new float[8100];
             int netIdx = parsedMove.Value.ToNetworkIndex();
+
+            // 【核心修复】：Label Smoothing (平滑化策略) 
+            // 不再使用极端的 1.0 (绝对自信)，而是把 0.05 的概率均分给其他合理走法
+            float epsilon = 0.05f;
+            float backgroundProb = epsilon / legalMoves.Count;
+
+            foreach (var m in legalMoves)
+            {
+                int idx = m.ToNetworkIndex();
+                if (idx >= 0 && idx < 8100)
+                    piData[idx] = backgroundProb;
+            }
+
             if (netIdx >= 0 && netIdx < 8100)
-                piData[netIdx] = 1.0f;
+            {
+                // 大师实际走的那一步占据主要概率 (0.95 + backgroundProb)
+                piData[netIdx] = (1.0f - epsilon) + backgroundProb;
+            }
 
             float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
             gameHistory.Add((stateData, trainingPi, isRed));
@@ -338,16 +340,11 @@ namespace ChineseChessAI.Training
             return true;
         }
 
-        private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs)
+        // 【核心修复】：接收全局传入的 trainer 和 model，杜绝重置动量
+        private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs, Trainer trainer, CChessNet model, string modelPath)
         {
             try
             {
-                var model = new CChessNet();
-                string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
-                if (File.Exists(modelPath))
-                    model.load(modelPath);
-
-                var trainer = new Trainer(model);
                 int chunkSize = 4096;
 
                 for (int epoch = 1; epoch <= epochs; epoch++)
@@ -386,10 +383,9 @@ namespace ChineseChessAI.Training
             }
         }
 
-        // ================= 4. 内部工具方法 =================
+        // ================= 4. 内部工具方法 (保持原样) =================
         private void Log(string msg) => OnLog?.Invoke(msg);
 
-        // 【修改点】：接收了超参数字符串 paramInfo
         private void SaveMoveListToFile(string moveList, string result, string reason, string paramInfo)
         {
             try
@@ -398,7 +394,6 @@ namespace ChineseChessAI.Training
                 if (!Directory.Exists(logDir))
                     Directory.CreateDirectory(logDir);
                 string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss}.txt");
-                // 将配置印在头部
                 string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n" + new string('-', 40) + "\n";
                 File.WriteAllText(filePath, content);
             }

@@ -1,5 +1,6 @@
 ﻿using ChineseChessAI.Core;
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace ChineseChessAI.MCTS
 {
@@ -13,20 +14,18 @@ namespace ChineseChessAI.MCTS
         }
         public int N { get; private set; } = 0;
 
+        // 【核心修复】：增加虚拟损失字段，用于多线程防碰撞
+        public int VirtualLoss = 0;
+
         public MCTSNode? Parent
         {
             get;
         }
-
-        // 核心修复：多线程必须使用 ConcurrentDictionary
         public ConcurrentDictionary<Move, MCTSNode> Children { get; } = new ConcurrentDictionary<Move, MCTSNode>();
         public Move LastMove
         {
             get;
         }
-
-        // 用于保护 N, W, Q 的线程锁
-        private readonly object _lockObj = new object();
 
         public MCTSNode(MCTSNode? parent, double priorP, Move lastMove = default)
         {
@@ -39,20 +38,21 @@ namespace ChineseChessAI.MCTS
 
         public double GetPUCTValue(double cPuct, int parentN)
         {
-            double u = cPuct * P * Math.Sqrt(parentN) / (1 + N);
-            return Q + u;
+            // 【核心修复】：计算 UCB 时，将虚拟损失视作被访问过且输掉了一局
+            int n = N + VirtualLoss;
+            double q = n == 0 ? 0 : (W - VirtualLoss) / n;
+            double u = cPuct * P * Math.Sqrt(parentN) / (1 + n);
+            return q + u;
         }
 
         public void Expand(IEnumerable<(Move move, double prob)> policy)
         {
             foreach (var (move, prob) in policy)
             {
-                // 并发安全的添加方式
                 Children.TryAdd(move, new MCTSNode(this, prob, move));
             }
         }
 
-        // 在类成员中定义
         private SpinLock _spinLock = new SpinLock();
 
         public void Update(double value)
@@ -60,22 +60,17 @@ namespace ChineseChessAI.MCTS
             bool lockTaken = false;
             try
             {
-                // 尝试获取锁
                 _spinLock.Enter(ref lockTaken);
-
-                // 极速执行更新
                 N++;
                 W += value;
                 Q = W / N;
             }
             finally
             {
-                // 释放锁
                 if (lockTaken)
                     _spinLock.Exit();
             }
 
-            // 递归更新父节点（注意：Parent 的更新在锁外面，减少持有锁的时间）
             Parent?.Update(-value);
         }
     }

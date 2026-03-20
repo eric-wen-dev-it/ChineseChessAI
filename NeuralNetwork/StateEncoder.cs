@@ -1,4 +1,5 @@
 ﻿using ChineseChessAI.Core;
+using System;
 using System.Buffers; // 必须引用：用于 ArrayPool
 using TorchSharp;
 using static TorchSharp.torch;
@@ -45,34 +46,28 @@ namespace ChineseChessAI.NeuralNetwork
                     }
                 }
 
-                // 【核心修复】
-                // 1. 直接传入 float[] 数组，TorchSharp 100% 支持。
-                //    注意：此时创建的 Tensor 长度等于 data.Length (可能 > 1260)
-                var fullTensor = torch.tensor(data, dtype: ScalarType.Float32);
+                // 【终极防漏水修复】：必须用 using 包裹创建出的每一个中间 Tensor！
+                // 1. 创建包含所有 data 的 Tensor (可能长度是 2048)
+                using var fullTensor = torch.tensor(data, dtype: ScalarType.Float32);
 
-                // 2. 使用 .narrow(维, 开始, 长度) 截取我们需要的 1260 个有效数据
-                // 3. 使用 .reshape 变为 [14, 10, 9]
-                var encodedTensor = fullTensor.narrow(0, 0, DataSize).reshape(14, 10, 9);
+                // 2. 截取前 1260 个数据并变形 (这是一个 View 视图，依赖 fullTensor)
+                using var view3D = fullTensor.narrow(0, 0, DataSize).reshape(14, 10, 9);
 
-                // 如果是黑方，翻转视角
-                if (!isRedTurn)
-                {
-                    encodedTensor = FlipBoard(encodedTensor);
-                }
+                // 3. 翻转视角 (flip 返回新 Tensor，alias 返回原 Tensor 的替身)
+                using var processedView = isRedTurn ? view3D.alias() : view3D.flip(new long[] { 1, 2 });
 
-                // 增加 Batch 维度: [1, 14, 10, 9]
-                return encodedTensor.unsqueeze(0);
+                // 4. 增加 Batch 维度，并立刻执行 .clone() ！
+                using var finalView4D = processedView.unsqueeze(0);
+
+                // 【最关键的一步】：clone() 会在底层开辟一块全新的、干净的内存块。
+                // 这样当方法结束，所有的 using 变量被销毁时，只有这个 clone 出来的结果存活并返回。
+                return finalView4D.clone();
             }
             finally
             {
-                // 3. 必须归还数组，否则会导致内存泄漏
+                // 3. 必须归还数组，否则会导致 C# 端的内存泄漏
                 ArrayPool<float>.Shared.Return(data);
             }
-        }
-
-        private static Tensor FlipBoard(Tensor t)
-        {
-            return t.flip(new long[] { 1, 2 });
         }
     }
 }
