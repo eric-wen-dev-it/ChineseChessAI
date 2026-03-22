@@ -209,14 +209,14 @@ namespace ChineseChessAI.Training
 
             if (Math.Abs(finalResult) < 0.001f)
             {
-                float redMaterial = CalculateMaterialScore(finalBoard, true);
-                float blackMaterial = CalculateMaterialScore(finalBoard, false);
-                float materialBias = _materialBias;
+                // 【核心修复】：调用 Orchestrator 中统一的算分逻辑，彻底消灭重复代码
+                float redMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, true);
+                float blackMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, false);
 
                 if (redMaterial > blackMaterial)
-                    adjustedResult = materialBias;
+                    adjustedResult = _materialBias;
                 else if (blackMaterial > redMaterial)
-                    adjustedResult = -materialBias;
+                    adjustedResult = -_materialBias;
                 else
                     adjustedResult = 0.0f;
             }
@@ -226,7 +226,6 @@ namespace ChineseChessAI.Training
                 var step = history[i];
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
 
-                // 【核心修复】：将隐式元组改为显式 struct
                 var sparsePolicy = step.policy
                                        .Select((p, idx) => new ActionProb(idx, p))
                                        .Where(x => x.Prob > 0)
@@ -237,31 +236,7 @@ namespace ChineseChessAI.Training
             return examples;
         }
 
-        private float CalculateMaterialScore(Board board, bool isRed)
-        {
-            float score = 0;
-            for (int i = 0; i < 90; i++)
-            {
-                sbyte p = board.GetPiece(i);
-                if (p == 0)
-                    continue;
-                if ((isRed && p > 0) || (!isRed && p < 0))
-                {
-                    int type = Math.Abs(p);
-                    score += type switch
-                    {
-                        1 => 0,
-                        2 => 2,
-                        3 => 2,
-                        4 => 4,
-                        5 => 9,
-                        6 => 4.5f,
-                        7 => 1,
-                        _ => 0
-                    };
-                }
-            }
-            return score;
-        }
+        // 删掉了原有的 CalculateMaterialScore 冗余方法
     }
 }
+   

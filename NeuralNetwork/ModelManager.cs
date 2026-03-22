@@ -1,4 +1,6 @@
-﻿using System.IO;
+﻿using System;
+using System.IO;
+using System.Linq;
 
 namespace ChineseChessAI.NeuralNetwork
 {
@@ -27,14 +29,16 @@ namespace ChineseChessAI.NeuralNetwork
         {
             try
             {
-                // 1. 生成带时间戳的备份文件名
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                // 1. 生成带时间戳的备份文件名 
+                // 【核心修复】：增加 _fff 毫秒级精度，防止同一秒钟内多次触发保存导致重名
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                 string fileName = Path.GetFileNameWithoutExtension(filePath);
                 string extension = Path.GetExtension(filePath);
                 string backupPath = Path.Combine(directory, $"{fileName}_bak_{timestamp}{extension}");
 
-                // 2. 复制当前文件到备份路径
-                File.Copy(filePath, backupPath);
+                // 2. 复制当前文件到备份路径 
+                // 【核心修复】：加入 overwrite: true 参数，确保即使出现极端并发也能安全覆盖而不抛出异常
+                File.Copy(filePath, backupPath, overwrite: true);
 
                 // 3. 管理备份数量：获取所有备份文件并按创建时间排序
                 var backupFiles = Directory.GetFiles(directory, $"{fileName}_bak_*{extension}")

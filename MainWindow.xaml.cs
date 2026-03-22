@@ -196,13 +196,22 @@ namespace ChineseChessAI
 
         // ================= 3. 按钮交互模块 =================
 
+        // 【安全修复】拦截 async void 的潜在崩溃
         private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
         {
-            if (_orchestrator.IsTraining)
-                return;
+            try
+            {
+                if (_orchestrator.IsTraining)
+                    return;
 
-            StartBtn.IsEnabled = false;
-            await _orchestrator.StartSelfPlayAsync();
+                StartBtn.IsEnabled = false;
+                await _orchestrator.StartSelfPlayAsync();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"训练启动异常: {ex.Message}\n{ex.StackTrace}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                StartBtn.IsEnabled = true;
+            }
         }
 
         private void OnReplayLastClick(object sender, RoutedEventArgs e)
@@ -300,25 +309,34 @@ namespace ChineseChessAI
             }
         }
 
+        // 【安全修复】拦截 async void 的潜在崩溃
         private async void OnLoadDatasetClick(object sender, RoutedEventArgs e)
         {
-            if (_orchestrator.IsTraining)
+            try
             {
-                MessageBox.Show("全量数据集训练极度消耗性能，请先停止当前训练再导入！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                if (_orchestrator.IsTraining)
+                {
+                    MessageBox.Show("当前正在训练中，请先停止当前训练再导入！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                var openFileDialog = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "选择巨型棋谱数据集",
+                    Filter = "支持的数据集 (*.csv;*.pgn;*.txt)|*.csv;*.pgn;*.txt|All files (*.*)|*.*"
+                };
+
+                if (openFileDialog.ShowDialog() == true)
+                {
+                    StartBtn.IsEnabled = false;
+                    AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
+                    await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
+                }
             }
-
-            var openFileDialog = new Microsoft.Win32.OpenFileDialog
+            catch (Exception ex)
             {
-                Title = "选择巨型棋谱数据集",
-                Filter = "支持的数据集 (*.csv;*.pgn;*.txt)|*.csv;*.pgn;*.txt|All files (*.*)|*.*"
-            };
-
-            if (openFileDialog.ShowDialog() == true)
-            {
-                StartBtn.IsEnabled = false;
-                AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
-                await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
+                MessageBox.Show($"导入数据集异常: {ex.Message}\n{ex.StackTrace}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                StartBtn.IsEnabled = true;
             }
         }
     }

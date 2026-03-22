@@ -146,7 +146,10 @@ namespace ChineseChessAI.Utils
                     else
                         return isFront ? sorted.Last() : sorted.First();
                 }
-                return candidates[0];
+
+                // 【核心修复】：没有说明前后，且有多个候选，属于严重歧义的残缺谱！
+                // 绝不能默认返回 candidates[0]，直接返回 null 让外层丢弃这局脏数据。
+                return null;
             }
             return null;
         }
