@@ -14,6 +14,25 @@ namespace ChineseChessAI.NeuralNetwork
         // 【终极微操优化】：将每次都要 new 的数组提取为静态只读，彻底消灭 GC 垃圾！
         private static readonly long[] FlipDims = new long[] { 1, 2 };
 
+        /// <summary>
+        /// 将策略数组做 180 度翻转，用于黑方视角与红方视角之间的互相转换。
+        /// </summary>
+        public static float[] FlipPolicy(float[] originalPi)
+        {
+            float[] flippedPi = new float[8100];
+            for (int i = 0; i < 8100; i++)
+            {
+                if (originalPi[i] <= 0)
+                    continue;
+                int from = i / 90, to = i % 90;
+                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
+                int idx_f = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
+                if (idx_f >= 0 && idx_f < 8100)
+                    flippedPi[idx_f] = originalPi[i];
+            }
+            return flippedPi;
+        }
+
         public static Tensor Encode(Board board)
         {
             // 1. 从内存池租借数组
@@ -53,7 +72,8 @@ namespace ChineseChessAI.NeuralNetwork
                 using var fullTensor = torch.tensor(data, dtype: ScalarType.Float32);
 
                 // 2. 截取并变形
-                using var view3D = fullTensor.narrow(0, 0, DataSize).reshape(14, 10, 9);
+                using var narrowed = fullTensor.narrow(0, 0, DataSize);
+                using var view3D = narrowed.reshape(14, 10, 9);
 
                 // 3. 翻转视角 (使用静态常量 FlipDims，避免 new 带来 GC)
                 using var processedView = isRedTurn ? view3D.alias() : view3D.flip(FlipDims);

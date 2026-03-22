@@ -326,8 +326,12 @@ namespace ChineseChessAI.Training
                 return false;
 
             bool isRed = board.IsRedTurn;
-            var stateTensor = StateEncoder.Encode(board);
-            float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
+            float[] stateData;
+            using (torch.NewDisposeScope())
+            {
+                var stateTensor = StateEncoder.Encode(board);
+                stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
+            }
 
             float[] piData = new float[8100];
             int netIdx = parsedMove.Value.ToNetworkIndex();
@@ -344,7 +348,7 @@ namespace ChineseChessAI.Training
             if (netIdx >= 0 && netIdx < 8100)
                 piData[netIdx] = (1.0f - epsilon) + backgroundProb;
 
-            float[] trainingPi = isRed ? piData : FlipPolicyForDataset(piData);
+            float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
             gameHistory.Add((stateData, trainingPi, isRed));
             board.Push(parsedMove.Value.From, parsedMove.Value.To);
             return true;
@@ -399,20 +403,5 @@ namespace ChineseChessAI.Training
             catch (Exception) { }
         }
 
-        private float[] FlipPolicyForDataset(float[] originalPi)
-        {
-            float[] flippedPi = new float[8100];
-            for (int i = 0; i < 8100; i++)
-            {
-                if (originalPi[i] <= 0)
-                    continue;
-                int from = i / 90, to = i % 90;
-                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
-                int idx_f = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
-                if (idx_f >= 0 && idx_f < 8100)
-                    flippedPi[idx_f] = originalPi[i];
-            }
-            return flippedPi;
-        }
     }
 }

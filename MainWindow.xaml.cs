@@ -204,8 +204,25 @@ namespace ChineseChessAI
                 if (_orchestrator.IsTraining)
                     return;
 
+                if (!int.TryParse(TxtMaxMoves.Text, out int maxMoves) || maxMoves <= 0)
+                {
+                    MessageBox.Show("强制平局步数必须为正整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!int.TryParse(TxtExploreMoves.Text, out int exploreMoves) || exploreMoves < 0)
+                {
+                    MessageBox.Show("高温探索步数必须为非负整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (!float.TryParse(TxtMaterialBias.Text, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float materialBias) || materialBias < 0f)
+                {
+                    MessageBox.Show("破冰偏置必须为非负小数（如 0.05）。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
                 StartBtn.IsEnabled = false;
-                await _orchestrator.StartSelfPlayAsync();
+                await _orchestrator.StartSelfPlayAsync(maxMoves, exploreMoves, materialBias);
             }
             catch (Exception ex)
             {

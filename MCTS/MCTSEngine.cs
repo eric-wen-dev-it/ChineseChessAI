@@ -122,7 +122,7 @@ namespace ChineseChessAI.MCTS
 
                 var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
                 if (!isRed)
-                    policyLogits = FlipPolicy(policyLogits);
+                    policyLogits = StateEncoder.FlipPolicy(policyLogits);
 
                 var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
                 double adjustedValue = value;
@@ -238,23 +238,7 @@ namespace ChineseChessAI.MCTS
             return probs.Select(x => (x.Item1, x.Item2 / (sum > 0 ? sum : 1)));
         }
 
-        private float[] FlipPolicy(float[] originalPi)
-        {
-            float[] flippedPi = new float[8100];
-            for (int i = 0; i < 8100; i++)
-            {
-                if (originalPi[i] == 0)
-                    continue;
-                int from = i / 90, to = i % 90;
-                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
-                int from_f = (9 - r1) * 9 + (8 - c1);
-                int to_f = (9 - r2) * 9 + (8 - c2);
-                int idx_f = from_f * 90 + to_f;
-                if (idx_f >= 0 && idx_f < 8100)
-                    flippedPi[idx_f] = originalPi[i];
-            }
-            return flippedPi;
-        }
+
 
         private Board CloneBoard(Board original)
         {

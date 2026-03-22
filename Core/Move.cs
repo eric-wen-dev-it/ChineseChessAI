@@ -35,6 +35,9 @@
         /// 转换为标准的 UCCI 协议字符串（如 "a9a8", "b2e2"）
         /// 修正：确保无论红黑方，a-i 始终对应从左往右，9-0 始终对应从上往下。
         /// </summary>
+        public override bool Equals(object? obj) => obj is Move m && m.From == From && m.To == To;
+        public override int GetHashCode() => From * 90 + To;
+
         public override string ToString()
         {
             // 棋盘布局（红方视角）：
