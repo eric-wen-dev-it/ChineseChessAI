@@ -26,7 +26,7 @@ namespace ChineseChessAI.Training
             IsTraining = false;
         }
 
-        // ================= 1. 自我对弈进化循环 (保持原样即可) =================
+        // ================= 1. 自我对弈进化循环 =================
         public async Task StartSelfPlayAsync(int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
         {
             if (IsTraining)
@@ -53,12 +53,15 @@ namespace ChineseChessAI.Training
                         Log("[系统] 已加载现有模型权重。");
                     }
 
-                    var engine = new MCTSEngine(model, batchSize: 512);
+                    var trainer = new Trainer(model);
+
+                    // 【修复】：删除了优化器存档的伪调用
+
+                    using var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
                     var buffer = new ReplayBuffer(100000);
                     buffer.LoadOldSamples();
 
-                    var trainer = new Trainer(model);
                     var rnd = new Random();
 
                     for (int iter = 1; iter <= 10000; iter++)
@@ -123,6 +126,7 @@ namespace ChineseChessAI.Training
                             OnLossUpdated?.Invoke(loss);
 
                             ModelManager.SaveModel(model, modelPath);
+
                             Log($"[训练] 完成，当前 Loss: {loss:F4} (其中 {masterCount} 个大师样本，{selfPlayCount} 个自我实战样本)");
                         }
                     }
@@ -190,13 +194,15 @@ namespace ChineseChessAI.Training
             int maxBufferSize = 200000;
             var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
 
-            // 【核心修复】：将 Model 和 Trainer 提取到整个解析周期的最外层！
-            // 这保证了吃掉几十万个谱的过程中，Adam 优化器的动量 (Momentum) 和学习率衰减不被清零。
             var model = new CChessNet();
-            string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string modelPath = Path.Combine(baseDir, "best_model.pt");
+
             if (File.Exists(modelPath))
                 model.load(modelPath);
             var trainer = new Trainer(model);
+
+            // 【修复】：删除了优化器存档的伪调用
 
             int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
 
@@ -254,8 +260,14 @@ namespace ChineseChessAI.Training
                 if (gameHistory.Count > 10)
                 {
                     var examples = gameHistory.Select(step =>
-                        new TrainingExample(step.state, step.policy, step.isRedTurn ? resultValue : -resultValue)
-                    ).ToList();
+                    {
+                        var sparse = step.policy
+                                         .Select((p, i) => (Index: i, Prob: p))
+                                         .Where(x => x.Prob > 0)
+                                         .ToArray();
+
+                        return new TrainingExample(step.state, sparse, step.isRedTurn ? resultValue : -resultValue);
+                    }).ToList();
 
                     currentBuffer.AddRange(examples, saveToDisk: false);
                     MasterBuffer.AddRange(examples, saveToDisk: false);
@@ -267,7 +279,6 @@ namespace ChineseChessAI.Training
                 if (currentBuffer.Count >= maxBufferSize)
                 {
                     Log($"[PGN 吞噬者] 阶段 {trainingPhase}：缓存池已满 ({currentBuffer.Count} 样本)。开始消化...");
-                    // 把提取出来的全局 model 和 trainer 传进去
                     ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
                     Log($"[PGN 吞噬者] 阶段 {trainingPhase} 消化完毕！累计吸收 {totalProcessedGames} 局。清空肠胃...");
 
@@ -315,8 +326,6 @@ namespace ChineseChessAI.Training
             float[] piData = new float[8100];
             int netIdx = parsedMove.Value.ToNetworkIndex();
 
-            // 【核心修复】：Label Smoothing (平滑化策略) 
-            // 不再使用极端的 1.0 (绝对自信)，而是把 0.05 的概率均分给其他合理走法
             float epsilon = 0.05f;
             float backgroundProb = epsilon / legalMoves.Count;
 
@@ -329,7 +338,6 @@ namespace ChineseChessAI.Training
 
             if (netIdx >= 0 && netIdx < 8100)
             {
-                // 大师实际走的那一步占据主要概率 (0.95 + backgroundProb)
                 piData[netIdx] = (1.0f - epsilon) + backgroundProb;
             }
 
@@ -340,7 +348,7 @@ namespace ChineseChessAI.Training
             return true;
         }
 
-        // 【核心修复】：接收全局传入的 trainer 和 model，杜绝重置动量
+        // 【修复】：移除了 optimPath 参数
         private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs, Trainer trainer, CChessNet model, string modelPath)
         {
             try
@@ -375,7 +383,10 @@ namespace ChineseChessAI.Training
                 }
 
                 if (IsTraining)
+                {
                     ModelManager.SaveModel(model, modelPath);
+                    // 【修复】：不再调用伪代码保存优化器
+                }
             }
             catch (Exception ex)
             {
@@ -383,7 +394,7 @@ namespace ChineseChessAI.Training
             }
         }
 
-        // ================= 4. 内部工具方法 (保持原样) =================
+        // ================= 4. 内部工具方法 =================
         private void Log(string msg) => OnLog?.Invoke(msg);
 
         private void SaveMoveListToFile(string moveList, string result, string reason, string paramInfo)

@@ -8,13 +8,15 @@ using static TorchSharp.torch.optim.lr_scheduler;
 
 namespace ChineseChessAI.Training
 {
+    // 【核心修复】：这就是整个项目唯一的一处 TrainingExample 定义，采用了极度节约内存的稀疏策略！
+    public record TrainingExample(float[] State, (int Index, float Prob)[] SparsePolicy, float Value);
+
     public class Trainer
     {
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
         private LRScheduler _scheduler;
         private readonly double _learningRate = 0.0002;
-
         private int _iterationCount = 0;
 
         public Trainer(CChessNet model)
@@ -38,6 +40,8 @@ namespace ChineseChessAI.Training
             if (examples == null || examples.Count == 0)
                 return 0f;
 
+            using var scope = torch.NewDisposeScope();
+
             var device = torch.cuda.is_available() ? DeviceType.CUDA : DeviceType.CPU;
 
             var statesList = new List<Tensor>(examples.Count);
@@ -47,29 +51,25 @@ namespace ChineseChessAI.Training
             foreach (var ex in examples)
             {
                 statesList.Add(tensor(ex.State).view(14, 10, 9));
-                policiesList.Add(tensor(ex.Policy));
+
+                // 将节约内存的稀疏策略，在训练这一刻还原为稠密 Tensor (用完即抛，不占常驻内存)
+                float[] densePolicy = new float[8100];
+                foreach (var p in ex.SparsePolicy)
+                    densePolicy[p.Index] = p.Prob;
+
+                policiesList.Add(tensor(densePolicy));
                 valuesList.Add(tensor(ex.Value));
             }
 
-            // 【核心提速修复】：在 Epoch 循环外，一次性把所有数据搬进显卡 (to(device))
-            using var statesTensor = stack(statesList).to(device).to_type(ScalarType.Float32);
-            using var policiesTensor = stack(policiesList).to(device).to_type(ScalarType.Float32);
-            using var valuesTensor = stack(valuesList).to(device).to_type(ScalarType.Float32);
+            var statesTensor = stack(statesList).to(device).to_type(ScalarType.Float32);
+            var policiesTensor = stack(policiesList).to(device).to_type(ScalarType.Float32);
+            var valuesTensor = stack(valuesList).to(device).to_type(ScalarType.Float32);
 
             double totalLoss = 0;
-
             for (int e = 0; e < epochs; e++)
             {
-                // 传入的已经是显卡上的 Tensor，TrainStep 内部不再搬运
                 totalLoss += TrainStep(statesTensor, policiesTensor, valuesTensor);
             }
-
-            foreach (var t in statesList)
-                t.Dispose();
-            foreach (var t in policiesList)
-                t.Dispose();
-            foreach (var t in valuesList)
-                t.Dispose();
 
             _iterationCount++;
             _scheduler.step();
@@ -79,12 +79,9 @@ namespace ChineseChessAI.Training
 
         private double TrainStep(Tensor statesDevice, Tensor targetPoliciesDevice, Tensor targetValuesDevice)
         {
-            using var scope = torch.NewDisposeScope();
-
             _model.train();
             _optimizer.zero_grad();
 
-            // 【性能解放】：直接使用传入的显存 Tensor，剔除了耗时的 .to(device) 操作
             var (policyLogits, valuePred) = _model.forward(statesDevice);
 
             var vLoss = torch.nn.functional.mse_loss(valuePred, targetValuesDevice.view(-1, 1));
@@ -94,9 +91,7 @@ namespace ChineseChessAI.Training
             var totalLoss = vLoss + pLoss;
 
             if (!totalLoss.requires_grad)
-            {
                 throw new Exception($"计算图断裂！参数状态: {_model.parameters().First().requires_grad}");
-            }
 
             totalLoss.backward();
             _optimizer.step();
@@ -107,11 +102,7 @@ namespace ChineseChessAI.Training
         public double GetCurrentLR()
         {
             var groups = _optimizer.ParamGroups;
-            if (groups != null && groups.Any())
-            {
-                return groups.First().LearningRate;
-            }
-            return _learningRate;
+            return groups != null && groups.Any() ? groups.First().LearningRate : _learningRate;
         }
     }
 }

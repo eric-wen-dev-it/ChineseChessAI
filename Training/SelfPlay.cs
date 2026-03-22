@@ -9,7 +9,7 @@ using System.Threading.Tasks;
 
 namespace ChineseChessAI.Training
 {
-    public record TrainingExample(float[] State, float[] Policy, float Value);
+    // 【修复】：删除了这里重复的、旧版的 TrainingExample 定义，统一使用 Trainer.cs 中的稀疏版本
 
     public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
 
@@ -19,7 +19,6 @@ namespace ChineseChessAI.Training
         private readonly MoveGenerator _generator;
         private readonly Random _random = new Random();
 
-        // 接收从 UI 传导过来的动态超参数
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
         private readonly float _materialBias;
@@ -28,8 +27,6 @@ namespace ChineseChessAI.Training
         {
             _engine = engine;
             _generator = new MoveGenerator();
-
-            // 初始化超参数
             _maxMoves = maxMoves;
             _exploreMoves = exploreMoves;
             _materialBias = materialBias;
@@ -62,16 +59,13 @@ namespace ChineseChessAI.Training
                         if (instantKillMove != null)
                         {
                             Console.WriteLine($"[规则裁判] 发现对方送将/未应将！执行绝杀: {instantKillMove.Value}");
-
                             moveHistory.Add(instantKillMove.Value);
                             board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
-
                             if (onMovePerformed != null)
                             {
                                 await onMovePerformed.Invoke(board);
                                 await Task.Delay(1000);
                             }
-
                             endReason = "对方送将/未应将，老将被击杀";
                             finalResult = isRed ? 1.0f : -1.0f;
                             break;
@@ -82,19 +76,16 @@ namespace ChineseChessAI.Training
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
-
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f;
                             break;
                         }
 
-                        // 【动态参数】：使用界面传入的强制平局步数
                         if (moveCount >= _maxMoves)
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
-
                             endReason = "步数限制(强制平局)";
                             finalResult = 0.0f;
                             break;
@@ -108,7 +99,6 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        // 【动态参数】：使用界面传入的高温探索步数
                         double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.05;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
@@ -128,9 +118,7 @@ namespace ChineseChessAI.Training
                             positionHistory.Clear();
                         }
                         else
-                        {
                             noProgressCount++;
-                        }
 
                         moveHistory.Add(move);
                         board.Push(move.From, move.To);
@@ -139,12 +127,9 @@ namespace ChineseChessAI.Training
                             await onMovePerformed.Invoke(board);
 
                         moveCount++;
-
                         ulong currentHash = board.CurrentHash;
                         if (!positionHistory.ContainsKey(currentHash))
-                        {
                             positionHistory[currentHash] = 0;
-                        }
                         positionHistory[currentHash]++;
 
                         if (positionHistory[currentHash] >= 3)
@@ -153,7 +138,6 @@ namespace ChineseChessAI.Training
                             finalResult = 0.0f;
                             break;
                         }
-
                         if (noProgressCount >= 100)
                         {
                             endReason = "自然限着百步无进展(平局)";
@@ -162,29 +146,21 @@ namespace ChineseChessAI.Training
                         }
                     }
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[SelfPlay Error] {ex.Message}");
-                    break;
-                }
+                catch (Exception ex) { Console.WriteLine($"[SelfPlay Error] {ex.Message}"); break; }
             }
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
-
             return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount, moveHistory);
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
         {
             var validMoves = new List<(Move move, double prob)>();
-
             foreach (var m in legalMoves)
             {
                 int idx = m.ToNetworkIndex();
                 if (idx >= 0 && idx < 8100)
-                {
                     validMoves.Add((m, piData[idx]));
-                }
             }
 
             if (validMoves.Count == 0)
@@ -194,7 +170,6 @@ namespace ChineseChessAI.Training
 
             double[] poweredPi = validMoves.Select(x => Math.Pow(x.prob, 1.0 / temperature)).ToArray();
             double sum = poweredPi.Sum();
-
             if (sum <= 0 || double.IsNaN(sum))
                 return validMoves.OrderByDescending(x => x.prob).First().move;
 
@@ -232,13 +207,10 @@ namespace ChineseChessAI.Training
             var examples = new List<TrainingExample>(history.Count);
             float adjustedResult = finalResult;
 
-            // --- 逻辑修正部分 ---
             if (Math.Abs(finalResult) < 0.001f)
             {
                 float redMaterial = CalculateMaterialScore(finalBoard, true);
                 float blackMaterial = CalculateMaterialScore(finalBoard, false);
-
-                // 【动态参数】：使用界面传入的破冰微调偏置
                 float materialBias = _materialBias;
 
                 if (redMaterial > blackMaterial)
@@ -248,13 +220,19 @@ namespace ChineseChessAI.Training
                 else
                     adjustedResult = 0.0f;
             }
-            // --------------------
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
-                examples.Add(new TrainingExample(step.state, step.policy, valueForCurrentPlayer));
+
+                // 【核心修复】：转换为 SparsePolicy 格式，消灭内存核弹！
+                var sparsePolicy = step.policy
+                                       .Select((p, idx) => (Index: idx, Prob: p))
+                                       .Where(x => x.Prob > 0)
+                                       .ToArray();
+
+                examples.Add(new TrainingExample(step.state, sparsePolicy, valueForCurrentPlayer));
             }
             return examples;
         }

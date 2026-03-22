@@ -1,11 +1,17 @@
 ﻿using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using static TorchSharp.torch;
 
 namespace ChineseChessAI.MCTS
 {
-    public class MCTSEngine
+    // 【修复】：继承 IDisposable
+    public class MCTSEngine : IDisposable
     {
         private readonly CChessNet _model;
         private readonly MoveGenerator _generator;
@@ -82,14 +88,10 @@ namespace ChineseChessAI.MCTS
                         .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
                         .First();
 
-                    // 【核心修复】：线程选中分支下潜前，挂上虚拟损失（原子操作防并发）
                     Interlocked.Increment(ref bestChild.Value.VirtualLoss);
-
                     board.Push(bestChild.Key.From, bestChild.Key.To);
                     await SearchAsync(bestChild.Value, board);
                     board.Pop();
-
-                    // 【核心修复】：回溯时，扣除虚拟损失
                     Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
                     return;
                 }
@@ -261,6 +263,12 @@ namespace ChineseChessAI.MCTS
             foreach (var state in original.GetHistory().Reverse())
                 newBoard.RecordHistory(state);
             return newBoard;
+        }
+
+        // 【修复】：实现接口方法，释放后台推理资源
+        public void Dispose()
+        {
+            _batchInference?.Dispose();
         }
     }
 }
