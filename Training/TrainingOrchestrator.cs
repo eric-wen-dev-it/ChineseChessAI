@@ -65,7 +65,7 @@ namespace ChineseChessAI.Training
         }
 
         // ================= 2. 自我对弈进化循环 =================
-        public async Task StartSelfPlayAsync(int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
+        public async Task StartSelfPlayAsync(int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f)
         {
             if (IsTraining)
                 return;
@@ -115,7 +115,7 @@ namespace ChineseChessAI.Training
                         if (result.MoveCount > 10)
                         {
                             bool isDraw = result.ResultStr == "平局";
-                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.10);
+                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.40);
 
                             if (keepSample)
                             {
@@ -128,7 +128,7 @@ namespace ChineseChessAI.Training
                             }
                         }
 
-                        if (buffer.Count >= 3000)
+                        if (buffer.Count >= 1500)
                         {
                             Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
                             int batchSize = 4096;

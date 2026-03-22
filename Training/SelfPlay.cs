@@ -23,7 +23,7 @@ namespace ChineseChessAI.Training
         private readonly int _exploreMoves;
         private readonly float _materialBias;
 
-        public SelfPlay(MCTSEngine engine, int maxMoves = 250, int exploreMoves = 40, float materialBias = 0.05f)
+        public SelfPlay(MCTSEngine engine, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f)
         {
             _engine = engine;
             _generator = new MoveGenerator();
@@ -94,7 +94,7 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 3200);
+                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
 
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
