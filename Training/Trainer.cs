@@ -8,8 +8,11 @@ using static TorchSharp.torch.optim.lr_scheduler;
 
 namespace ChineseChessAI.Training
 {
-    // 【核心修复】：这就是整个项目唯一的一处 TrainingExample 定义，采用了极度节约内存的稀疏策略！
-    public record TrainingExample(float[] State, (int Index, float Prob)[] SparsePolicy, float Value);
+    // 【终极防御】：显式定义 struct，确保 System.Text.Json 能 100% 完美保存到硬盘
+    public record struct ActionProb(int Index, float Prob);
+
+    // 将 (int Index, float Prob)[] 替换为 ActionProb[]
+    public record TrainingExample(float[] State, ActionProb[] SparsePolicy, float Value);
 
     public class Trainer
     {

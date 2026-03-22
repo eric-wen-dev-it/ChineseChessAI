@@ -55,8 +55,6 @@ namespace ChineseChessAI.Training
 
                     var trainer = new Trainer(model);
 
-                    // 【修复】：删除了优化器存档的伪调用
-
                     using var engine = new MCTSEngine(model, batchSize: 512);
                     var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
                     var buffer = new ReplayBuffer(100000);
@@ -202,8 +200,6 @@ namespace ChineseChessAI.Training
                 model.load(modelPath);
             var trainer = new Trainer(model);
 
-            // 【修复】：删除了优化器存档的伪调用
-
             int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
 
             foreach (var block in gameBlocks)
@@ -261,8 +257,9 @@ namespace ChineseChessAI.Training
                 {
                     var examples = gameHistory.Select(step =>
                     {
+                        // 【核心修复】：使用显式的 struct (ActionProb) 防止序列化丢失
                         var sparse = step.policy
-                                         .Select((p, i) => (Index: i, Prob: p))
+                                         .Select((p, i) => new ActionProb(i, p))
                                          .Where(x => x.Prob > 0)
                                          .ToArray();
 
@@ -348,7 +345,6 @@ namespace ChineseChessAI.Training
             return true;
         }
 
-        // 【修复】：移除了 optimPath 参数
         private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs, Trainer trainer, CChessNet model, string modelPath)
         {
             try
@@ -385,7 +381,6 @@ namespace ChineseChessAI.Training
                 if (IsTraining)
                 {
                     ModelManager.SaveModel(model, modelPath);
-                    // 【修复】：不再调用伪代码保存优化器
                 }
             }
             catch (Exception ex)

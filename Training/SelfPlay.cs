@@ -226,9 +226,9 @@ namespace ChineseChessAI.Training
                 var step = history[i];
                 float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
 
-                // 【核心修复】：转换为 SparsePolicy 格式，消灭内存核弹！
+                // 【核心修复】：将隐式元组改为显式 struct
                 var sparsePolicy = step.policy
-                                       .Select((p, idx) => (Index: idx, Prob: p))
+                                       .Select((p, idx) => new ActionProb(idx, p))
                                        .Where(x => x.Prob > 0)
                                        .ToArray();
 
