@@ -131,7 +131,7 @@ namespace ChineseChessAI.Training
                         if (buffer.Count >= 1500)
                         {
                             Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
-                            int batchSize = 4096;
+                            int batchSize = 1024;
                             List<TrainingExample> mixedBatch = new List<TrainingExample>();
                             int masterCount = 0;
 
@@ -145,11 +145,21 @@ namespace ChineseChessAI.Training
                             mixedBatch.AddRange(buffer.Sample(selfPlayCount));
                             mixedBatch = mixedBatch.OrderBy(x => rnd.Next()).ToList();
 
-                            float loss = trainer.Train(mixedBatch, epochs: 15);
-                            OnLossUpdated?.Invoke(loss);
-                            ModelManager.SaveModel(model, modelPath);
-
-                            Log($"[训练] 完成，当前 Loss: {loss:F4}");
+                            float loss = 0;
+                            try
+                            {
+                                loss = trainer.Train(mixedBatch, epochs: 15);
+                                OnLossUpdated?.Invoke(loss);
+                                ModelManager.SaveModel(model, modelPath);
+                                Log($"[训练] 完成，当前 Loss: {loss:F4}");
+                            }
+                            catch (Exception trainEx)
+                            {
+                                string errMsg = $"[训练错误] {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Iter={iter} | Batch={mixedBatch.Count} | {trainEx.GetType().Name}: {trainEx.Message}";
+                                Log(errMsg);
+                                WriteErrorLog(errMsg, trainEx);
+                                torch.cuda.empty_cache();
+                            }
                         }
                     }
                 }
@@ -360,7 +370,7 @@ namespace ChineseChessAI.Training
         {
             try
             {
-                int chunkSize = 4096;
+                int chunkSize = 1024;
                 for (int epoch = 1; epoch <= epochs; epoch++)
                 {
                     if (!IsTraining)
@@ -389,6 +399,22 @@ namespace ChineseChessAI.Training
         }
 
         private void Log(string msg) => OnLog?.Invoke(msg);
+
+        private void WriteErrorLog(string message, Exception ex)
+        {
+            try
+            {
+                string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "error_logs");
+                if (!Directory.Exists(logDir))
+                    Directory.CreateDirectory(logDir);
+                string filePath = Path.Combine(logDir, $"error_{DateTime.Now:yyyyMMdd_HHmmss_fff}.txt");
+                string content = $"{message}\nStackTrace:\n{ex.StackTrace}\n";
+                if (ex.InnerException != null)
+                    content += $"InnerException: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}\n{ex.InnerException.StackTrace}\n";
+                File.WriteAllText(filePath, content);
+            }
+            catch (Exception) { }
+        }
 
         private void SaveMoveListToFile(string moveList, string result, string reason, string paramInfo)
         {
