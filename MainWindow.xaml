@@ -82,7 +82,7 @@
                             <ColumnDefinition Width="60"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="强制平局步数 (Max Moves):" Foreground="#CCC" VerticalAlignment="Center" ToolTip="兜底防线，超过此步数强制按平局结束"/>
-                        <TextBox x:Name="TxtMaxMoves" Text="250" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
+                        <TextBox x:Name="TxtMaxMoves" Text="150" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
                     </Grid>
 
                     <Grid Margin="0,0,0,8">
@@ -100,7 +100,7 @@
                             <ColumnDefinition Width="60"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="破冰微调偏置 (Material Bias):" Foreground="#CCC" VerticalAlignment="Center" ToolTip="平局时给子力优势方的微小奖励(如0.05)，设为0则绝对公平"/>
-                        <TextBox x:Name="TxtMaterialBias" Text="0.05" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
+                        <TextBox x:Name="TxtMaterialBias" Text="0.4" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
                     </Grid>
                 </StackPanel>
             </Border>

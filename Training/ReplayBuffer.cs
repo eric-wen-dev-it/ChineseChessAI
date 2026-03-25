@@ -13,12 +13,13 @@ namespace ChineseChessAI.Training
         private int _count = 0;
         private int _head = 0;
         private readonly Random _random = new Random();
-        private readonly string _dataDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "self_play_data");
+        private readonly string _dataDir;
 
-        public ReplayBuffer(int capacity = 100000)
+        public ReplayBuffer(int capacity = 100000, string dataDir = null)
         {
             _capacity = capacity;
             _buffer = new TrainingExample[capacity];
+            _dataDir = dataDir ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "self_play_data");
             if (!Directory.Exists(_dataDir))
                 Directory.CreateDirectory(_dataDir);
         }

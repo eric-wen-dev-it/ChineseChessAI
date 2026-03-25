@@ -16,7 +16,7 @@ namespace ChineseChessAI.MCTS
         private readonly CChessNet _model;
         private readonly MoveGenerator _generator;
         private readonly BatchInference _batchInference;
-        private readonly double _cPuct = 2.0;
+        private readonly double _cPuct = 2.5;
         private readonly Random _random = new Random();
 
         public MCTSEngine(CChessNet model, int batchSize = 64)

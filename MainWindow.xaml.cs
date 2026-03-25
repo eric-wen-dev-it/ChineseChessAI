@@ -345,9 +345,16 @@ namespace ChineseChessAI
 
                 if (openFileDialog.ShowDialog() == true)
                 {
+                    var result = MessageBox.Show(
+                        "是否在解析的同时进行训练？\n\n【是】解析 + 训练（较慢，占用 GPU）\n【否】仅解析存盘，不训练（快速，下次启动自动加载）",
+                        "导入模式",
+                        MessageBoxButton.YesNo,
+                        MessageBoxImage.Question);
+
+                    bool trainWhileParsing = result == MessageBoxResult.Yes;
                     StartBtn.IsEnabled = false;
-                    AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} ...");
-                    await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
+                    AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} | 模式: {(trainWhileParsing ? "解析+训练" : "纯解析存盘")}");
+                    await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName, trainWhileParsing);
                 }
             }
             catch (Exception ex)

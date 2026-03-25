@@ -99,7 +99,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.05;
+                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.3;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))

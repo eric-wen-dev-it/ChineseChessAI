@@ -22,7 +22,8 @@ namespace ChineseChessAI.Training
         public event Action<string> OnError;
 
         public bool IsTraining { get; private set; } = false;
-        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000);
+        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000,
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "master_data"));
 
         public void StopTraining()
         {
@@ -65,7 +66,7 @@ namespace ChineseChessAI.Training
         }
 
         // ================= 2. 自我对弈进化循环 =================
-        public async Task StartSelfPlayAsync(int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f)
+        public async Task StartSelfPlayAsync(int maxMoves = 100, int exploreMoves = 40, float materialBias = 0.4f)
         {
             if (IsTraining)
                 return;
@@ -93,6 +94,8 @@ namespace ChineseChessAI.Training
                     var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
                     var buffer = new ReplayBuffer(100000);
                     buffer.LoadOldSamples();
+                    MasterBuffer.LoadOldSamples();
+                    Log($"[系统] MasterBuffer 已加载 {MasterBuffer.Count} 条大师样本。");
 
                     var rnd = new Random();
 
@@ -115,7 +118,7 @@ namespace ChineseChessAI.Training
                         if (result.MoveCount > 10)
                         {
                             bool isDraw = result.ResultStr == "平局";
-                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.40);
+                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.65);
 
                             if (keepSample)
                             {
@@ -128,10 +131,10 @@ namespace ChineseChessAI.Training
                             }
                         }
 
-                        if (buffer.Count >= 1500)
+                        if (buffer.Count >= 500)
                         {
                             Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
-                            int batchSize = 1024;
+                            int batchSize = 512;
                             List<TrainingExample> mixedBatch = new List<TrainingExample>();
                             int masterCount = 0;
 
@@ -148,7 +151,7 @@ namespace ChineseChessAI.Training
                             float loss = 0;
                             try
                             {
-                                loss = trainer.Train(mixedBatch, epochs: 15);
+                                loss = trainer.Train(mixedBatch, epochs: 5);
                                 OnLossUpdated?.Invoke(loss);
                                 ModelManager.SaveModel(model, modelPath);
                                 Log($"[训练] 完成，当前 Loss: {loss:F4}");
@@ -158,7 +161,13 @@ namespace ChineseChessAI.Training
                                 string errMsg = $"[训练错误] {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Iter={iter} | Batch={mixedBatch.Count} | {trainEx.GetType().Name}: {trainEx.Message}";
                                 Log(errMsg);
                                 WriteErrorLog(errMsg, trainEx);
-                                torch.cuda.empty_cache();
+                                try
+                                {
+                                    if (torch.cuda.is_available())
+                                        torch.cuda.synchronize();
+                                }
+                                catch { }
+                                GC.Collect();
                             }
                         }
                     }
@@ -169,7 +178,7 @@ namespace ChineseChessAI.Training
         }
 
         // ================= 3. 数据集解析 =================
-        public async Task ProcessDatasetAsync(string filePath)
+        public async Task ProcessDatasetAsync(string filePath, bool trainWhileParsing = true)
         {
             if (IsTraining)
                 return;
@@ -181,28 +190,30 @@ namespace ChineseChessAI.Training
                 {
                     string extension = Path.GetExtension(filePath).ToLower();
                     if (extension == ".csv")
-                        ProcessCsvDataset(filePath);
+                        ProcessCsvDataset(filePath, trainWhileParsing);
                     else if (extension == ".pgn" || extension == ".txt")
-                        ProcessPgnDatasetStreaming(filePath);
+                        ProcessPgnDatasetStreaming(filePath, trainWhileParsing);
                 }
                 catch (Exception ex) { OnError?.Invoke($"[解析致命错误] {ex.Message}"); }
                 finally { IsTraining = false; OnTrainingStopped?.Invoke(); }
             });
         }
 
-        private void ProcessPgnDatasetStreaming(string filePath)
+        private void ProcessPgnDatasetStreaming(string filePath, bool trainWhileParsing = true)
         {
-            Log("[PGN 吞噬者] 正在以【真·流式】读取巨型文件，内存已免疫 OOM...");
+            Log(trainWhileParsing
+                ? "[PGN 吞噬者] 正在以【真·流式】读取巨型文件，内存已免疫 OOM..."
+                : "[PGN 吞噬者] 纯解析模式：只存盘，不训练...");
 
             var generator = new MoveGenerator();
             int maxBufferSize = 200000;
             var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
 
-            var model = new CChessNet();
+            var model = trainWhileParsing ? new CChessNet() : null;
             string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
-            if (File.Exists(modelPath))
+            if (trainWhileParsing && File.Exists(modelPath))
                 model.load(modelPath);
-            var trainer = new Trainer(model);
+            var trainer = trainWhileParsing ? new Trainer(model) : null;
 
             int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
 
@@ -224,9 +235,16 @@ namespace ChineseChessAI.Training
 
                         if (currentBuffer.Count >= maxBufferSize)
                         {
-                            Log($"[PGN 吞噬者] 阶段 {trainingPhase}：缓存池满 ({currentBuffer.Count})。开始消化...");
-                            ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
-                            Log($"[PGN 吞噬者] 阶段 {trainingPhase} 消化完毕！累计吸收 {totalProcessedGames} 局。");
+                            if (trainWhileParsing)
+                            {
+                                Log($"[PGN 吞噬者] 阶段 {trainingPhase}：缓存池满 ({currentBuffer.Count})。开始消化...");
+                                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
+                                Log($"[PGN 吞噬者] 阶段 {trainingPhase} 消化完毕！累计吸收 {totalProcessedGames} 局。");
+                            }
+                            else
+                            {
+                                Log($"[PGN 吞噬者] 已解析 {totalProcessedGames} 局，继续读取...");
+                            }
 
                             currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
                             currentBatchGames = 0;
@@ -244,14 +262,14 @@ namespace ChineseChessAI.Training
                 }
             }
 
-            if (currentBuffer.Count > 1000 && IsTraining)
+            if (currentBuffer.Count > 1000 && IsTraining && trainWhileParsing)
             {
                 Log($"[PGN 吞噬者] 终章：清空剩余 {currentBuffer.Count} 个样本...");
                 ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
             }
 
             if (IsTraining)
-                Log($"[PGN 吞噬者] 终极封神！总吞噬 {totalProcessedGames} 局高质量大师谱。");
+                Log($"[PGN 吞噬者] 终极封神！总吞噬 {totalProcessedGames} 局高质量大师谱。已写入 data/master_data/。");
         }
 
         private void ParseSinglePgnBlock(string block, MoveGenerator generator, ReplayBuffer currentBuffer, ref int totalGames, ref int batchGames)
@@ -313,14 +331,139 @@ namespace ChineseChessAI.Training
                 }).ToList();
 
                 currentBuffer.AddRange(examples, saveToDisk: false);
-                MasterBuffer.AddRange(examples, saveToDisk: false);
+                MasterBuffer.AddRange(examples, saveToDisk: true);
                 totalGames++;
                 batchGames++;
             }
         }
 
-        private void ProcessCsvDataset(string filePath)
+        private void ProcessCsvDataset(string filePath, bool trainWhileParsing = true)
         {
+            Log(trainWhileParsing
+                ? "[CSV 解析] 开始读取，解析 + 训练模式..."
+                : "[CSV 解析] 开始读取，纯解析存盘模式...");
+
+            var generator = new MoveGenerator();
+            int maxBufferSize = 200000;
+            var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
+
+            CChessNet model = null;
+            Trainer trainer = null;
+            string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+            if (trainWhileParsing)
+            {
+                model = new CChessNet();
+                if (File.Exists(modelPath)) model.load(modelPath);
+                trainer = new Trainer(model);
+            }
+
+            int totalGames = 0, batchGames = 0, trainingPhase = 1;
+            string currentGameId = null;
+            var redMoves = new List<(int turn, string move)>();
+            var blackMoves = new List<(int turn, string move)>();
+
+            using (var reader = new StreamReader(filePath, Encoding.UTF8))
+            {
+                reader.ReadLine(); // 跳过 header
+
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    if (!IsTraining) break;
+
+                    var parts = line.Split(',');
+                    if (parts.Length < 4) continue;
+
+                    string gameId = parts[0].Trim();
+                    if (!int.TryParse(parts[1].Trim(), out int turn)) continue;
+                    string side = parts[2].Trim().ToLower();
+                    string move = parts[3].Trim();
+
+                    if (currentGameId != null && gameId != currentGameId)
+                    {
+                        ProcessCsvGame(redMoves, blackMoves, generator, currentBuffer, ref totalGames, ref batchGames);
+                        redMoves.Clear();
+                        blackMoves.Clear();
+
+                        if (currentBuffer.Count >= maxBufferSize)
+                        {
+                            if (trainWhileParsing)
+                            {
+                                Log($"[CSV 解析] 阶段 {trainingPhase}：缓存池满，开始消化...");
+                                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
+                                Log($"[CSV 解析] 阶段 {trainingPhase} 消化完毕！累计 {totalGames} 局。");
+                            }
+                            else
+                            {
+                                Log($"[CSV 解析] 已解析 {totalGames} 局，继续读取...");
+                            }
+                            currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
+                            batchGames = 0;
+                            trainingPhase++;
+                            GC.Collect();
+                        }
+                    }
+
+                    currentGameId = gameId;
+                    if (side == "red")
+                        redMoves.Add((turn, move));
+                    else
+                        blackMoves.Add((turn, move));
+                }
+
+                // 处理最后一局
+                if (currentGameId != null && IsTraining)
+                    ProcessCsvGame(redMoves, blackMoves, generator, currentBuffer, ref totalGames, ref batchGames);
+            }
+
+            if (currentBuffer.Count > 1000 && IsTraining && trainWhileParsing)
+            {
+                Log($"[CSV 解析] 终章：清空剩余 {currentBuffer.Count} 个样本...");
+                ExecuteSupervisedTrainingChunk(currentBuffer, epochs: 2, trainer, model, modelPath);
+            }
+
+            if (IsTraining)
+                Log($"[CSV 解析] 完成！总解析 {totalGames} 局。已写入 data/master_data/。");
+        }
+
+        private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves,
+            MoveGenerator generator, ReplayBuffer currentBuffer, ref int totalGames, ref int batchGames)
+        {
+            redMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
+            blackMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
+
+            // 交叉排列：红1、黑1、红2、黑2…
+            var orderedMoves = new List<string>();
+            int maxTurn = Math.Max(redMoves.Count, blackMoves.Count);
+            for (int i = 0; i < maxTurn; i++)
+            {
+                if (i < redMoves.Count) orderedMoves.Add(redMoves[i].move);
+                if (i < blackMoves.Count) orderedMoves.Add(blackMoves[i].move);
+            }
+
+            var board = new Board();
+            var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
+
+            foreach (var moveStr in orderedMoves)
+            {
+                if (!ProcessSingleMove(board, moveStr, generator, gameHistory))
+                    break;
+            }
+
+            if (gameHistory.Count > 10)
+            {
+                float resultValue = GetBoardAdvantage(board);
+                var examples = gameHistory.Select(step =>
+                {
+                    var sparse = step.policy.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
+                    return new TrainingExample(step.state, sparse, step.isRedTurn ? resultValue : -resultValue);
+                }).ToList();
+
+                currentBuffer.AddRange(examples, saveToDisk: false);
+                MasterBuffer.AddRange(examples, saveToDisk: true);
+                totalGames++;
+                batchGames++;
+            }
         }
 
         private bool ProcessSingleMove(Board board, string rawMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
