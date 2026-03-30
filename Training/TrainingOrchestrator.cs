@@ -140,7 +140,7 @@ namespace ChineseChessAI.Training
 
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
-                                masterCount = Math.Min((int)(batchSize * 0.25), MasterBuffer.Count);
+                                masterCount = Math.Min((int)(batchSize * 0.50), MasterBuffer.Count);
                                 mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
                             }
 

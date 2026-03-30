@@ -51,6 +51,7 @@ namespace ChineseChessAI
             _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
             _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
 
+            DataContext = new TrainingConfig();
             _ = Task.Run(StartReplayLoopAsync);
         }
 
@@ -204,17 +205,18 @@ namespace ChineseChessAI
                 if (_orchestrator.IsTraining)
                     return;
 
-                if (!int.TryParse(TxtMaxMoves.Text, out int maxMoves) || maxMoves <= 0)
+                var config = (TrainingConfig)DataContext;
+                if (!int.TryParse(config.MaxMoves, out int maxMoves) || maxMoves <= 0)
                 {
                     MessageBox.Show("强制平局步数必须为正整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                if (!int.TryParse(TxtExploreMoves.Text, out int exploreMoves) || exploreMoves < 0)
+                if (!int.TryParse(config.ExploreMoves, out int exploreMoves) || exploreMoves < 0)
                 {
                     MessageBox.Show("高温探索步数必须为非负整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
-                if (!float.TryParse(TxtMaterialBias.Text, System.Globalization.NumberStyles.Float,
+                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out float materialBias) || materialBias < 0f)
                 {
                     MessageBox.Show("破冰偏置必须为非负小数（如 0.05）。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -229,6 +231,13 @@ namespace ChineseChessAI
                 MessageBox.Show($"训练启动异常: {ex.Message}\n{ex.StackTrace}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 StartBtn.IsEnabled = true;
             }
+        }
+
+        public class TrainingConfig
+        {
+            public string MaxMoves { get; set; } = "150";
+            public string ExploreMoves { get; set; } = "40";
+            public string MaterialBias { get; set; } = "0.6";
         }
 
         private void OnReplayLastClick(object sender, RoutedEventArgs e)
