@@ -190,10 +190,10 @@ namespace ChineseChessAI.Training
         {
             var examples = new List<TrainingExample>(history.Count);
             float adjustedResult = finalResult;
+            bool isSymmetricDrawPenalty = false;
 
             if (Math.Abs(finalResult) < 0.001f)
             {
-                // 【核心修复】：调用 Orchestrator 中统一的算分逻辑，彻底消灭重复代码
                 float redMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, true);
                 float blackMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, false);
 
@@ -202,13 +202,16 @@ namespace ChineseChessAI.Training
                 else if (blackMaterial > redMaterial)
                     adjustedResult = -_materialBias;
                 else
-                    adjustedResult = -0.1f; // 平局微惩罚，打破均衡，迫使模型学习进攻
+                    isSymmetricDrawPenalty = true; // 双方均等惩罚，不走不对称路径
             }
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-                float valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
+                // 【关键修复】：等材平局时红黑双方都得 -0.3，不再给黑方 +0.1 的隐性奖励
+                float valueForCurrentPlayer = isSymmetricDrawPenalty
+                    ? -0.3f
+                    : (step.isRedTurn ? adjustedResult : -adjustedResult);
 
                 var sparsePolicy = step.policy
                                        .Select((p, idx) => new ActionProb(idx, p))
