@@ -235,7 +235,7 @@ namespace ChineseChessAI
 
         public class TrainingConfig
         {
-            public string MaxMoves { get; set; } = "150";
+            public string MaxMoves { get; set; } = "100";
             public string ExploreMoves { get; set; } = "40";
             public string MaterialBias { get; set; } = "0.6";
         }

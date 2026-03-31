@@ -202,7 +202,7 @@ namespace ChineseChessAI.Training
                 else if (blackMaterial > redMaterial)
                     adjustedResult = -_materialBias;
                 else
-                    adjustedResult = 0.0f;
+                    adjustedResult = -0.1f; // 平局微惩罚，打破均衡，迫使模型学习进攻
             }
 
             for (int i = 0; i < history.Count; i++)
