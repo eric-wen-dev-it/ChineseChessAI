@@ -140,7 +140,9 @@ namespace ChineseChessAI.Training
 
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
-                                masterCount = Math.Min((int)(batchSize * 0.50), MasterBuffer.Count);
+                                // 降低Master比例：自对弈占主导，Master数据作参考
+                                // 70%太高导致两种信号互相矛盾（Master有胜负，自对弈全是平局）
+                                masterCount = Math.Min((int)(batchSize * 0.35), MasterBuffer.Count);
                                 mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
                             }
 

@@ -99,7 +99,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.3;
+                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.05;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
@@ -208,10 +208,18 @@ namespace ChineseChessAI.Training
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-                // 等材平局时红黑双方都得 -0.5，增强"不满足于平局"的驱动
-                float valueForCurrentPlayer = isSymmetricDrawPenalty
-                    ? -0.5f
-                    : (step.isRedTurn ? adjustedResult : -adjustedResult);
+                // 等材平局：给中性标签(0)，不能用-1.0，那会把所有正常下棋都标记为"坏的"
+                // 只有残局阶段（后1/3步）给轻微负信号，鼓励在终局寻求突破
+                float valueForCurrentPlayer;
+                if (isSymmetricDrawPenalty)
+                {
+                    float progress = (float)i / Math.Max(1, history.Count - 1); // 0.0 ~ 1.0
+                    valueForCurrentPlayer = progress > 0.67f ? -0.2f : 0.0f; // 只有残局阶段给小负值
+                }
+                else
+                {
+                    valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
+                }
 
                 var sparsePolicy = step.policy
                                        .Select((p, idx) => new ActionProb(idx, p))
