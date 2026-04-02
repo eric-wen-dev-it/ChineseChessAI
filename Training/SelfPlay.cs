@@ -208,9 +208,9 @@ namespace ChineseChessAI.Training
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-                // 【关键修复】：等材平局时红黑双方都得 -0.3，不再给黑方 +0.1 的隐性奖励
+                // 等材平局时红黑双方都得 -0.5，增强"不满足于平局"的驱动
                 float valueForCurrentPlayer = isSymmetricDrawPenalty
-                    ? -0.3f
+                    ? -0.5f
                     : (step.isRedTurn ? adjustedResult : -adjustedResult);
 
                 var sparsePolicy = step.policy

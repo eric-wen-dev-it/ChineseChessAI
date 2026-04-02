@@ -118,7 +118,7 @@ namespace ChineseChessAI.Training
                         if (result.MoveCount > 10)
                         {
                             bool isDraw = result.ResultStr == "平局";
-                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.10);
+                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.50);
 
                             if (keepSample)
                             {
@@ -140,7 +140,7 @@ namespace ChineseChessAI.Training
 
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
-                                masterCount = Math.Min((int)(batchSize * 0.80), MasterBuffer.Count);
+                                masterCount = Math.Min((int)(batchSize * 0.50), MasterBuffer.Count);
                                 mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
                             }
 
