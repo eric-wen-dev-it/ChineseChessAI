@@ -76,8 +76,21 @@ namespace ChineseChessAI.Training
             {
                 try
                 {
+                    const int mctsSimulations = 800;
+                    const int mctsBatchSize = 512;
+                    const int trainBatchSize = 512;
+                    const int trainEpochs = 5;
+                    const int bufferTrigger = 500;
+                    const int bufferCapacity = 100000;
+                    const float masterRatio = 0.35f;
+                    const float drawKeepRate = 0.50f;
+
                     Log("=== 进化循环已启动 (极速模式) ===");
                     Log($"[全局配置] 步数上限: {maxMoves} | 高温探索: 前 {exploreMoves} 步 | 破冰偏置: {materialBias:F3}");
+                    Log($"[MCTS]     模拟次数: {mctsSimulations} | 推理批大小: {mctsBatchSize}");
+                    Log($"[训练配置]  批大小: {trainBatchSize} | Epochs: {trainEpochs} | 触发阈值: {bufferTrigger} 条");
+                    Log($"[缓冲区]   容量: {bufferCapacity} | Master比例: {masterRatio:P0} | 平局保留率: {drawKeepRate:P0}");
+                    Log($"[价值标签]  不等材平局: ±{materialBias:F3} | 等材平局: 前2/3步=0.0 / 后1/3步=-0.2");
 
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -90,9 +103,9 @@ namespace ChineseChessAI.Training
                     }
 
                     var trainer = new Trainer(model);
-                    using var engine = new MCTSEngine(model, batchSize: 512);
+                    using var engine = new MCTSEngine(model, batchSize: mctsBatchSize);
                     var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
-                    var buffer = new ReplayBuffer(100000);
+                    var buffer = new ReplayBuffer(bufferCapacity);
                     buffer.LoadOldSamples();
                     MasterBuffer.LoadOldSamples();
                     Log($"[系统] MasterBuffer 已加载 {MasterBuffer.Count} 条大师样本。");
@@ -118,7 +131,7 @@ namespace ChineseChessAI.Training
                         if (result.MoveCount > 10)
                         {
                             bool isDraw = result.ResultStr == "平局";
-                            bool keepSample = !(isDraw && rnd.NextDouble() > 0.50);
+                            bool keepSample = !(isDraw && rnd.NextDouble() > drawKeepRate);
 
                             if (keepSample)
                             {
@@ -131,29 +144,26 @@ namespace ChineseChessAI.Training
                             }
                         }
 
-                        if (buffer.Count >= 500)
+                        if (buffer.Count >= bufferTrigger)
                         {
                             Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
-                            int batchSize = 512;
                             List<TrainingExample> mixedBatch = new List<TrainingExample>();
                             int masterCount = 0;
 
                             if (MasterBuffer != null && MasterBuffer.Count > 0)
                             {
-                                // 降低Master比例：自对弈占主导，Master数据作参考
-                                // 70%太高导致两种信号互相矛盾（Master有胜负，自对弈全是平局）
-                                masterCount = Math.Min((int)(batchSize * 0.35), MasterBuffer.Count);
+                                masterCount = Math.Min((int)(trainBatchSize * masterRatio), MasterBuffer.Count);
                                 mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
                             }
 
-                            int selfPlayCount = Math.Min(batchSize - masterCount, buffer.Count);
+                            int selfPlayCount = Math.Min(trainBatchSize - masterCount, buffer.Count);
                             mixedBatch.AddRange(buffer.Sample(selfPlayCount));
                             mixedBatch = mixedBatch.OrderBy(x => rnd.Next()).ToList();
 
                             float loss = 0;
                             try
                             {
-                                loss = trainer.Train(mixedBatch, epochs: 5);
+                                loss = trainer.Train(mixedBatch, epochs: trainEpochs);
                                 OnLossUpdated?.Invoke(loss);
                                 ModelManager.SaveModel(model, modelPath);
                                 Log($"[训练] 完成，当前 Loss: {loss:F4}");
