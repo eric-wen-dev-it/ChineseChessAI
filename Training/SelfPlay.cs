@@ -22,14 +22,21 @@ namespace ChineseChessAI.Training
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
         private readonly float _materialBias;
+        private readonly double _lowTemperature;
+        private readonly float _earlyDrawPenalty;
+        private readonly float _lateDrawPenalty;
 
-        public SelfPlay(MCTSEngine engine, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f)
+        public SelfPlay(MCTSEngine engine, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f,
+                        double lowTemperature = 0.10, float earlyDrawPenalty = -0.4f, float lateDrawPenalty = -0.6f)
         {
             _engine = engine;
             _generator = new MoveGenerator();
             _maxMoves = maxMoves;
             _exploreMoves = exploreMoves;
             _materialBias = materialBias;
+            _lowTemperature = lowTemperature;
+            _earlyDrawPenalty = earlyDrawPenalty;
+            _lateDrawPenalty = lateDrawPenalty;
         }
 
         public async Task<GameResult> RunGameAsync(Func<Board, Task>? onMovePerformed = null)
@@ -99,7 +106,7 @@ namespace ChineseChessAI.Training
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         gameHistory.Add((stateData, trainingPi, isRed));
 
-                        double temperature = (moveCount < _exploreMoves) ? 1.0 : 0.05;
+                        double temperature = (moveCount < _exploreMoves) ? 1.0 : _lowTemperature;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
 
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
@@ -214,7 +221,7 @@ namespace ChineseChessAI.Training
                 if (isSymmetricDrawPenalty)
                 {
                     float progress = (float)i / Math.Max(1, history.Count - 1); // 0.0 ~ 1.0
-                    valueForCurrentPlayer = progress > 0.67f ? -0.2f : 0.0f; // 只有残局阶段给小负值
+                    valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty; // 全程给负信号，残局更重
                 }
                 else
                 {

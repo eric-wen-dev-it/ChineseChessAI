@@ -83,14 +83,18 @@ namespace ChineseChessAI.Training
                     const int bufferTrigger = 500;
                     const int bufferCapacity = 100000;
                     const float masterRatio = 0.35f;
-                    const float drawKeepRate = 0.50f;
+                    const float drawKeepRate = 0.20f;
+                    const double lowTemperature = 0.10;
+                    const float earlyDrawPenalty = -0.4f;
+                    const float lateDrawPenalty = -0.6f;
 
                     Log("=== 进化循环已启动 (极速模式) ===");
                     Log($"[全局配置] 步数上限: {maxMoves} | 高温探索: 前 {exploreMoves} 步 | 破冰偏置: {materialBias:F3}");
                     Log($"[MCTS]     模拟次数: {mctsSimulations} | 推理批大小: {mctsBatchSize}");
                     Log($"[训练配置]  批大小: {trainBatchSize} | Epochs: {trainEpochs} | 触发阈值: {bufferTrigger} 条");
                     Log($"[缓冲区]   容量: {bufferCapacity} | Master比例: {masterRatio:P0} | 平局保留率: {drawKeepRate:P0}");
-                    Log($"[价值标签]  不等材平局: ±{materialBias:F3} | 等材平局: 前2/3步=0.0 / 后1/3步=-0.2");
+                    Log($"[探索温度]  高温阶段: 1.0 (前 {exploreMoves} 步) | 低温阶段: {lowTemperature:F2} (之后)");
+                    Log($"[价值标签]  不等材平局: ±{materialBias:F3} | 等材平局: 前1/2步={earlyDrawPenalty:F1} / 后1/2步={lateDrawPenalty:F1}");
 
                     var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
@@ -104,7 +108,7 @@ namespace ChineseChessAI.Training
 
                     var trainer = new Trainer(model);
                     using var engine = new MCTSEngine(model, batchSize: mctsBatchSize);
-                    var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias);
+                    var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias, lowTemperature, earlyDrawPenalty, lateDrawPenalty);
                     var buffer = new ReplayBuffer(bufferCapacity);
                     buffer.LoadOldSamples();
                     MasterBuffer.LoadOldSamples();
