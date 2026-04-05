@@ -36,10 +36,10 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public void LoadOldSamples(int maxFiles = 200, bool randomize = false)
+        public int LoadOldSamples(int maxFiles = 200, bool randomize = false)
         {
             if (!Directory.Exists(_dataDir))
-                return;
+                return 0;
 
             var allPaths = Directory.GetFiles(_dataDir, "*.json");
 
@@ -76,6 +76,7 @@ namespace ChineseChessAI.Training
                 catch { /* 忽略损坏的文件 */ }
             }
             Console.WriteLine($"[ReplayBuffer] 已从磁盘预加载 {totalLoaded} 条样本（共 {allPaths.Length} 个文件可用）");
+            return totalLoaded;
         }
 
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)

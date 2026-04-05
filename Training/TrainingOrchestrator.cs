@@ -119,7 +119,8 @@ namespace ChineseChessAI.Training
                     
                     bufferA.LoadOldSamples();
                     bufferB.LoadOldSamples();
-                    MasterBuffer.LoadOldSamples(int.MaxValue);
+                    int masterLoaded = MasterBuffer.LoadOldSamples(int.MaxValue);
+                    Log($"[系统] 已从大师库加载 {masterLoaded} 条高质量样本。");
 
                     var rnd = new Random();
                     bool engineAIsRed = true;
@@ -149,7 +150,7 @@ namespace ChineseChessAI.Training
                             string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
                             SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason, $"限步={maxMoves}");
 
-                            if (result.MoveCount > 10)
+                            if (result.IsSuccess && result.MoveCount > 10)
                             {
                                 bool isDraw = result.ResultStr == "平局";
                                 bool keepSample = !(isDraw && rnd.NextDouble() > drawKeepRate);
@@ -160,6 +161,10 @@ namespace ChineseChessAI.Training
                                     if (result.ExamplesB.Count > 0) bufferB.AddRange(result.ExamplesB);
                                     Log($"[对弈] {result.EndReason} | {result.ResultStr} | {result.MoveCount}步 | 双池入库");
                                 }
+                            }
+                            else if (!result.IsSuccess)
+                            {
+                                Log($"[对弈] 跳过异常局: {result.EndReason}");
                             }
                         }
 
@@ -498,10 +503,9 @@ namespace ChineseChessAI.Training
 
         private bool ProcessSingleMove(Board board, string rawMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
         {
-            string ucciMove = NotationConverter.ConvertToUcci(board, rawMove, generator);
+            string? ucciMove = NotationConverter.ConvertToUcci(board, rawMove, generator);
             if (string.IsNullOrEmpty(ucciMove))
                 return false;
-
             Move? parsedMove = NotationConverter.UcciToMove(ucciMove);
             if (parsedMove == null)
                 return false;

@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
 using System;
@@ -17,7 +17,6 @@ namespace ChineseChessAI.MCTS
         private readonly MoveGenerator _generator;
         private readonly BatchInference _batchInference;
         private readonly double _cPuct = 2.5;
-        private readonly Random _random = new Random();
 
         public MCTSEngine(CChessNet model, int batchSize = 64)
         {
@@ -52,15 +51,20 @@ namespace ChineseChessAI.MCTS
 
             await Task.WhenAll(tasks);
 
+            float[] piData = new float[8100];
+            var legalMoves = _generator.GenerateLegalMoves(board);
+
             if (root.Children.IsEmpty)
             {
-                var legalMoves = _generator.GenerateLegalMoves(board);
                 if (legalMoves.Count == 0)
                     throw new Exception("无合法走法");
-                return (legalMoves[0], new float[8100]);
+
+                // Fallback: Pick a random legal move if search failed to produce children
+                var fallbackMove = legalMoves[Random.Shared.Next(legalMoves.Count)];
+                piData[fallbackMove.ToNetworkIndex()] = 1.0f;
+                return (fallbackMove, piData);
             }
 
-            float[] piData = new float[8100];
             double totalVisits = root.Children.Values.Sum(x => x.N);
 
             foreach (var child in root.Children)
@@ -186,12 +190,12 @@ namespace ChineseChessAI.MCTS
         private double GammaSample(double alpha, double beta)
         {
             if (alpha < 1.0)
-                return GammaSample(alpha + 1.0, beta) * Math.Pow(_random.NextDouble(), 1.0 / alpha);
+                return GammaSample(alpha + 1.0, beta) * Math.Pow(Random.Shared.NextDouble(), 1.0 / alpha);
             double d = alpha - 1.0 / 3.0;
             double c = 1.0 / Math.Sqrt(9.0 * d);
             while (true)
             {
-                double x, v, u = _random.NextDouble();
+                double x, v, u = Random.Shared.NextDouble();
                 do
                 {
                     x = NormalSample();
@@ -207,8 +211,8 @@ namespace ChineseChessAI.MCTS
 
         private double NormalSample()
         {
-            double u1 = 1.0 - _random.NextDouble();
-            double u2 = 1.0 - _random.NextDouble();
+            double u1 = 1.0 - Random.Shared.NextDouble();
+            double u2 = 1.0 - Random.Shared.NextDouble();
             return Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
         }
 
@@ -240,8 +244,6 @@ namespace ChineseChessAI.MCTS
 
             return probs.Select(x => (x.Item1, x.Item2 / (sum > 0 ? sum : 1)));
         }
-
-
 
         private Board CloneBoard(Board original)
         {

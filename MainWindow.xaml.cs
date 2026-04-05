@@ -304,8 +304,9 @@ namespace ChineseChessAI
                     foreach (var mStr in rawMoves)
                     {
                         // 接入万能转换器，支持 "炮二平五" 和 "h2e2" 混用
-                        string ucci = NotationConverter.ConvertToUcci(tempBoard, mStr, generator);
+                        string? ucci = NotationConverter.ConvertToUcci(tempBoard, mStr, generator);
                         if (!string.IsNullOrEmpty(ucci))
+
                         {
                             var move = NotationConverter.UcciToMove(ucci);
                             if (move != null)

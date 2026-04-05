@@ -10,7 +10,7 @@ namespace ChineseChessAI.Utils
         /// <summary>
         /// 万能转换器：将任意记谱法（WXF代数/UCCI）统一转换为标准 UCCI 格式 (如 "h2e2")
         /// </summary>
-        public static string ConvertToUcci(Board board, string rawMove, MoveGenerator generator)
+        public static string? ConvertToUcci(Board board, string rawMove, MoveGenerator generator)
         {
             rawMove = rawMove.Trim().Replace("=", "."); // 兼容某些用 = 代替 . 的平移记法
 

@@ -9,14 +9,13 @@ using System.Threading.Tasks;
 
 namespace ChineseChessAI.Training
 {
-    public record GameResult(List<TrainingExample> ExamplesA, List<TrainingExample> ExamplesB, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
+    public record GameResult(List<TrainingExample> ExamplesA, List<TrainingExample> ExamplesB, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory, bool IsSuccess = true);
 
     public class SelfPlay
     {
         private readonly MCTSEngine _engineA;
         private readonly MCTSEngine _engineB;
         private readonly MoveGenerator _generator;
-        private readonly Random _random = new Random();
 
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
@@ -51,6 +50,7 @@ namespace ChineseChessAI.Training
             int moveCount = 0;
             float finalResult = 0;
             string endReason = "进行中";
+            bool isSuccess = true;
 
             var positionHistory = new Dictionary<ulong, int>();
             int noProgressCount = 0;
@@ -119,12 +119,18 @@ namespace ChineseChessAI.Training
                         if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
                         {
                             Console.WriteLine($"[警告拦截] 拦截到无效动作 {move.From}->{move.To}，强行重算...");
-                            move = legalMoves[_random.Next(legalMoves.Count)];
+                            move = legalMoves[Random.Shared.Next(legalMoves.Count)];
                         }
 
                         sbyte pieceToMove = board.GetPiece(move.From);
                         bool isCapture = board.GetPiece(move.To) != 0;
-                        bool isPawnAdvance = Math.Abs(pieceToMove) == 7;
+                        
+                        // 【修正】：仅兵卒“前进”才重置自然限着计数
+                        bool isPawnAdvance = false;
+                        if (pieceToMove == 7) // 红兵
+                            isPawnAdvance = (move.To / 9) < (move.From / 9);
+                        else if (pieceToMove == -7) // 黑卒
+                            isPawnAdvance = (move.To / 9) > (move.From / 9);
 
                         if (isCapture || isPawnAdvance)
                         {
@@ -160,13 +166,19 @@ namespace ChineseChessAI.Training
                         }
                     }
                 }
-                catch (Exception ex) { Console.WriteLine($"[SelfPlay Error] {ex.Message}"); break; }
+                catch (Exception ex) 
+                { 
+                    Console.WriteLine($"[SelfPlay Error] {ex.Message}"); 
+                    isSuccess = false;
+                    endReason = $"异常中断: {ex.Message}";
+                    break; 
+                }
             }
 
-            string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
+            string resultStr = isSuccess ? (finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜")) : "异常中断";
             var examplesA = FinalizeData(gameHistoryA, finalResult, board);
             var examplesB = FinalizeData(gameHistoryB, finalResult, board);
-            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory);
+            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory, isSuccess);
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
@@ -180,7 +192,7 @@ namespace ChineseChessAI.Training
             }
 
             if (validMoves.Count == 0)
-                return legalMoves[_random.Next(legalMoves.Count)];
+                return legalMoves[Random.Shared.Next(legalMoves.Count)];
             if (temperature < 0.1)
                 return validMoves.OrderByDescending(x => x.prob).First().move;
 
@@ -189,7 +201,7 @@ namespace ChineseChessAI.Training
             if (sum <= 0 || double.IsNaN(sum))
                 return validMoves.OrderByDescending(x => x.prob).First().move;
 
-            double r = _random.NextDouble() * sum;
+            double r = Random.Shared.NextDouble() * sum;
             double cumulative = 0;
             for (int i = 0; i < poweredPi.Length; i++)
             {
