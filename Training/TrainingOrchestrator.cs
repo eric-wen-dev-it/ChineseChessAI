@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Utils;
@@ -25,9 +25,149 @@ namespace ChineseChessAI.Training
         public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000,
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "master_data"));
 
+        private LeagueManager _leagueManager;
+
         public void StopTraining()
         {
             IsTraining = false;
+        }
+
+        public async Task StartLeagueTrainingAsync(int populationSize = 10000, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.6f)
+        {
+            if (IsTraining) return;
+            IsTraining = true;
+
+            _leagueManager = new LeagueManager(populationSize);
+
+            await Task.Run(async () =>
+            {
+                try
+                {
+                    Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
+                    Log($"[配置] 步数上限: {maxMoves} | 高温探索: {exploreMoves} | 破冰偏置: {materialBias}");
+
+                    const int mctsSimulations = 400; // 降低模拟次数以加快联赛节奏
+                    const int trainBatchSize = 64;   // 针对单局对弈的小 Batch 训练
+                    const int trainEpochs = 3;
+                    
+                    int gameCounter = 0;
+
+                    while (IsTraining)
+                    {
+                        var (agentA, agentB) = _leagueManager.PickMatch();
+                        
+                        // 【新增】随机化本局步数上限 (在基准值的 70% ~ 150% 之间随机)
+                        int currentMaxMoves = (int)(maxMoves * (0.7 + Random.Shared.NextDouble() * 0.8));
+                        
+                        Log($"\n[对阵] Agent_{agentA.Id} (ELO:{agentA.Elo:F0}) VS Agent_{agentB.Id} (ELO:{agentB.Elo:F0})");
+                        Log($"[性格] A: {agentA.MctsSimulations}次思考/好奇心{agentA.Cpuct:F1}/温度{agentA.Temperature:F1}");
+                        Log($"[性格] B: {agentB.MctsSimulations}次思考/好奇心{agentB.Cpuct:F1}/温度{agentB.Temperature:F1}");
+                        Log($"[规则] 本局步数上限: {currentMaxMoves} 步");
+
+                        // 1. 加载模型
+                        using var modelA = new CChessNet();
+                        using var modelB = new CChessNet();
+                        
+                        if (File.Exists(agentA.ModelPath)) modelA.load(agentA.ModelPath);
+                        if (File.Exists(agentB.ModelPath)) modelB.load(agentB.ModelPath);
+
+                        // 使用各自的好奇心系数 (cPuct)
+                        using var engineA = new MCTSEngine(modelA, batchSize: 16, cPuct: agentA.Cpuct);
+                        using var engineB = new MCTSEngine(modelB, batchSize: 16, cPuct: agentB.Cpuct);
+
+                        // 使用各自的思考深度 (Sims) 和 探索温度 (Temp)
+                        var selfPlay = new SelfPlay(engineA, engineB, currentMaxMoves, exploreMoves, materialBias, 
+                                                    lowTempA: agentA.Temperature, lowTempB: agentB.Temperature, 
+                                                    simsA: agentA.MctsSimulations, simsB: agentB.MctsSimulations);
+                        
+                        // 2. 对弈 (这里暂时单线程运行，以便 UI 观战)
+                        bool aIsRed = Random.Shared.Next(2) == 0;
+                        var result = await selfPlay.RunGameAsync(aIsRed, null);
+
+                        if (result.IsSuccess)
+                        {
+                            // 3. 更新统计
+                            float resA = result.ResultStr == "平局" ? 0 : (result.ResultStr == (aIsRed ? "红胜" : "黑胜") ? 1.0f : -1.0f);
+                            _leagueManager.UpdateResult(agentA.Id, resA, agentB.Elo);
+                            _leagueManager.UpdateResult(agentB.Id, -resA, agentA.Elo);
+
+                            Log($"[结果] {result.ResultStr} | {result.EndReason} | {result.MoveCount}步");
+                            Log($"[ELO] Agent_{agentA.Id} -> {agentA.Elo:F0} | Agent_{agentB.Id} -> {agentB.Elo:F0}");
+
+                            // 4. 学习 (混合大师数据，让个体进化有“教科书”指导)
+                            var trainerA = new Trainer(modelA);
+                            var trainerB = new Trainer(modelB);
+                            
+                            const float masterMixRatio = 0.3f; // 30% 大师数据，70% 自身对局
+                            
+                            if (result.ExamplesA.Count > 0)
+                            {
+                                var mixedA = new List<TrainingExample>(result.ExamplesA);
+                                if (MasterBuffer.Count > 0)
+                                {
+                                    int masterCount = (int)(result.ExamplesA.Count * masterMixRatio);
+                                    mixedA.AddRange(MasterBuffer.Sample(masterCount));
+                                }
+                                trainerA.Train(mixedA, epochs: trainEpochs);
+                            }
+
+                            if (result.ExamplesB.Count > 0)
+                            {
+                                var mixedB = new List<TrainingExample>(result.ExamplesB);
+                                if (MasterBuffer.Count > 0)
+                                {
+                                    int masterCount = (int)(result.ExamplesB.Count * masterMixRatio);
+                                    mixedB.AddRange(MasterBuffer.Sample(masterCount));
+                                }
+                                trainerB.Train(mixedB, epochs: trainEpochs);
+                            }
+
+                            // 5. 保存
+                            ModelManager.SaveModel(modelA, agentA.ModelPath);
+                            ModelManager.SaveModel(modelB, agentB.ModelPath);
+
+                            // 6. UI 推送
+                            OnReplayRequested?.Invoke(result.MoveHistory);
+                            
+                            gameCounter++;
+                            if (gameCounter % 10 == 0)
+                            {
+                                _leagueManager.SaveMetadata();
+                                var top = _leagueManager.GetTopAgents(5);
+                                Log("--- [当前排名 Top 5] ---");
+                                foreach (var t in top) Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins*100.0/Math.Max(1, t.GamesPlayed)):F1}% 对局:{t.GamesPlayed}");
+                            }
+                        }
+                        else
+                        {
+                            Log($"[异常] 对局中断: {result.EndReason}");
+                        }
+
+                        // 【核心加固】：每局对局结束强制清理显存和内存，防止 10000 个模型频繁加载导致的崩溃
+                        engineA.Dispose();
+                        engineB.Dispose();
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        if (torch.cuda.is_available()) torch.cuda.synchronize();
+
+                        await Task.Delay(500); // 稍微停顿一下
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    Log("[联赛] 训练已取消。");
+                }
+                catch (Exception ex)
+                {
+                    OnError?.Invoke($"[联赛致命错误] {ex.Message}");
+                }
+                finally
+                {
+                    IsTraining = false;
+                    _leagueManager?.SaveMetadata();
+                    OnTrainingStopped?.Invoke();
+                }
+            });
         }
 
         // ================= 1. 子力评估器 (统一收口，消除重复代码) =================
@@ -112,6 +252,9 @@ namespace ChineseChessAI.Training
                     using var engineA = new MCTSEngine(modelAlpha, batchSize: mctsBatchSize);
                     using var engineB = new MCTSEngine(modelBeta, batchSize: mctsBatchSize);
 
+                    // 【架构说明】：SelfPlay 是无状态的，但引擎内部持有 BatchInference 推理队列。
+                    // 开启多局并行（maxParallel=4）会导致多个 MCTS 搜索任务同时竞争同一个神经网络推理资源，
+                    // 这样设计是为了通过 Batch 效应最大化 GPU 吞吐量，但会增加单步搜索的绝对时延。
                     var selfPlay = new SelfPlay(engineA, engineB, maxMoves, exploreMoves, materialBias, lowTemperature, earlyDrawPenalty, lateDrawPenalty);
                     
                     var bufferA = new ReplayBuffer(bufferCapacity, Path.Combine(baseDir, "data", "buffer_alpha"));
@@ -244,11 +387,13 @@ namespace ChineseChessAI.Training
             int maxBufferSize = 200000;
             var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
 
-            var model = trainWhileParsing ? new CChessNet() : null;
-            string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
-            if (trainWhileParsing && File.Exists(modelPath))
-                model.load(modelPath);
+            using var model = trainWhileParsing ? new CChessNet() : null;
             var trainer = trainWhileParsing ? new Trainer(model) : null;
+            string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
+            if (trainWhileParsing && model != null)
+            {
+                if (File.Exists(modelPath)) model.load(modelPath);
+            }
 
             int totalProcessedGames = 0, currentBatchGames = 0, trainingPhase = 1;
 
@@ -602,14 +747,6 @@ namespace ChineseChessAI.Training
                     Directory.CreateDirectory(logDir);
                 // 【核心修复】：增加 _fff 防止并发写文件时覆盖
                 string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss_fff}.txt");
-                string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n----------------------------------------\n";
-                File.WriteAllText(filePath, content);
-            }
-            catch (Exception) { }
-        }
-
-    }
-} string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss_fff}.txt");
                 string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n----------------------------------------\n";
                 File.WriteAllText(filePath, content);
             }

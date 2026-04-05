@@ -94,7 +94,7 @@
                         <TextBox x:Name="TxtExploreMoves" Text="{Binding ExploreMoves, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
                     </Grid>
 
-                    <Grid>
+                    <Grid Margin="0,0,0,8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="60"/>
@@ -102,11 +102,26 @@
                         <TextBlock Text="破冰微调偏置 (Material Bias):" Foreground="#CCC" VerticalAlignment="Center" ToolTip="平局时给子力优势方的微小奖励(如0.05)，设为0则绝对公平"/>
                         <TextBox x:Name="TxtMaterialBias" Text="{Binding MaterialBias, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
                     </Grid>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="60"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="种群规模 (Population):" Foreground="#CCC" VerticalAlignment="Center" ToolTip="万王之王模式下的智能体总数"/>
+                        <TextBox x:Name="TxtPopulation" Text="{Binding PopulationSize, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
+                    </Grid>
                 </StackPanel>
             </Border>
 
-            <Button x:Name="StartBtn" Content="开始进化" Height="40" FontSize="16" FontWeight="Bold"
-                    Click="OnStartTrainingClick" Margin="0,0,0,10" Background="#4CAF50" Foreground="White"/>
+            <UniformGrid Columns="2" Margin="0,0,0,10">
+                <Button x:Name="StartBtn" Content="双子协同进化" Height="40" FontSize="14" FontWeight="Bold"
+                        Click="OnStartTrainingClick" Background="#4CAF50" Foreground="White" Margin="0,0,5,0"
+                        ToolTip="Alpha/Beta 双模型对抗模式"/>
+                <Button x:Name="StartLeagueBtn" Content="万王之王联赛" Height="40" FontSize="14" FontWeight="Bold"
+                        Click="OnStartLeagueClick" Background="#E91E63" Foreground="White" Margin="5,0,0,0"
+                        ToolTip="10000+ 随机智能体大逃杀模式"/>
+            </UniformGrid>
 
             <UniformGrid Columns="2" Margin="0,0,0,10">
                 <Button x:Name="ReplayLastBtn" Content="观看最新一局" Height="30" FontSize="14" FontWeight="Bold"

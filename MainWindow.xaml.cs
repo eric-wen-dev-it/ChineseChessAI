@@ -49,7 +49,11 @@ namespace ChineseChessAI
             };
 
             _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
-            _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() => StartBtn.IsEnabled = true);
+            _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() =>
+            {
+                StartBtn.IsEnabled = true;
+                StartLeagueBtn.IsEnabled = true;
+            });
 
             DataContext = new TrainingConfig();
             _ = Task.Run(StartReplayLoopAsync);
@@ -233,11 +237,43 @@ namespace ChineseChessAI
             }
         }
 
+        // 【安全修复】拦截 async void 的潜在崩溃
+        private async void OnStartLeagueClick(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (_orchestrator.IsTraining)
+                    return;
+
+                var config = (TrainingConfig)DataContext;
+                if (!int.TryParse(config.MaxMoves, out int maxMoves) || maxMoves <= 0) return;
+                if (!int.TryParse(config.ExploreMoves, out int exploreMoves) || exploreMoves < 0) return;
+                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out float materialBias)) return;
+                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0)
+                {
+                    MessageBox.Show("种群规模必须为正整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                StartBtn.IsEnabled = false;
+                StartLeagueBtn.IsEnabled = false;
+                await _orchestrator.StartLeagueTrainingAsync(populationSize, maxMoves, exploreMoves, materialBias);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"联赛启动异常: {ex.Message}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                StartBtn.IsEnabled = true;
+                StartLeagueBtn.IsEnabled = true;
+            }
+        }
+
         public class TrainingConfig
         {
             public string MaxMoves { get; set; } = "150";
             public string ExploreMoves { get; set; } = "40";
             public string MaterialBias { get; set; } = "0.6";
+            public string PopulationSize { get; set; } = "10000";
         }
 
         private void OnReplayLastClick(object sender, RoutedEventArgs e)

@@ -16,11 +16,12 @@ namespace ChineseChessAI.MCTS
         private readonly CChessNet _model;
         private readonly MoveGenerator _generator;
         private readonly BatchInference _batchInference;
-        private readonly double _cPuct = 2.5;
+        private readonly double _cPuct;
 
-        public MCTSEngine(CChessNet model, int batchSize = 64)
+        public MCTSEngine(CChessNet model, int batchSize = 64, double cPuct = 2.5)
         {
             _model = model;
+            _cPuct = cPuct;
             _generator = new MoveGenerator();
 
             if (torch.cuda.is_available())
@@ -30,13 +31,19 @@ namespace ChineseChessAI.MCTS
             _batchInference = new BatchInference(_model, batchSize);
         }
 
-        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations)
+        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999)
         {
             var root = new MCTSNode(null, 1.0);
-            await SearchAsync(root, CloneBoard(board));
+            try
+            {
+                await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
+            }
+            catch (OperationCanceledException) { return (default, new float[8100]); }
+            
             ApplyDirichletNoise(root);
 
-            int numThreads = 24;
+            // 【优化】：降低线程数，8个线程平衡了搜索效率和系统稳定性
+            int numThreads = 8;
             int baseSims = (simulations - 1) / numThreads;
             int extraSims = (simulations - 1) % numThreads;
 
@@ -45,7 +52,15 @@ namespace ChineseChessAI.MCTS
                 int taskSims = (t == 0) ? baseSims + extraSims : baseSims;
                 for (int i = 0; i < taskSims; i++)
                 {
-                    await SearchAsync(root, CloneBoard(board));
+                    try
+                    {
+                        await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[MCTS Simulation Error] {ex.Message}");
+                    }
                 }
             }));
 
@@ -80,25 +95,31 @@ namespace ChineseChessAI.MCTS
             return (bestMove, piData);
         }
 
-        private async Task SearchAsync(MCTSNode node, Board board)
+        private async Task SearchAsync(MCTSNode node, Board board, int currentMoves, int maxMoves, int depth)
         {
             try
             {
+                // 【核心新增】：感知步数上限 (Horizon Awareness)
+                // 如果模拟搜索达到该局的步数上限，直接根据子力优势评估，不进行神经网络推理
+                if (currentMoves + depth >= maxMoves)
+                {
+                    float advantage = TrainingOrchestrator.GetBoardAdvantage(board);
+                    // 如果红方优势则返回正值，黑方优势返回负值。MCTS 内部会根据当前是谁走棋自动处理
+                    node.Update(advantage * 0.5); // 给一个中等的平局偏置
+                    return;
+                }
+
                 if (node.IsLeaf)
                 {
                     // 【核心修复】：防止多线程竞争展开同一个叶子节点
-                    if (!node.TryMarkExpanding())
-                    {
-                        // 如果已经在展开中，为了防止 W/N 被多次错误更新，本次搜索直接结束（由于有虚拟损失，其他线程会避开此路径）
-                        return;
-                    }
+                    if (!node.TryMarkExpanding()) return;
 
                     try
                     {
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
-                            node.Update(-1.0);
+                            node.Update(board.IsRedTurn ? -1.0 : 1.0);
                             return;
                         }
 
@@ -108,26 +129,13 @@ namespace ChineseChessAI.MCTS
                         using (var scope = torch.NewDisposeScope())
                         {
                             var tensor = StateEncoder.Encode(board);
-                            if (tensor.device_type != DeviceType.CUDA)
-                                tensor = tensor.cpu();
                             inputData = tensor.to_type(ScalarType.Float32).data<float>().ToArray();
                         }
 
                         var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
-                        if (!isRed)
-                            policyLogits = StateEncoder.FlipPolicy(policyLogits);
+                        if (!isRed) policyLogits = StateEncoder.FlipPolicy(policyLogits);
 
                         var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
-
-                        for (int i = 0; i < rawPolicy.Count; i++)
-                        {
-                            var move = rawPolicy[i].move;
-                            if (board.WillCauseThreefoldRepetition(move.From, move.To))
-                                rawPolicy[i] = (move, rawPolicy[i].prob * 0.0001);
-                            else if (board.GetRepetitionCount() >= 2)
-                                rawPolicy[i] = (move, rawPolicy[i].prob * 0.1);
-                        }
-
                         node.Expand(rawPolicy);
                         node.Update(value);
                     }
@@ -144,7 +152,7 @@ namespace ChineseChessAI.MCTS
 
                 Interlocked.Increment(ref bestChild.Value.VirtualLoss);
                 board.Push(bestChild.Key.From, bestChild.Key.To);
-                await SearchAsync(bestChild.Value, board);
+                await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1);
                 board.Pop();
                 Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
             }
