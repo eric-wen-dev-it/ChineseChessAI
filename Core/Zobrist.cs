@@ -3,8 +3,8 @@
     public static class Zobrist
     {
         // 为 90 个位置的每种棋子（14种：红黑各7种）生成随机数
-        private static readonly ulong[,] PieceKeys = new ulong[90, 15];
-        private static readonly ulong SideKey;
+        public static readonly ulong[,] PieceKeys = new ulong[90, 15];
+        public static readonly ulong SideKey;
 
         static Zobrist()
         {
@@ -15,6 +15,11 @@
             SideKey = (ulong)rnd.NextInt64();
         }
 
+        public static ulong GetPieceKey(int pos, sbyte piece)
+        {
+            return PieceKeys[pos, piece + 7];
+        }
+
         public static ulong Calculate(sbyte[] cells, bool isRedTurn)
         {
             ulong h = 0;
@@ -22,12 +27,10 @@
             {
                 if (cells[i] != 0)
                 {
-                    // 将 sbyte (-7 to 7) 映射到 0-14
-                    int pieceIdx = cells[i] + 7;
-                    h ^= PieceKeys[i, pieceIdx];
+                    h ^= PieceKeys[i, cells[i] + 7];
                 }
             }
-            if (isRedTurn)
+            if (!isRedTurn) // 修正：与 Board.cs 保持一致，黑方走时异或
                 h ^= SideKey;
             return h;
         }

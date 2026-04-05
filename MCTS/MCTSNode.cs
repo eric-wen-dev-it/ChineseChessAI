@@ -51,9 +51,13 @@ namespace ChineseChessAI.MCTS
 
         public double GetPUCTValue(double cPuct, int parentN)
         {
-            // 【核心修复】：计算 UCB 时，将虚拟损失视作被访问过且输掉了一局
-            int n = N + VirtualLoss;
-            double q = n == 0 ? 0 : (W - VirtualLoss) / n;
+            // 【核心修复】：快照式读取，确保在计算过程中 vl, n, w 是一致的
+            int vl = VirtualLoss;
+            int n_raw = N;
+            double w_raw = W;
+
+            int n = n_raw + vl;
+            double q = n == 0 ? 0 : (w_raw - vl) / n;
             double u = cPuct * P * Math.Sqrt(parentN) / (1 + n);
             return q + u;
         }

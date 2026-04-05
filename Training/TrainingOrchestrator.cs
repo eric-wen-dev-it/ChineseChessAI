@@ -382,14 +382,12 @@ namespace ChineseChessAI.Training
             int maxBufferSize = 200000;
             var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
 
-            CChessNet model = null;
-            Trainer trainer = null;
+            using var model = trainWhileParsing ? new CChessNet() : null;
+            var trainer = trainWhileParsing ? new Trainer(model) : null;
             string modelPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "best_model.pt");
-            if (trainWhileParsing)
+            if (trainWhileParsing && model != null)
             {
-                model = new CChessNet();
                 if (File.Exists(modelPath)) model.load(modelPath);
-                trainer = new Trainer(model);
             }
 
             int totalGames = 0, batchGames = 0, trainingPhase = 1;
@@ -545,6 +543,8 @@ namespace ChineseChessAI.Training
 
         private void ExecuteSupervisedTrainingChunk(ReplayBuffer bufferToTrain, int epochs, Trainer trainer, CChessNet model, string modelPath)
         {
+            if (trainer == null || model == null) return; // 【防御性编程】：防止空指针崩溃
+
             try
             {
                 int chunkSize = 1024;
@@ -569,7 +569,7 @@ namespace ChineseChessAI.Training
                     if (IsTraining)
                         Log($"    -> Epoch {epoch}/{epochs} 完毕，块平均 Loss: {(epochLossSum / chunksCount):F4}");
                 }
-                if (IsTraining)
+                if (IsTraining && model != null)
                     ModelManager.SaveModel(model, modelPath);
             }
             catch (Exception ex) { OnError?.Invoke($"[训练错误] {ex.Message}"); }
@@ -602,6 +602,14 @@ namespace ChineseChessAI.Training
                     Directory.CreateDirectory(logDir);
                 // 【核心修复】：增加 _fff 防止并发写文件时覆盖
                 string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss_fff}.txt");
+                string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n----------------------------------------\n";
+                File.WriteAllText(filePath, content);
+            }
+            catch (Exception) { }
+        }
+
+    }
+} string filePath = Path.Combine(logDir, $"game_{DateTime.Now:yyyyMMdd_HHmmss_fff}.txt");
                 string content = $"时间: {DateTime.Now}\n参数: {paramInfo}\n结果: {result}\n原因: {reason}\n棋谱: {moveList}\n----------------------------------------\n";
                 File.WriteAllText(filePath, content);
             }

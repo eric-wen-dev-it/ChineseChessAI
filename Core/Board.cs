@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -30,21 +30,7 @@ namespace ChineseChessAI.Core
         // 【核心提速修复】：增加 O(1) 的哈希计数表，彻底消灭历史遍历的性能黑洞
         private readonly Dictionary<ulong, int> _hashCounts = new();
 
-        private static readonly ulong[,] PieceKeys = new ulong[90, 15];
-        private static readonly ulong SideKey;
-
-        static Board()
-        {
-            var rnd = new Random(42);
-            for (int i = 0; i < 90; i++)
-            {
-                for (int j = 0; j < 15; j++)
-                {
-                    PieceKeys[i, j] = (ulong)rnd.NextInt64();
-                }
-            }
-            SideKey = (ulong)rnd.NextInt64();
-        }
+        public bool LastMoveWasIrreversible { get; private set; } = false;
 
         public Board()
         {
@@ -79,9 +65,32 @@ namespace ChineseChessAI.Core
             _history.Clear();
             _hashCounts.Clear(); // 清空计数表
             LastMove = null;
+            LastMoveWasIrreversible = false;
 
             CalculateFullHash();
             _hashCounts[CurrentHash] = 1; // 初始局面计数为 1
+        }
+
+        public Board Clone()
+        {
+            var newBoard = new Board();
+            Array.Copy(this._cells, newBoard._cells, 90);
+            newBoard.IsRedTurn = this.IsRedTurn;
+            newBoard.CurrentHash = this.CurrentHash;
+            newBoard.LastMove = this.LastMove;
+            newBoard.LastMoveWasIrreversible = this.LastMoveWasIrreversible;
+
+            // 深度克隆历史栈
+            var historyArray = this._history.ToArray();
+            Array.Reverse(historyArray);
+            foreach (var state in historyArray)
+                newBoard._history.Push(state);
+
+            // 深度克隆哈希计数表
+            foreach (var kvp in this._hashCounts)
+                newBoard._hashCounts[kvp.Key] = kvp.Value;
+
+            return newBoard;
         }
 
         public sbyte GetPiece(int row, int col) => _cells[row * 9 + col];
@@ -93,11 +102,11 @@ namespace ChineseChessAI.Core
             sbyte captured = _cells[to];
             ulong nextHash = CurrentHash;
 
-            nextHash ^= PieceKeys[from, piece + 7];
+            nextHash ^= Zobrist.GetPieceKey(from, piece);
             if (captured != 0)
-                nextHash ^= PieceKeys[to, captured + 7];
-            nextHash ^= PieceKeys[to, piece + 7];
-            nextHash ^= SideKey;
+                nextHash ^= Zobrist.GetPieceKey(to, captured);
+            nextHash ^= Zobrist.GetPieceKey(to, piece);
+            nextHash ^= Zobrist.SideKey;
 
             // 【核心提速修复】：O(1) 字典瞬间查询，替换原有的 O(n) LINQ 遍历
             _hashCounts.TryGetValue(nextHash, out int count);
@@ -109,6 +118,15 @@ namespace ChineseChessAI.Core
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
 
+            // 【BUG 3 修复】：检测不可逆招法
+            bool isPawnAdvance = false;
+            if (piece == 7) // 红兵
+                isPawnAdvance = (to / 9) < (from / 9);
+            else if (piece == -7) // 黑卒
+                isPawnAdvance = (to / 9) > (from / 9);
+
+            LastMoveWasIrreversible = (captured != 0) || isPawnAdvance;
+
             _history.Push(new GameState(from, to, captured, CurrentHash, LastMove));
             LastMove = new Move(from, to);
 
@@ -116,11 +134,17 @@ namespace ChineseChessAI.Core
             if (captured != 0)
                 TogglePieceHash(to, captured);
             TogglePieceHash(to, piece);
-            CurrentHash ^= SideKey;
+            CurrentHash ^= Zobrist.SideKey;
 
             _cells[to] = piece;
             _cells[from] = 0;
             IsRedTurn = !IsRedTurn;
+
+            // 【BUG 3 修复】：如果是不可逆招法，清空哈希历史计数
+            if (LastMoveWasIrreversible)
+            {
+                _hashCounts.Clear();
+            }
 
             // 【核心提速修复】：走子后，将新局面的哈希计数 O(1) 增加
             if (!_hashCounts.TryGetValue(CurrentHash, out int c))
@@ -148,6 +172,7 @@ namespace ChineseChessAI.Core
             IsRedTurn = !IsRedTurn;
             CurrentHash = last.Hash; // 恢复旧局面的 Hash
             LastMove = last.LastMoveBefore;
+            LastMoveWasIrreversible = false; // Pop 后无法简单反推，设为 false
         }
 
         public int GetRepetitionCount()
@@ -161,7 +186,7 @@ namespace ChineseChessAI.Core
 
         private void TogglePieceHash(int pos, sbyte piece)
         {
-            CurrentHash ^= PieceKeys[pos, piece + 7];
+            CurrentHash ^= Zobrist.GetPieceKey(pos, piece);
         }
 
         private void CalculateFullHash()
@@ -173,7 +198,7 @@ namespace ChineseChessAI.Core
                     TogglePieceHash(i, _cells[i]);
             }
             if (!IsRedTurn)
-                CurrentHash ^= SideKey;
+                CurrentHash ^= Zobrist.SideKey;
         }
 
         public string GetChineseMoveName(int from, int to)
@@ -273,6 +298,7 @@ namespace ChineseChessAI.Core
                 c = 0;
             _hashCounts[state.Hash] = c + 1;
 
+            CurrentHash = state.Hash;
             LastMove = new Move(state.From, state.To);
         }
     }

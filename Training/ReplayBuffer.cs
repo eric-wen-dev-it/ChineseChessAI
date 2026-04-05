@@ -84,28 +84,36 @@ namespace ChineseChessAI.Training
             if (saveToDisk)
                 SaveExamples(newExamples);
 
-            foreach (var ex in newExamples)
+            lock (_buffer) // 【并发保护】：确保多线程写入安全
             {
-                _buffer[_head] = ex;
-                _head = (_head + 1) % _capacity;
-                if (_count < _capacity)
-                    _count++;
+                foreach (var ex in newExamples)
+                {
+                    _buffer[_head] = ex;
+                    _head = (_head + 1) % _capacity;
+                    if (_count < _capacity)
+                        _count++;
+                }
             }
         }
 
         public List<TrainingExample> Sample(int batchSize)
         {
-            int count = Math.Min(batchSize, _count);
-            var batch = new List<TrainingExample>(count);
-
-            // 【核心修复】：无放回采样 (Fisher-Yates 洗牌算法变体)，避免过度拟合同一状态
-            var indices = Enumerable.Range(0, _count).OrderBy(x => _random.Next()).Take(count);
-            foreach (var index in indices)
+            lock (_buffer) // 【并发保护】：防止多线程竞争导致 Random 崩溃
             {
-                batch.Add(_buffer[index]);
-            }
+                int count = Math.Min(batchSize, _count);
+                var batch = new List<TrainingExample>(count);
 
-            return batch;
+                // 使用 Fisher-Yates 思想的快速索引采样
+                int[] indices = Enumerable.Range(0, _count).ToArray();
+                for (int i = 0; i < count; i++)
+                {
+                    int j = _random.Next(i, _count);
+                    (indices[i], indices[j]) = (indices[j], indices[i]);
+                    batch.Add(_buffer[indices[i]]);
+                }
+
+                return batch;
+            }
         }
 
         public int Count => _count;

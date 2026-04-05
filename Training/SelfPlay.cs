@@ -88,7 +88,7 @@ namespace ChineseChessAI.Training
                                 await Task.Delay(1000);
                             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
-                            finalResult = board.IsRedTurn ? -1.0f : 1.0f;
+                            finalResult = board.IsRedTurn ? -1.0f : 1.0f; // 纠正：无路可走即输 (BUG 1)
                             break;
                         }
 
@@ -122,32 +122,26 @@ namespace ChineseChessAI.Training
                             move = legalMoves[Random.Shared.Next(legalMoves.Count)];
                         }
 
-                        sbyte pieceToMove = board.GetPiece(move.From);
-                        bool isCapture = board.GetPiece(move.To) != 0;
-                        
-                        // 【修正】：仅兵卒“前进”才重置自然限着计数
-                        bool isPawnAdvance = false;
-                        if (pieceToMove == 7) // 红兵
-                            isPawnAdvance = (move.To / 9) < (move.From / 9);
-                        else if (pieceToMove == -7) // 黑卒
-                            isPawnAdvance = (move.To / 9) > (move.From / 9);
-
-                        if (isCapture || isPawnAdvance)
-                        {
-                            noProgressCount = 0;
-                            positionHistory.Clear();
-                        }
-                        else
-                            noProgressCount++;
-
                         moveHistory.Add(move);
-                        board.Push(move.From, move.To);
+                        board.Push(move.From, move.To); // 此处 board.Push 会自动处理不可逆招法导致的哈希清理
 
                         if (onMovePerformed != null)
                             await onMovePerformed.Invoke(board);
 
                         moveCount++;
                         ulong currentHash = board.CurrentHash;
+                        
+                        // 【BUG 1 & 2 修复】：基于 Board 状态精准驱动计数重置
+                        if (board.LastMoveWasIrreversible)
+                        {
+                            noProgressCount = 0;
+                            positionHistory.Clear();
+                        }
+                        else
+                        {
+                            noProgressCount++;
+                        }
+
                         if (!positionHistory.ContainsKey(currentHash))
                             positionHistory[currentHash] = 0;
                         positionHistory[currentHash]++;

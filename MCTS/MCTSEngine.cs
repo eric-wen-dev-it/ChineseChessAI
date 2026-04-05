@@ -108,7 +108,7 @@ namespace ChineseChessAI.MCTS
                         using (var scope = torch.NewDisposeScope())
                         {
                             var tensor = StateEncoder.Encode(board);
-                            if (tensor.device_type != DeviceType.CPU)
+                            if (tensor.device_type != DeviceType.CUDA)
                                 tensor = tensor.cpu();
                             inputData = tensor.to_type(ScalarType.Float32).data<float>().ToArray();
                         }
@@ -137,9 +137,6 @@ namespace ChineseChessAI.MCTS
                     }
                     return;
                 }
-
-                if (node.Children.IsEmpty)
-                    return;
 
                 var bestChild = node.Children
                     .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
@@ -211,8 +208,8 @@ namespace ChineseChessAI.MCTS
 
         private double NormalSample()
         {
-            double u1 = 1.0 - Random.Shared.NextDouble();
-            double u2 = 1.0 - Random.Shared.NextDouble();
+            double u1 = Math.Max(1e-10, 1.0 - Random.Shared.NextDouble());
+            double u2 = Random.Shared.NextDouble();
             return Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
         }
 
@@ -247,11 +244,7 @@ namespace ChineseChessAI.MCTS
 
         private Board CloneBoard(Board original)
         {
-            var newBoard = new Board();
-            newBoard.LoadState(original.GetState(), original.IsRedTurn);
-            foreach (var state in original.GetHistory().Reverse())
-                newBoard.RecordHistory(state);
-            return newBoard;
+            return original.Clone();
         }
 
         // 【修复】：实现接口方法，释放后台推理资源

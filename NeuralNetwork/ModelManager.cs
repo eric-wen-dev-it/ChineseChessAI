@@ -27,10 +27,10 @@ namespace ChineseChessAI.NeuralNetwork
                 {
                     // 【关键修复】：为了防止 TorchSharp 在保存 CUDA 上的模型时崩溃，
                     // 先在 CPU 上克隆出一个副本进行保存。这解决了 Save(Tensor, BinaryWriter) 的潜在设备同步问题。
+                    // 新创建的模型实例默认在 CPU 上。
                     using (var cpuModel = new CChessNet())
                     {
                         cpuModel.load_state_dict(model.state_dict());
-                        cpuModel.to(TorchSharp.DeviceType.CPU);
                         cpuModel.save(filePath);
                     }
                     Console.WriteLine($"[ModelManager] 模型参数已成功保存至: {filePath}");
