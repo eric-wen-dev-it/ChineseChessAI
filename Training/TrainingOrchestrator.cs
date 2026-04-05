@@ -77,7 +77,7 @@ namespace ChineseChessAI.Training
                 try
                 {
                     const int mctsSimulations = 800;
-                    const int mctsBatchSize = 512;
+                    const int mctsBatchSize = 64; // 降低Batch以提高并发利用率
                     const int trainBatchSize = 512;
                     const int trainEpochs = 5;
                     const int bufferTrigger = 500;
@@ -85,112 +85,126 @@ namespace ChineseChessAI.Training
                     const float masterRatio = 0.35f;
                     const float drawKeepRate = 0.20f;
                     const double lowTemperature = 0.10;
-                    const float earlyDrawPenalty = -0.4f;
-                    const float lateDrawPenalty = -0.6f;
+                    const float earlyDrawPenalty = 0.0f; // 彻底废弃对称性惩罚
+                    const float lateDrawPenalty = 0.0f;
 
-                    Log("=== 进化循环已启动 (极速模式) ===");
+                    Log("=== 双子星协同进化对抗启动 ===");
                     Log($"[全局配置] 步数上限: {maxMoves} | 高温探索: 前 {exploreMoves} 步 | 破冰偏置: {materialBias:F3}");
                     Log($"[MCTS]     模拟次数: {mctsSimulations} | 推理批大小: {mctsBatchSize}");
                     Log($"[训练配置]  批大小: {trainBatchSize} | Epochs: {trainEpochs} | 触发阈值: {bufferTrigger} 条");
-                    Log($"[缓冲区]   容量: {bufferCapacity} | Master比例: {masterRatio:P0} | 平局保留率: {drawKeepRate:P0}");
-                    Log($"[探索温度]  高温阶段: 1.0 (前 {exploreMoves} 步) | 低温阶段: {lowTemperature:F2} (之后)");
-                    Log($"[价值标签]  不等材平局: ±{materialBias:F3} | 等材平局: 前1/2步={earlyDrawPenalty:F1} / 后1/2步={lateDrawPenalty:F1}");
 
-                    var model = new CChessNet();
                     string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                    string modelPath = Path.Combine(baseDir, "best_model.pt");
+                    var modelAlpha = new CChessNet();
+                    var modelBeta = new CChessNet();
+                    string modelAlphaPath = Path.Combine(baseDir, "model_alpha.pt");
+                    string modelBetaPath = Path.Combine(baseDir, "model_beta.pt");
+                    string oldModelPath = Path.Combine(baseDir, "best_model.pt");
 
-                    if (File.Exists(modelPath))
-                    {
-                        model.load(modelPath);
-                        Log("[系统] 已加载现有模型权重。");
-                    }
+                    if (File.Exists(modelAlphaPath)) { modelAlpha.load(modelAlphaPath); Log("[系统] 已加载 Alpha 模型。"); }
+                    else if (File.Exists(oldModelPath)) { modelAlpha.load(oldModelPath); Log("[系统] Alpha 继承旧权重。"); }
 
-                    var trainer = new Trainer(model);
-                    using var engine = new MCTSEngine(model, batchSize: mctsBatchSize);
-                    var selfPlay = new SelfPlay(engine, maxMoves, exploreMoves, materialBias, lowTemperature, earlyDrawPenalty, lateDrawPenalty);
-                    var buffer = new ReplayBuffer(bufferCapacity);
-                    buffer.LoadOldSamples();
-                    MasterBuffer.LoadOldSamples();
-                    Log($"[系统] MasterBuffer 已加载 {MasterBuffer.Count} 条大师样本。");
+                    if (File.Exists(modelBetaPath)) { modelBeta.load(modelBetaPath); Log("[系统] 已加载 Beta 模型。"); }
+                    else if (File.Exists(oldModelPath)) { modelBeta.load(oldModelPath); Log("[系统] Beta 继承旧权重。"); }
+
+                    var trainerA = new Trainer(modelAlpha);
+                    var trainerB = new Trainer(modelBeta);
+
+                    using var engineA = new MCTSEngine(modelAlpha, batchSize: mctsBatchSize);
+                    using var engineB = new MCTSEngine(modelBeta, batchSize: mctsBatchSize);
+
+                    var selfPlay = new SelfPlay(engineA, engineB, maxMoves, exploreMoves, materialBias, lowTemperature, earlyDrawPenalty, lateDrawPenalty);
+                    
+                    var bufferA = new ReplayBuffer(bufferCapacity, Path.Combine(baseDir, "data", "buffer_alpha"));
+                    var bufferB = new ReplayBuffer(bufferCapacity, Path.Combine(baseDir, "data", "buffer_beta"));
+                    
+                    bufferA.LoadOldSamples();
+                    bufferB.LoadOldSamples();
+                    MasterBuffer.LoadOldSamples(int.MaxValue);
 
                     var rnd = new Random();
+                    bool engineAIsRed = true;
+                    int maxParallel = 4;
 
                     for (int iter = 1; iter <= 10000; iter++)
                     {
-                        if (!IsTraining)
-                            break;
+                        if (!IsTraining) break;
 
-                        Log($"\n--- [迭代: 第 {iter} 轮] 极速对弈 ---");
+                        Log($"\n--- [迭代: 第 {iter} 轮] 协同对抗 ---");
+                        engineAIsRed = !engineAIsRed; // 每局角色互换
 
-                        GameResult result = await selfPlay.RunGameAsync(null);
-
-                        if (result.MoveHistory != null && result.MoveHistory.Count > 0)
-                            OnReplayRequested?.Invoke(result.MoveHistory);
-
-                        string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
-                        string paramInfo = $"限步={maxMoves}, 探索={exploreMoves}, 偏置={materialBias:F3}";
-                        SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason, paramInfo);
-
-                        if (result.MoveCount > 10)
+                        var tasks = new List<Task<GameResult>>();
+                        for (int i = 0; i < maxParallel; i++)
                         {
-                            bool isDraw = result.ResultStr == "平局";
-                            bool keepSample = !(isDraw && rnd.NextDouble() > drawKeepRate);
-
-                            if (keepSample)
-                            {
-                                buffer.AddRange(result.Examples);
-                                Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 样本已存入");
-                            }
-                            else
-                            {
-                                Log($"[对弈] 结束 ({result.EndReason}) | 结果: {result.ResultStr} | 步数: {result.MoveCount} | 📉 平局降采样丢弃");
-                            }
+                            bool isA_Red = (i % 2 == 0) ? engineAIsRed : !engineAIsRed;
+                            tasks.Add(selfPlay.RunGameAsync(isA_Red, null));
                         }
 
-                        if (buffer.Count >= bufferTrigger)
+                        var results = await Task.WhenAll(tasks);
+
+                        foreach (var result in results)
                         {
-                            Log($"[训练] 开始梯度下降... 当前学习率: {trainer.GetCurrentLR():F6}");
-                            List<TrainingExample> mixedBatch = new List<TrainingExample>();
-                            int masterCount = 0;
+                            if (result.MoveHistory != null && result.MoveHistory.Count > 0)
+                                OnReplayRequested?.Invoke(result.MoveHistory);
 
-                            if (MasterBuffer != null && MasterBuffer.Count > 0)
-                            {
-                                masterCount = Math.Min((int)(trainBatchSize * masterRatio), MasterBuffer.Count);
-                                mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
-                            }
+                            string moveStr = string.Join(" ", result.MoveHistory.Select(m => m.ToString()));
+                            SaveMoveListToFile(moveStr, result.ResultStr, result.EndReason, $"限步={maxMoves}");
 
-                            int selfPlayCount = Math.Min(trainBatchSize - masterCount, buffer.Count);
-                            mixedBatch.AddRange(buffer.Sample(selfPlayCount));
-                            mixedBatch = mixedBatch.OrderBy(x => rnd.Next()).ToList();
+                            if (result.MoveCount > 10)
+                            {
+                                bool isDraw = result.ResultStr == "平局";
+                                bool keepSample = !(isDraw && rnd.NextDouble() > drawKeepRate);
 
-                            float loss = 0;
-                            try
-                            {
-                                loss = trainer.Train(mixedBatch, epochs: trainEpochs);
-                                OnLossUpdated?.Invoke(loss);
-                                ModelManager.SaveModel(model, modelPath);
-                                Log($"[训练] 完成，当前 Loss: {loss:F4}");
-                            }
-                            catch (Exception trainEx)
-                            {
-                                string errMsg = $"[训练错误] {DateTime.Now:yyyy-MM-dd HH:mm:ss} | Iter={iter} | Batch={mixedBatch.Count} | {trainEx.GetType().Name}: {trainEx.Message}";
-                                Log(errMsg);
-                                WriteErrorLog(errMsg, trainEx);
-                                try
+                                if (keepSample)
                                 {
-                                    if (torch.cuda.is_available())
-                                        torch.cuda.synchronize();
+                                    if (result.ExamplesA.Count > 0) bufferA.AddRange(result.ExamplesA);
+                                    if (result.ExamplesB.Count > 0) bufferB.AddRange(result.ExamplesB);
+                                    Log($"[对弈] {result.EndReason} | {result.ResultStr} | {result.MoveCount}步 | 双池入库");
                                 }
-                                catch { }
-                                GC.Collect();
                             }
                         }
+
+                        if (bufferA.Count >= bufferTrigger)
+                            TrainModel("Alpha", trainerA, bufferA, trainBatchSize, masterRatio, trainEpochs, modelAlpha, modelAlphaPath, rnd);
+                        
+                        if (bufferB.Count >= bufferTrigger)
+                            TrainModel("Beta", trainerB, bufferB, trainBatchSize, masterRatio, trainEpochs, modelBeta, modelBetaPath, rnd);
                     }
                 }
                 catch (Exception ex) { OnError?.Invoke($"[致命错误] {ex.Message}"); }
                 finally { IsTraining = false; OnTrainingStopped?.Invoke(); }
             });
+        }
+
+        private void TrainModel(string name, Trainer trainer, ReplayBuffer buffer, int trainBatchSize, float masterRatio, int trainEpochs, CChessNet model, string path, Random rnd)
+        {
+            Log($"[训练] {name} 梯度下降... 学习率: {trainer.GetCurrentLR():F6}");
+            var mixedBatch = new List<TrainingExample>();
+            int masterCount = 0;
+
+            if (MasterBuffer != null && MasterBuffer.Count > 0)
+            {
+                masterCount = Math.Min((int)(trainBatchSize * masterRatio), MasterBuffer.Count);
+                mixedBatch.AddRange(MasterBuffer.Sample(masterCount));
+            }
+
+            int selfPlayCount = Math.Min(trainBatchSize - masterCount, buffer.Count);
+            mixedBatch.AddRange(buffer.Sample(selfPlayCount));
+            mixedBatch = mixedBatch.OrderBy(x => rnd.Next()).ToList();
+
+            float loss = 0;
+            try
+            {
+                loss = trainer.Train(mixedBatch, epochs: trainEpochs);
+                if (name == "Alpha") OnLossUpdated?.Invoke(loss);
+                ModelManager.SaveModel(model, path);
+                Log($"[训练] {name} 完成，Loss: {loss:F4}");
+            }
+            catch (Exception trainEx)
+            {
+                Log($"[训练错误] {name} | {trainEx.Message}");
+                WriteErrorLog($"Train Error {name}", trainEx);
+                GC.Collect();
+            }
         }
 
         // ================= 3. 数据集解析 =================

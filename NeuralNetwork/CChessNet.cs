@@ -67,18 +67,19 @@ namespace ChineseChessAI.NeuralNetwork
 
         public override (Tensor, Tensor) forward(Tensor x)
         {
+            using var scope = torch.NewDisposeScope();
+
             using var input = x.device.type != conv1.weight.device.type
                 ? x.to(conv1.weight.device)
                 : x.alias();
 
-            using var out1 = relu.forward(bn1.forward(conv1.forward(input)));
-
-            using var towerOut = resBlocks.forward(out1);
+            var out1 = relu.forward(bn1.forward(conv1.forward(input)));
+            var towerOut = resBlocks.forward(out1);
 
             var p = policyHead.forward(towerOut);
             var v = valueHead.forward(towerOut);
 
-            return (p, v);
+            return (p.MoveToOuterDisposeScope(), v.MoveToOuterDisposeScope());
         }
     }
 }

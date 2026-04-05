@@ -80,69 +80,72 @@ namespace ChineseChessAI.MCTS
         {
             try
             {
-                if (!node.IsLeaf)
+                if (node.IsLeaf)
                 {
-                    if (node.Children.IsEmpty)
+                    // 【核心修复】：防止多线程竞争展开同一个叶子节点
+                    if (!node.TryMarkExpanding())
+                    {
+                        // 如果已经在展开中，为了防止 W/N 被多次错误更新，本次搜索直接结束（由于有虚拟损失，其他线程会避开此路径）
                         return;
-                    var bestChild = node.Children
-                        .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
-                        .First();
-
-                    Interlocked.Increment(ref bestChild.Value.VirtualLoss);
-                    board.Push(bestChild.Key.From, bestChild.Key.To);
-                    await SearchAsync(bestChild.Value, board);
-                    board.Pop();
-                    Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
-                    return;
-                }
-
-                if (!_generator.IsKingSafe(board, !board.IsRedTurn))
-                {
-                    node.Update(1.0);
-                    return;
-                }
-
-                var legalMoves = _generator.GenerateLegalMoves(board);
-                if (legalMoves.Count == 0)
-                {
-                    node.Update(-1.0);
-                    return;
-                }
-
-                float[] inputData;
-                bool isRed = board.IsRedTurn;
-
-                using (var scope = torch.NewDisposeScope())
-                {
-                    var tensor = StateEncoder.Encode(board);
-                    if (tensor.device_type != DeviceType.CPU)
-                        tensor = tensor.cpu();
-                    inputData = tensor.to_type(ScalarType.Float32).data<float>().ToArray();
-                }
-
-                var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
-                if (!isRed)
-                    policyLogits = StateEncoder.FlipPolicy(policyLogits);
-
-                var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
-                double adjustedValue = value;
-
-                for (int i = 0; i < rawPolicy.Count; i++)
-                {
-                    var move = rawPolicy[i].move;
-                    if (board.WillCauseThreefoldRepetition(move.From, move.To))
-                    {
-                        rawPolicy[i] = (move, rawPolicy[i].prob * 0.0001);
-                        adjustedValue = -0.95;
                     }
-                    else if (board.GetRepetitionCount() >= 2)
+
+                    try
                     {
-                        rawPolicy[i] = (move, rawPolicy[i].prob * 0.1);
+                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        if (legalMoves.Count == 0)
+                        {
+                            node.Update(-1.0);
+                            return;
+                        }
+
+                        float[] inputData;
+                        bool isRed = board.IsRedTurn;
+
+                        using (var scope = torch.NewDisposeScope())
+                        {
+                            var tensor = StateEncoder.Encode(board);
+                            if (tensor.device_type != DeviceType.CPU)
+                                tensor = tensor.cpu();
+                            inputData = tensor.to_type(ScalarType.Float32).data<float>().ToArray();
+                        }
+
+                        var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
+                        if (!isRed)
+                            policyLogits = StateEncoder.FlipPolicy(policyLogits);
+
+                        var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
+
+                        for (int i = 0; i < rawPolicy.Count; i++)
+                        {
+                            var move = rawPolicy[i].move;
+                            if (board.WillCauseThreefoldRepetition(move.From, move.To))
+                                rawPolicy[i] = (move, rawPolicy[i].prob * 0.0001);
+                            else if (board.GetRepetitionCount() >= 2)
+                                rawPolicy[i] = (move, rawPolicy[i].prob * 0.1);
+                        }
+
+                        node.Expand(rawPolicy);
+                        node.Update(value);
                     }
+                    finally
+                    {
+                        node.UnmarkExpanding();
+                    }
+                    return;
                 }
 
-                node.Expand(rawPolicy);
-                node.Update(adjustedValue);
+                if (node.Children.IsEmpty)
+                    return;
+
+                var bestChild = node.Children
+                    .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
+                    .First();
+
+                Interlocked.Increment(ref bestChild.Value.VirtualLoss);
+                board.Push(bestChild.Key.From, bestChild.Key.To);
+                await SearchAsync(bestChild.Value, board);
+                board.Pop();
+                Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
             }
             catch (Exception ex)
             {

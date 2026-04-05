@@ -44,7 +44,7 @@ namespace ChineseChessAI.MCTS
                 try
                 {
                     // 使用超时时间防止死锁，以便定期检查 token
-                    if (_taskQueue.TryTake(out var firstTask, 50, token))
+                    if (_taskQueue.TryTake(out var firstTask, 5, token))
                     {
                         batchTasks.Add(firstTask);
                         while (batchTasks.Count < _batchSize && _taskQueue.TryTake(out var nextTask))

@@ -17,6 +17,19 @@ namespace ChineseChessAI.MCTS
         // 【核心修复】：增加虚拟损失字段，用于多线程防碰撞
         public int VirtualLoss = 0;
 
+        // 【核心修复】：防止重复展开的原子标志
+        private int _isExpanding = 0;
+
+        public bool TryMarkExpanding()
+        {
+            return Interlocked.CompareExchange(ref _isExpanding, 1, 0) == 0;
+        }
+
+        public void UnmarkExpanding()
+        {
+            _isExpanding = 0;
+        }
+
         public MCTSNode? Parent
         {
             get;

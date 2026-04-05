@@ -36,23 +36,36 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public void LoadOldSamples()
+        public void LoadOldSamples(int maxFiles = 200, bool randomize = false)
         {
             if (!Directory.Exists(_dataDir))
                 return;
 
-            var files = Directory.GetFiles(_dataDir, "*.json")
-                                 .Select(f => new FileInfo(f))
-                                 .OrderByDescending(f => f.CreationTime)
-                                 .Take(200)
-                                 .ToList();
+            var allPaths = Directory.GetFiles(_dataDir, "*.json");
+
+            IEnumerable<string> ordered;
+            if (randomize)
+            {
+                // 随机打散，确保从整个数据集中均匀采样，而非只取最新文件
+                ordered = allPaths.OrderBy(_ => _random.Next());
+            }
+            else
+            {
+                // 自对弈缓存：取最近 N 个文件（有时效性要求）
+                ordered = allPaths.Select(f => new FileInfo(f))
+                                  .OrderByDescending(f => f.CreationTime)
+                                  .Select(f => f.FullName);
+            }
+
+            var files = ordered.Take(maxFiles).ToList();
 
             int totalLoaded = 0;
-            foreach (var file in files)
+            foreach (var filePath in files)
             {
+                if (_count >= _capacity) break; // 缓冲区满时提前退出，避免无谓 IO
                 try
                 {
-                    string json = File.ReadAllText(file.FullName);
+                    string json = File.ReadAllText(filePath);
                     var examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
                     if (examples != null)
                     {
@@ -62,7 +75,7 @@ namespace ChineseChessAI.Training
                 }
                 catch { /* 忽略损坏的文件 */ }
             }
-            Console.WriteLine($"[ReplayBuffer] 已从磁盘预加载 {totalLoaded} 条样本");
+            Console.WriteLine($"[ReplayBuffer] 已从磁盘预加载 {totalLoaded} 条样本（共 {allPaths.Length} 个文件可用）");
         }
 
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)

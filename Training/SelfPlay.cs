@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using TorchSharp;
@@ -9,13 +9,12 @@ using System.Threading.Tasks;
 
 namespace ChineseChessAI.Training
 {
-    // 【修复】：删除了这里重复的、旧版的 TrainingExample 定义，统一使用 Trainer.cs 中的稀疏版本
-
-    public record GameResult(List<TrainingExample> Examples, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
+    public record GameResult(List<TrainingExample> ExamplesA, List<TrainingExample> ExamplesB, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory);
 
     public class SelfPlay
     {
-        private readonly MCTSEngine _engine;
+        private readonly MCTSEngine _engineA;
+        private readonly MCTSEngine _engineB;
         private readonly MoveGenerator _generator;
         private readonly Random _random = new Random();
 
@@ -26,10 +25,11 @@ namespace ChineseChessAI.Training
         private readonly float _earlyDrawPenalty;
         private readonly float _lateDrawPenalty;
 
-        public SelfPlay(MCTSEngine engine, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f,
-                        double lowTemperature = 0.10, float earlyDrawPenalty = -0.4f, float lateDrawPenalty = -0.6f)
+        public SelfPlay(MCTSEngine engineA, MCTSEngine engineB, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f,
+                        double lowTemperature = 0.10, float earlyDrawPenalty = 0.0f, float lateDrawPenalty = 0.0f)
         {
-            _engine = engine;
+            _engineA = engineA;
+            _engineB = engineB;
             _generator = new MoveGenerator();
             _maxMoves = maxMoves;
             _exploreMoves = exploreMoves;
@@ -39,13 +39,14 @@ namespace ChineseChessAI.Training
             _lateDrawPenalty = lateDrawPenalty;
         }
 
-        public async Task<GameResult> RunGameAsync(Func<Board, Task>? onMovePerformed = null)
+        public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null)
         {
             var board = new Board();
             board.Reset();
 
             var moveHistory = new List<Move>();
-            var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
+            var gameHistoryA = new List<(float[] state, float[] policy, bool isRedTurn)>();
+            var gameHistoryB = new List<(float[] state, float[] policy, bool isRedTurn)>();
 
             int moveCount = 0;
             float finalResult = 0;
@@ -61,6 +62,8 @@ namespace ChineseChessAI.Training
                     using (var moveScope = torch.NewDisposeScope())
                     {
                         bool isRed = board.IsRedTurn;
+                        bool isEngineA = (isRed == engineAIsRed);
+                        var activeEngine = isEngineA ? _engineA : _engineB;
 
                         Move? instantKillMove = _generator.GetCaptureKingMove(board);
                         if (instantKillMove != null)
@@ -101,10 +104,14 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        (Move mctsBestMove, float[] piData) = await _engine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
+                        (Move mctsBestMove, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, 800);
 
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
-                        gameHistory.Add((stateData, trainingPi, isRed));
+                        
+                        if (isEngineA)
+                            gameHistoryA.Add((stateData, trainingPi, isRed));
+                        else
+                            gameHistoryB.Add((stateData, trainingPi, isRed));
 
                         double temperature = (moveCount < _exploreMoves) ? 1.0 : _lowTemperature;
                         Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
@@ -157,7 +164,9 @@ namespace ChineseChessAI.Training
             }
 
             string resultStr = finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜");
-            return new GameResult(FinalizeData(gameHistory, finalResult, board), endReason, resultStr, moveCount, moveHistory);
+            var examplesA = FinalizeData(gameHistoryA, finalResult, board);
+            var examplesB = FinalizeData(gameHistoryB, finalResult, board);
+            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory);
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
@@ -191,8 +200,6 @@ namespace ChineseChessAI.Training
             return validMoves.Last().move;
         }
 
-
-
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
         {
             var examples = new List<TrainingExample>(history.Count);
@@ -209,19 +216,17 @@ namespace ChineseChessAI.Training
                 else if (blackMaterial > redMaterial)
                     adjustedResult = -_materialBias;
                 else
-                    isSymmetricDrawPenalty = true; // 双方均等惩罚，不走不对称路径
+                    isSymmetricDrawPenalty = true; 
             }
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
-                // 等材平局：给中性标签(0)，不能用-1.0，那会把所有正常下棋都标记为"坏的"
-                // 只有残局阶段（后1/3步）给轻微负信号，鼓励在终局寻求突破
                 float valueForCurrentPlayer;
                 if (isSymmetricDrawPenalty)
                 {
-                    float progress = (float)i / Math.Max(1, history.Count - 1); // 0.0 ~ 1.0
-                    valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty; // 全程给负信号，残局更重
+                    float progress = (float)i / Math.Max(1, history.Count - 1);
+                    valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty;
                 }
                 else
                 {
@@ -237,8 +242,5 @@ namespace ChineseChessAI.Training
             }
             return examples;
         }
-
-        // 删掉了原有的 CalculateMaterialScore 冗余方法
     }
 }
-   
