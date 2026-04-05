@@ -1,5 +1,6 @@
 using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
+using ChineseChessAI.Training;
 using TorchSharp;
 using System;
 using System.Collections.Generic;
@@ -99,13 +100,13 @@ namespace ChineseChessAI.MCTS
         {
             try
             {
-                // 【核心新增】：感知步数上限 (Horizon Awareness)
-                // 如果模拟搜索达到该局的步数上限，直接根据子力优势评估，不进行神经网络推理
+                // 【核心修复 BUG-2】：感知步数上限 (Horizon Awareness)
+                // 如果模拟搜索达到该局的步数上限，直接根据子力优势评估
                 if (currentMoves + depth >= maxMoves)
                 {
                     float advantage = TrainingOrchestrator.GetBoardAdvantage(board);
-                    // 如果红方优势则返回正值，黑方优势返回负值。MCTS 内部会根据当前是谁走棋自动处理
-                    node.Update(advantage * 0.5); // 给一个中等的平局偏置
+                    // MCTS 要求 Update 的值必须是相对于当前走棋方的视角
+                    node.Update(board.IsRedTurn ? advantage * 0.5 : -advantage * 0.5);
                     return;
                 }
 

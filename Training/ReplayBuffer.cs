@@ -15,6 +15,8 @@ namespace ChineseChessAI.Training
         private readonly Random _random = new Random();
         private readonly string _dataDir;
 
+        public string DataDir => _dataDir;
+
         public ReplayBuffer(int capacity = 100000, string dataDir = null)
         {
             _capacity = capacity;
@@ -58,6 +60,8 @@ namespace ChineseChessAI.Training
             }
 
             var files = ordered.Take(maxFiles).ToList();
+            string absPath = Path.GetFullPath(_dataDir);
+            Console.WriteLine($"[ReplayBuffer] 正在从目录装载数据: {absPath}");
 
             int totalLoaded = 0;
             foreach (var filePath in files)

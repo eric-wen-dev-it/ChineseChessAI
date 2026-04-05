@@ -1,6 +1,8 @@
 ﻿using System;
 using System.IO;
 using System.Linq;
+using TorchSharp;
+using static TorchSharp.torch;
 
 namespace ChineseChessAI.NeuralNetwork
 {
@@ -31,6 +33,7 @@ namespace ChineseChessAI.NeuralNetwork
                     using (var cpuModel = new CChessNet())
                     {
                         cpuModel.load_state_dict(model.state_dict());
+                        cpuModel.to(TorchSharp.DeviceType.CPU); // 显式确保 CPU，防止 load_state_dict 带入 CUDA 张量
                         cpuModel.save(filePath);
                     }
                     Console.WriteLine($"[ModelManager] 模型参数已成功保存至: {filePath}");

@@ -32,6 +32,10 @@ namespace ChineseChessAI.Core
 
         public bool LastMoveWasIrreversible { get; private set; } = false;
 
+        // 【核心修复 CE-3】：增量维护子力分数，并提供公开访问
+        public float RedMaterial { get; private set; } = 0;
+        public float BlackMaterial { get; private set; } = 0;
+
         public Board()
         {
             Reset();
@@ -40,26 +44,28 @@ namespace ChineseChessAI.Core
         public void Reset()
         {
             Array.Clear(_cells, 0, _cells.Length);
+            RedMaterial = 0;
+            BlackMaterial = 0;
 
             // --- 摆放黑方 (第 0-3 行) ---
-            _cells[0] = _cells[8] = -5; // 黑车
-            _cells[1] = _cells[7] = -4; // 黑马
-            _cells[2] = _cells[6] = -3; // 黑象
-            _cells[3] = _cells[5] = -2; // 黑士
-            _cells[4] = -1;             // 黑将
-            _cells[19] = _cells[25] = -6; // 黑炮
+            SetPieceWithMaterial(0, -5); SetPieceWithMaterial(8, -5); // 黑车
+            SetPieceWithMaterial(1, -4); SetPieceWithMaterial(7, -4); // 黑马
+            SetPieceWithMaterial(2, -3); SetPieceWithMaterial(6, -3); // 黑象
+            SetPieceWithMaterial(3, -2); SetPieceWithMaterial(5, -2); // 黑士
+            SetPieceWithMaterial(4, -1);             // 黑将
+            SetPieceWithMaterial(19, -6); SetPieceWithMaterial(25, -6); // 黑炮
             for (int i = 0; i < 9; i += 2)
-                _cells[27 + i] = -7; // 黑卒
+                SetPieceWithMaterial(27 + i, -7); // 黑卒
 
             // --- 摆放红方 (第 6-9 行) ---
             for (int i = 0; i < 9; i += 2)
-                _cells[6 * 9 + i] = 7;  // 红兵
-            _cells[7 * 9 + 1] = _cells[7 * 9 + 7] = 6; // 红炮
-            _cells[9 * 9 + 0] = _cells[9 * 9 + 8] = 5; // 红车
-            _cells[9 * 9 + 1] = _cells[9 * 9 + 7] = 4; // 红马
-            _cells[9 * 9 + 2] = _cells[9 * 9 + 6] = 3; // 红相
-            _cells[9 * 9 + 3] = _cells[9 * 9 + 5] = 2; // 红仕
-            _cells[9 * 9 + 4] = 1;                     // 红帅
+                SetPieceWithMaterial(6 * 9 + i, 7);  // 红兵
+            SetPieceWithMaterial(7 * 9 + 1, 6); SetPieceWithMaterial(7 * 9 + 7, 6); // 红炮
+            SetPieceWithMaterial(9 * 9 + 0, 5); SetPieceWithMaterial(9 * 9 + 8, 5); // 红车
+            SetPieceWithMaterial(9 * 9 + 1, 4); SetPieceWithMaterial(9 * 9 + 7, 4); // 红马
+            SetPieceWithMaterial(9 * 9 + 2, 3); SetPieceWithMaterial(9 * 9 + 6, 3); // 红相
+            SetPieceWithMaterial(9 * 9 + 3, 2); SetPieceWithMaterial(9 * 9 + 5, 2); // 红仕
+            SetPieceWithMaterial(9 * 9 + 4, 1);                     // 红帅
 
             IsRedTurn = true;
             _history.Clear();
@@ -71,6 +77,23 @@ namespace ChineseChessAI.Core
             _hashCounts[CurrentHash] = 1; // 初始局面计数为 1
         }
 
+        private void SetPieceWithMaterial(int pos, sbyte p)
+        {
+            _cells[pos] = p;
+            UpdateMaterial(p, 1); // 增加子力
+        }
+
+        private void UpdateMaterial(sbyte p, int sign)
+        {
+            if (p == 0) return;
+            float val = Math.Abs(p) switch
+            {
+                1 => 0, 2 => 2, 3 => 2, 4 => 4, 5 => 9, 6 => 4.5f, 7 => 1, _ => 0
+            };
+            if (p > 0) RedMaterial += val * sign;
+            else BlackMaterial += val * sign;
+        }
+
         public Board Clone()
         {
             var newBoard = new Board();
@@ -79,6 +102,8 @@ namespace ChineseChessAI.Core
             newBoard.CurrentHash = this.CurrentHash;
             newBoard.LastMove = this.LastMove;
             newBoard.LastMoveWasIrreversible = this.LastMoveWasIrreversible;
+            newBoard.RedMaterial = this.RedMaterial;
+            newBoard.BlackMaterial = this.BlackMaterial;
 
             // 深度克隆历史栈
             var historyArray = this._history.ToArray();
@@ -132,7 +157,10 @@ namespace ChineseChessAI.Core
 
             TogglePieceHash(from, piece);
             if (captured != 0)
+            {
                 TogglePieceHash(to, captured);
+                UpdateMaterial(captured, -1); // 【新增】：吃子时减少对方子力
+            }
             TogglePieceHash(to, piece);
             CurrentHash ^= Zobrist.SideKey;
 
@@ -167,6 +195,13 @@ namespace ChineseChessAI.Core
             }
 
             var last = _history.Pop();
+            
+            // 【新增】：恢复被吃掉的子力
+            if (last.Captured != 0)
+            {
+                UpdateMaterial(last.Captured, 1);
+            }
+
             _cells[last.From] = _cells[last.To];
             _cells[last.To] = last.Captured;
             IsRedTurn = !IsRedTurn;
@@ -282,6 +317,11 @@ namespace ChineseChessAI.Core
         {
             Array.Copy(state, _cells, 90);
             this.IsRedTurn = isRedTurn;
+            
+            // 【核心修复 BUG-3】：重新计算材料分数
+            RedMaterial = 0; BlackMaterial = 0;
+            for (int i = 0; i < 90; i++) UpdateMaterial(_cells[i], 1);
+
             CalculateFullHash();
 
             _history.Clear();

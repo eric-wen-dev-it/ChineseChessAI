@@ -14,7 +14,10 @@ namespace ChineseChessAI.Training
     // 将 (int Index, float Prob)[] 替换为 ActionProb[]
     public record TrainingExample(float[] State, ActionProb[] SparsePolicy, float Value);
 
-    public class Trainer
+    // 【新增】：大师对局完整数据结构
+    public record MasterGameData(List<TrainingExample> Examples, List<string> MoveHistoryUcci);
+
+    public class Trainer : IDisposable
     {
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
@@ -34,8 +37,16 @@ namespace ChineseChessAI.Training
             if (parameters.Count == 0)
                 return;
 
+            _optimizer?.Dispose(); // 清理旧的优化器
+
             _optimizer = torch.optim.Adam(parameters, _learningRate, weight_decay: 1e-4);
             _scheduler = StepLR(_optimizer, step_size: 500, gamma: 0.5);
+        }
+
+        // 【核心审计修复】：彻底释放底层 C++ 动量张量池
+        public void Dispose()
+        {
+            _optimizer?.Dispose();
         }
 
         public float Train(List<TrainingExample> examples, int epochs)

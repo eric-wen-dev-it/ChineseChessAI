@@ -22,12 +22,12 @@ namespace ChineseChessAI.Training
         public double Cpuct { get; set; } = 2.5;           // 探索常数 [1.0, 5.0]
         public int MctsSimulations { get; set; } = 400;    // 模拟次数 [100, 800]
 
-        public void RandomizePersonality()
+        public void RandomizePersonality(Random? customRnd = null)
         {
-            var rnd = Random.Shared;
-            Temperature = 0.1 + rnd.NextDouble() * 1.9;    // 随机温度
-            Cpuct = 1.0 + rnd.NextDouble() * 4.0;          // 随机好奇心
-            MctsSimulations = 100 + rnd.Next(701);         // 随机思考深度
+            var rnd = customRnd ?? Random.Shared;
+            Temperature = 0.1 + rnd.NextDouble() * 1.9;    // 随机温度 [0.1, 2.0]
+            Cpuct = 1.0 + rnd.NextDouble() * 4.0;          // 随机好奇心 [1.0, 5.0]
+            MctsSimulations = 100 + rnd.Next(701);         // 随机思考深度 [100, 800]
         }
     }
 
@@ -60,6 +60,17 @@ namespace ChineseChessAI.Training
                     {
                         string json = File.ReadAllText(_metadataPath);
                         _agents = JsonSerializer.Deserialize<List<AgentMetadata>>(json) ?? new List<AgentMetadata>();
+                        
+                        // 【核心增强】：不仅检查默认值，还要检查是否发生了“随机数同步（即不同智能体性格一模一样）”
+                        bool needFix = _agents.Count > 1 && 
+                                       _agents.Take(10).All(a => a.MctsSimulations == _agents[0].MctsSimulations && a.Cpuct == _agents[0].Cpuct);
+
+                        if (needFix || (_agents.Count > 0 && _agents.All(a => a.MctsSimulations == 400 && a.Cpuct == 2.5)))
+                        {
+                            var fixRnd = new Random();
+                            foreach (var agent in _agents) agent.RandomizePersonality(fixRnd);
+                            SaveMetadata();
+                        }
                     }
                     catch
                     {
@@ -70,6 +81,8 @@ namespace ChineseChessAI.Training
                 // 补齐到 populationSize
                 if (_agents.Count < populationSize)
                 {
+                    // 【核心修复】：使用同一个随机数实例连续生成，防止高频创建导致的种子重合
+                    var seedRnd = new Random(); 
                     for (int i = _agents.Count; i < populationSize; i++)
                     {
                         var agent = new AgentMetadata
@@ -77,7 +90,7 @@ namespace ChineseChessAI.Training
                             Id = i,
                             ModelPath = Path.Combine(_modelsDir, $"agent_{i}.pt")
                         };
-                        agent.RandomizePersonality(); // 【新增】为新智能体注入个性基因
+                        agent.RandomizePersonality(seedRnd); // 注入唯一的随机实例
                         _agents.Add(agent);
                     }
                     SaveMetadata();
@@ -98,14 +111,27 @@ namespace ChineseChessAI.Training
         {
             lock (_lock)
             {
-                // 策略：随机挑选一个，然后在它 ELO 附近的范围内挑选另一个（或者纯随机）
-                // 既然用户说是“随机匹配”，那就先纯随机
                 var rnd = Random.Shared;
                 int idx1 = rnd.Next(_agents.Count);
-                int idx2 = rnd.Next(_agents.Count);
-                while (idx1 == idx2) idx2 = rnd.Next(_agents.Count);
+                var agentA = _agents[idx1];
 
-                return (_agents[idx1], _agents[idx2]);
+                // 【核心改进】：ELO 邻近匹配策略 (±300 范围内挑选)
+                var candidates = _agents.Where(a => a.Id != agentA.Id && Math.Abs(a.Elo - agentA.Elo) < 300).ToList();
+                
+                AgentMetadata agentB;
+                if (candidates.Count > 0)
+                {
+                    agentB = candidates[rnd.Next(candidates.Count)];
+                }
+                else
+                {
+                    // 如果范围内没人，则选最接近的一个
+                    agentB = _agents.Where(a => a.Id != agentA.Id)
+                                    .OrderBy(a => Math.Abs(a.Elo - agentA.Elo))
+                                    .First();
+                }
+
+                return (agentA, agentB);
             }
         }
 

@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.Training;
 using ChineseChessAI.Utils;
 using System;
@@ -11,17 +11,15 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Shapes;
 using Path = System.IO.Path;
+using System.Linq;
 
 namespace ChineseChessAI
 {
     public partial class MainWindow : Window
     {
         private Button[] _cellButtons = new Button[90];
-        private Channel<List<Move>> _replayChannel;
-
+        private Channel<(List<Move> moves, int limit)> _replayChannel;
         private TrainingOrchestrator _orchestrator;
-
-        // 【核心修复 1】新增标志位：阻断后台抢占焦点
         private volatile bool _isManualReplayActive = false;
 
         public MainWindow()
@@ -30,7 +28,7 @@ namespace ChineseChessAI
             InitializeBoardUI();
             this.Loaded += (s, e) => DrawBoardLines();
 
-            _replayChannel = Channel.CreateBounded<List<Move>>(new BoundedChannelOptions(1)
+            _replayChannel = Channel.CreateBounded<(List<Move>, int)>(new BoundedChannelOptions(1)
             {
                 FullMode = BoundedChannelFullMode.DropOldest
             });
@@ -39,27 +37,23 @@ namespace ChineseChessAI
             _orchestrator.OnLog += msg => AppendLog(msg);
             _orchestrator.OnLossUpdated += loss => Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
 
-            // 【核心修复 2】后台完成对局时，只有在非手动模式下，才推送到前台
-            _orchestrator.OnReplayRequested += moves =>
+            _orchestrator.OnReplayRequested += (moves, limit) =>
             {
                 if (!_isManualReplayActive)
                 {
-                    _replayChannel.Writer.TryWrite(moves);
+                    _replayChannel.Writer.TryWrite((moves, limit));
                 }
             };
 
             _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
             _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() =>
             {
-                StartBtn.IsEnabled = true;
                 StartLeagueBtn.IsEnabled = true;
             });
 
             DataContext = new TrainingConfig();
             _ = Task.Run(StartReplayLoopAsync);
         }
-
-        // ================= 1. 纯 UI 渲染模块 =================
 
         private void InitializeBoardUI()
         {
@@ -85,33 +79,57 @@ namespace ChineseChessAI
 
         private void DrawBoardLines()
         {
-            if (ChessLinesCanvas == null)
-                return;
+            if (ChessLinesCanvas == null) return;
             ChessLinesCanvas.Children.Clear();
             double w = ChessLinesCanvas.ActualWidth, h = ChessLinesCanvas.ActualHeight;
             double stepX = w / 9, stepY = h / 10;
 
+            var gridPen = new SolidColorBrush(Color.FromRgb(62, 39, 35));
             for (int i = 0; i < 10; i++)
-                DrawLine(stepX / 2, i * stepY + stepY / 2, w - stepX / 2, i * stepY + stepY / 2);
+                DrawLine(stepX / 2, i * stepY + stepY / 2, w - stepX / 2, i * stepY + stepY / 2, gridPen, 1.5);
             for (int i = 0; i < 9; i++)
             {
                 if (i == 0 || i == 8)
-                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, h - stepY / 2);
+                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, h - stepY / 2, gridPen, 1.5);
                 else
                 {
-                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, 4 * stepY + stepY / 2);
-                    DrawLine(i * stepX + stepX / 2, 5 * stepY + stepY / 2, i * stepX + stepX / 2, h - stepY / 2);
+                    DrawLine(i * stepX + stepX / 2, stepY / 2, i * stepX + stepX / 2, 4 * stepY + stepY / 2, gridPen, 1.5);
+                    DrawLine(i * stepX + stepX / 2, 5 * stepY + stepY / 2, i * stepX + stepX / 2, h - stepY / 2, gridPen, 1.5);
                 }
             }
-            DrawLine(3 * stepX + stepX / 2, stepY / 2, 5 * stepX + stepX / 2, 2 * stepY + stepY / 2);
-            DrawLine(5 * stepX + stepX / 2, stepY / 2, 3 * stepX + stepX / 2, 2 * stepY + stepY / 2);
-            DrawLine(3 * stepX + stepX / 2, 7 * stepY + stepY / 2, 5 * stepX + stepX / 2, 9 * stepY + stepY / 2);
-            DrawLine(5 * stepX + stepX / 2, 7 * stepY + stepY / 2, 3 * stepX + stepX / 2, 9 * stepY + stepY / 2);
+
+            DrawLine(3 * stepX + stepX / 2, stepY / 2, 5 * stepX + stepX / 2, 2 * stepY + stepY / 2, gridPen, 1.2);
+            DrawLine(5 * stepX + stepX / 2, stepY / 2, 3 * stepX + stepX / 2, 2 * stepY + stepY / 2, gridPen, 1.2);
+            DrawLine(3 * stepX + stepX / 2, 7 * stepY + stepY / 2, 5 * stepX + stepX / 2, 9 * stepY + stepY / 2, gridPen, 1.2);
+            DrawLine(5 * stepX + stepX / 2, 7 * stepY + stepY / 2, 3 * stepX + stepX / 2, 9 * stepY + stepY / 2, gridPen, 1.2);
+
+            DrawStarMarker(1, 2, stepX, stepY); DrawStarMarker(7, 2, stepX, stepY);
+            DrawStarMarker(1, 7, stepX, stepY); DrawStarMarker(7, 7, stepX, stepY);
+            for (int i = 0; i < 9; i += 2) { DrawStarMarker(i, 3, stepX, stepY); DrawStarMarker(i, 6, stepX, stepY); }
         }
 
-        private void DrawLine(double x1, double y1, double x2, double y2)
+        private void DrawStarMarker(int col, int row, double stepX, double stepY)
         {
-            ChessLinesCanvas.Children.Add(new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = Brushes.Black, StrokeThickness = 1.2 });
+            double centerX = col * stepX + stepX / 2;
+            double centerY = row * stepY + stepY / 2;
+            double margin = 5;
+            var brush = new SolidColorBrush(Color.FromRgb(62, 39, 35));
+            if (col > 0) { DrawMarkerCorner(centerX - margin, centerY - margin, -1, -1, brush); }
+            if (col < 8) { DrawMarkerCorner(centerX + margin, centerY - margin, 1, -1, brush); }
+            if (col > 0) { DrawMarkerCorner(centerX - margin, centerY + margin, -1, 1, brush); }
+            if (col < 8) { DrawMarkerCorner(centerX + margin, centerY + margin, 1, 1, brush); }
+        }
+
+        private void DrawMarkerCorner(double x, double y, int dirX, int dirY, Brush brush)
+        {
+            double len = 8;
+            DrawLine(x, y, x + dirX * len, y, brush, 1.2);
+            DrawLine(x, y, x, y + dirY * len, brush, 1.2);
+        }
+
+        private void DrawLine(double x1, double y1, double x2, double y2, Brush brush, double thickness)
+        {
+            ChessLinesCanvas.Children.Add(new Line { X1 = x1, Y1 = y1, X2 = x2, Y2 = y2, Stroke = brush, StrokeThickness = thickness });
         }
 
         private void AppendLog(string msg)
@@ -123,27 +141,33 @@ namespace ChineseChessAI
             });
         }
 
-        // ================= 2. 动画播放模块 =================
-
         private async Task StartReplayLoopAsync()
         {
             try
             {
-                await foreach (var gameMoves in _replayChannel.Reader.ReadAllAsync())
+                await foreach (var (moves, limit) in _replayChannel.Reader.ReadAllAsync())
                 {
-                    AppendLog($"[观战] 开始播放对局动画，步数: {gameMoves.Count}");
-                    await ReplayGameInternalAsync(gameMoves);
+                    AppendLog($"[观战] 开始播放对局动画，步数: {moves.Count}");
+                    await ReplayGameInternalAsync(moves, limit);
                 }
             }
             catch (ChannelClosedException) { }
         }
 
-        private async Task ReplayGameInternalAsync(List<Move> historyMoves)
+        private async Task ReplayGameInternalAsync(List<Move> historyMoves, int maxMovesLimit = 0)
         {
             Board uiBoard = new Board();
             uiBoard.Reset();
 
-            Dispatcher.Invoke(() => RefreshBoardOnly(uiBoard));
+            Dispatcher.Invoke(() => {
+                RefreshBoardOnly(uiBoard);
+                StepProgressLabel.Text = $"0 / {historyMoves.Count}";
+                RemainingStepsLabel.Text = maxMovesLimit > 0 ? maxMovesLimit.ToString() : historyMoves.Count.ToString();
+            });
+
+            int currentStep = 0;
+            int totalGameSteps = historyMoves.Count;
+            int effectiveLimit = maxMovesLimit > 0 ? maxMovesLimit : totalGameSteps;
 
             foreach (var move in historyMoves)
             {
@@ -159,23 +183,26 @@ namespace ChineseChessAI
                     _cellButtons[move.From].Tag = "From";
                 });
 
-                await Task.Delay(400);
+                await Task.Delay(800);
 
-                if (_replayChannel.Reader.Count > 0)
-                    break;
+                if (_replayChannel.Reader.Count > 0) break;
 
                 uiBoard.Push(move.From, move.To);
+                currentStep++;
+
                 Dispatcher.Invoke(() =>
                 {
                     RefreshBoardOnly(uiBoard);
                     _cellButtons[move.From].Tag = "From";
                     _cellButtons[move.To].Tag = "To";
+                    StepProgressLabel.Text = $"{currentStep} / {totalGameSteps}";
+                    int remaining = effectiveLimit - currentStep;
+                    RemainingStepsLabel.Text = Math.Max(0, remaining).ToString();
                 });
 
-                await Task.Delay(600);
+                await Task.Delay(1500);
             }
 
-            // 【核心修复 3】如果完整播完了（没有被新的手动谱打断），解除锁定恢复后台推送
             if (_replayChannel.Reader.Count == 0)
             {
                 await Task.Delay(3000);
@@ -199,71 +226,23 @@ namespace ChineseChessAI
             MoveListLog.Text = board.GetMoveHistoryString();
         }
 
-        // ================= 3. 按钮交互模块 =================
-
-        // 【安全修复】拦截 async void 的潜在崩溃
-        private async void OnStartTrainingClick(object sender, RoutedEventArgs e)
+        public async void OnStartLeagueClick(object sender, RoutedEventArgs e)
         {
             try
             {
-                if (_orchestrator.IsTraining)
-                    return;
-
-                var config = (TrainingConfig)DataContext;
-                if (!int.TryParse(config.MaxMoves, out int maxMoves) || maxMoves <= 0)
-                {
-                    MessageBox.Show("强制平局步数必须为正整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                if (!int.TryParse(config.ExploreMoves, out int exploreMoves) || exploreMoves < 0)
-                {
-                    MessageBox.Show("高温探索步数必须为非负整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float materialBias) || materialBias < 0f)
-                {
-                    MessageBox.Show("破冰偏置必须为非负小数（如 0.05）。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
-                StartBtn.IsEnabled = false;
-                await _orchestrator.StartSelfPlayAsync(maxMoves, exploreMoves, materialBias);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"训练启动异常: {ex.Message}\n{ex.StackTrace}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                StartBtn.IsEnabled = true;
-            }
-        }
-
-        // 【安全修复】拦截 async void 的潜在崩溃
-        private async void OnStartLeagueClick(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                if (_orchestrator.IsTraining)
-                    return;
-
+                if (_orchestrator.IsTraining) return;
                 var config = (TrainingConfig)DataContext;
                 if (!int.TryParse(config.MaxMoves, out int maxMoves) || maxMoves <= 0) return;
                 if (!int.TryParse(config.ExploreMoves, out int exploreMoves) || exploreMoves < 0) return;
-                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out float materialBias)) return;
-                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0)
-                {
-                    MessageBox.Show("种群规模必须为正整数。", "参数错误", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
+                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float materialBias)) return;
+                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0) return;
 
-                StartBtn.IsEnabled = false;
                 StartLeagueBtn.IsEnabled = false;
                 await _orchestrator.StartLeagueTrainingAsync(populationSize, maxMoves, exploreMoves, materialBias);
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"联赛启动异常: {ex.Message}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                StartBtn.IsEnabled = true;
                 StartLeagueBtn.IsEnabled = true;
             }
         }
@@ -276,27 +255,21 @@ namespace ChineseChessAI
             public string PopulationSize { get; set; } = "10000";
         }
 
-        private void OnReplayLastClick(object sender, RoutedEventArgs e)
+        public void OnReplayLastClick(object sender, RoutedEventArgs e)
         {
-            // 复用此按钮作为“取消手动模式，立刻恢复后台直播”的开关
             if (_isManualReplayActive)
             {
                 _isManualReplayActive = false;
                 AppendLog("[系统] 用户手动恢复了后台观战推送。");
                 MessageBox.Show("已恢复接收后台最新对局！", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
             }
-            else
-            {
-                MessageBox.Show("极速模式下，后台的最新对局已经自动推送至棋盘频道。");
-            }
         }
 
-        private void OnLoadFileClick(object sender, RoutedEventArgs e)
+        public void OnLoadFileClick(object sender, RoutedEventArgs e)
         {
-            // 【核心修复 4】彻底删除 _orchestrator.IsTraining 限制，实现随时载入
             var openFileDialog = new Microsoft.Win32.OpenFileDialog
             {
-                Title = "选择棋谱文件",
+                Title = "选择文本棋谱文件",
                 Filter = "Text/PGN files (*.txt;*.pgn)|*.txt;*.pgn|All files (*.*)|*.*",
                 InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs")
             };
@@ -307,23 +280,13 @@ namespace ChineseChessAI
                 {
                     string fileContent = File.ReadAllText(openFileDialog.FileName);
                     string movesStr = "";
-
-                    // 【核心修复 5】智能解析引擎：不仅兼容系统 Log，更兼容外部的中文/PGN格式
                     if (fileContent.Contains("棋谱:"))
                     {
                         var lines = fileContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                        foreach (var line in lines)
-                        {
-                            if (line.StartsWith("棋谱:"))
-                            {
-                                movesStr = line.Substring(3).Trim();
-                                break;
-                            }
-                        }
+                        foreach (var line in lines) if (line.StartsWith("棋谱:")) { movesStr = line.Substring(3).Trim(); break; }
                     }
                     else
                     {
-                        // 剥离 PGN 头部标签，只保留着法区
                         movesStr = System.Text.RegularExpressions.Regex.Replace(fileContent, @"\[[^\]]*\]", "");
                         movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\{[^}]*\}", "");
                         movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\b\d+\.", "");
@@ -332,82 +295,136 @@ namespace ChineseChessAI
 
                     var moveList = new List<Move>();
                     var rawMoves = movesStr.Split(new[] { ' ', '\n', '\r', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
-
-                    var tempBoard = new Board();
-                    tempBoard.Reset();
+                    var tempBoard = new Board(); tempBoard.Reset();
                     var generator = new MoveGenerator();
-
                     foreach (var mStr in rawMoves)
                     {
-                        // 接入万能转换器，支持 "炮二平五" 和 "h2e2" 混用
                         string? ucci = NotationConverter.ConvertToUcci(tempBoard, mStr, generator);
                         if (!string.IsNullOrEmpty(ucci))
-
                         {
                             var move = NotationConverter.UcciToMove(ucci);
-                            if (move != null)
-                            {
-                                moveList.Add(move.Value);
-                                tempBoard.Push(move.Value.From, move.Value.To);
-                            }
+                            if (move != null) { moveList.Add(move.Value); tempBoard.Push(move.Value.From, move.Value.To); }
                         }
                     }
-
                     if (moveList.Count > 0)
                     {
-                        // 【核心修复 6】阻断后台推送，专心为用户播放当前文件
                         _isManualReplayActive = true;
-                        AppendLog($"[观战] 已成功导入并解析 {moveList.Count} 步棋谱，开启纯净回放模式...");
-                        _replayChannel.Writer.TryWrite(moveList);
-                    }
-                    else
-                    {
-                        MessageBox.Show("未能解析出有效的走法，请检查文件内容是否包含正常的棋谱序列！", "解析失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        AppendLog($"[观战] 已成功加载文本棋谱，共 {moveList.Count} 步。");
+                        _replayChannel.Writer.TryWrite((moveList, 0));
                     }
                 }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"解析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
+                catch (Exception ex) { MessageBox.Show($"解析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error); }
             }
         }
 
-        // 【安全修复】拦截 async void 的潜在崩溃
-        private async void OnLoadDatasetClick(object sender, RoutedEventArgs e)
+        public void OnOpenMasterJsonClick(object sender, RoutedEventArgs e)
+        {
+            var openFileDialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "打开大师 JSON 棋谱",
+                Filter = "Master JSON (*.json)|*.json",
+                InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "master_data")
+            };
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                try
+                {
+                    string json = File.ReadAllText(openFileDialog.FileName);
+                    var masterData = System.Text.Json.JsonSerializer.Deserialize<MasterGameData>(json);
+
+                    if (masterData != null && masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
+                    {
+                        var moveList = new List<Move>();
+                        var tempBoard = new Board(); tempBoard.Reset();
+                        var generator = new MoveGenerator();
+
+                        // 【核心改进】：维持棋盘状态逐步解析，确保兼容代数记谱法 (如 C2.5)
+                        foreach (var rawStr in masterData.MoveHistoryUcci)
+                        {
+                            string? ucci = NotationConverter.ConvertToUcci(tempBoard, rawStr, generator);
+                            if (!string.IsNullOrEmpty(ucci))
+                            {
+                                var m = NotationConverter.UcciToMove(ucci);
+                                if (m != null)
+                                {
+                                    moveList.Add(m.Value);
+                                    tempBoard.Push(m.Value.From, m.Value.To);
+                                }
+                            }
+                        }
+
+                        if (moveList.Count > 0)
+                        {
+                            _isManualReplayActive = true;
+                            AppendLog($"[观战] 精准加载 JSON 棋谱 ({Path.GetFileName(openFileDialog.FileName)})，共 {moveList.Count} 步。");
+                            _replayChannel.Writer.TryWrite((moveList, 0));
+                        }
+                    }
+                    else
+                    {
+                        // 兼容尝试：旧版 JSON 处理
+                        var examples = System.Text.Json.JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                        if (examples != null && examples.Count > 1)
+                        {
+                            var moveList = new List<Move>();
+                            for (int i = 0; i < examples.Count - 1; i++)
+                            {
+                                var m = ReconstructMove(examples[i].State, examples[i + 1].State);
+                                if (m != null) moveList.Add(m.Value);
+                            }
+                            _isManualReplayActive = true;
+                            AppendLog($"[观战] 从旧版 JSON 还原棋谱，共 {moveList.Count} 步。");
+                            _replayChannel.Writer.TryWrite((moveList, 0));
+                        }
+                    }
+                }
+                catch (Exception ex) { MessageBox.Show($"加载 JSON 失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error); }
+            }
+        }
+
+        public async void OnLoadDatasetClick(object sender, RoutedEventArgs e)
         {
             try
             {
-                if (_orchestrator.IsTraining)
-                {
-                    MessageBox.Show("当前正在训练中，请先停止当前训练再导入！", "提示", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-
+                if (_orchestrator.IsTraining) return;
                 var openFileDialog = new Microsoft.Win32.OpenFileDialog
                 {
                     Title = "选择巨型棋谱数据集",
                     Filter = "支持的数据集 (*.csv;*.pgn;*.txt)|*.csv;*.pgn;*.txt|All files (*.*)|*.*"
                 };
-
                 if (openFileDialog.ShowDialog() == true)
                 {
-                    var result = MessageBox.Show(
-                        "是否在解析的同时进行训练？\n\n【是】解析 + 训练（较慢，占用 GPU）\n【否】仅解析存盘，不训练（快速，下次启动自动加载）",
-                        "导入模式",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Question);
-
-                    bool trainWhileParsing = result == MessageBoxResult.Yes;
-                    StartBtn.IsEnabled = false;
-                    AppendLog($"[系统] 准备吞噬处理巨型文件: {System.IO.Path.GetFileName(openFileDialog.FileName)} | 模式: {(trainWhileParsing ? "解析+训练" : "纯解析存盘")}");
-                    await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName, trainWhileParsing);
+                    StartLeagueBtn.IsEnabled = false;
+                    AppendLog($"[系统] 准备处理文件: {Path.GetFileName(openFileDialog.FileName)}");
+                    await _orchestrator.ProcessDatasetAsync(openFileDialog.FileName);
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"导入数据集异常: {ex.Message}\n{ex.StackTrace}", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                StartBtn.IsEnabled = true;
+                MessageBox.Show($"导入异常: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+                StartLeagueBtn.IsEnabled = true;
             }
+        }
+
+        private Move? ReconstructMove(float[] stateBefore, float[] stateAfter)
+        {
+            var piecesBefore = GetPieceMap(stateBefore);
+            var piecesAfter = GetPieceMap(stateAfter);
+            int from = -1, to = -1;
+            foreach (var pos in piecesBefore.Keys) if (!piecesAfter.ContainsKey(pos)) from = pos;
+            foreach (var pos in piecesAfter.Keys) if (!piecesBefore.ContainsKey(pos) || piecesBefore[pos] != piecesAfter[pos]) to = pos;
+            if (from != -1 && to != -1) return new Move(from, to);
+            return null;
+        }
+
+        private Dictionary<int, int> GetPieceMap(float[] state)
+        {
+            var map = new Dictionary<int, int>();
+            for (int layer = 0; layer < 14; layer++)
+                for (int pos = 0; pos < 90; pos++)
+                    if (state[layer * 90 + pos] > 0.5f) map[pos] = layer;
+            return map;
         }
     }
 }

@@ -20,6 +20,8 @@ namespace ChineseChessAI.Training
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
         private readonly float _materialBias;
+        private readonly float _earlyDrawPenalty;
+        private readonly float _lateDrawPenalty;
         
         // --- 个性化参数 ---
         private readonly double _lowTempA;
@@ -28,7 +30,8 @@ namespace ChineseChessAI.Training
         private readonly int _simsB;
 
         public SelfPlay(MCTSEngine engineA, MCTSEngine engineB, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.4f,
-                        double lowTempA = 0.1, double lowTempB = 0.1, int simsA = 400, int simsB = 400)
+                        double lowTempA = 0.1, double lowTempB = 0.1, int simsA = 400, int simsB = 400,
+                        float earlyDrawPenalty = 0.0f, float lateDrawPenalty = 0.0f)
         {
             _engineA = engineA;
             _engineB = engineB;
@@ -40,6 +43,8 @@ namespace ChineseChessAI.Training
             _lowTempB = lowTempB;
             _simsA = simsA;
             _simsB = simsB;
+            _earlyDrawPenalty = earlyDrawPenalty;
+            _lateDrawPenalty = lateDrawPenalty;
         }
 
         public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null)
@@ -110,7 +115,7 @@ namespace ChineseChessAI.Training
                         var stateTensor = StateEncoder.Encode(board);
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
-                        // 【核心新增】：传递本局的步数进度和上限给 MCTS 引擎
+                        // 【核心修复 BUG-5】：使用基因传入的 activeSims，而非硬编码的 800
                         (Move mctsBestMove, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, activeSims, moveCount, _maxMoves);
 
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);

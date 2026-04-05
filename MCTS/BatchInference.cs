@@ -13,7 +13,8 @@ namespace ChineseChessAI.MCTS
     {
         private readonly CChessNet _model;
         private readonly int _batchSize;
-        private readonly BlockingCollection<InferenceTask> _taskQueue = new();
+        private readonly ConcurrentQueue<InferenceTask> _taskQueue = new();
+        private readonly ManualResetEventSlim _signal = new(false); // 高灵敏度信号
         private volatile bool _isDisposed = false;
 
         private const int INPUT_SIZE = 14 * 10 * 9;
@@ -23,78 +24,53 @@ namespace ChineseChessAI.MCTS
             _model = model;
             _batchSize = batchSize;
 
-            // 启动纯逻辑循环，完全不使用任何 CancellationToken
-            Task.Run(() => InferenceLoop());
+            // 启动极速推理循环
+            _ = Task.Run(() => {
+                try { InferenceLoop(); }
+                catch { }
+            });
         }
 
         public async Task<(float[] Policy, float Value)> PredictAsync(float[] inputData)
         {
-            // 如果已经释放，直接返回空结果，绝不抛出异常
             if (_isDisposed)
                 return (new float[8100], 0f);
 
             var tcs = new TaskCompletionSource<(float[], float)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            
-            try
-            {
-                if (!_taskQueue.IsAddingCompleted)
-                {
-                    _taskQueue.Add(new InferenceTask(inputData, tcs));
-                }
-                else
-                {
-                    tcs.TrySetResult((new float[8100], 0f));
-                }
-            }
-            catch
-            {
-                tcs.TrySetResult((new float[8100], 0f));
-            }
+            _taskQueue.Enqueue(new InferenceTask(inputData, tcs));
+            _signal.Set(); // 唤醒推理线程
             
             return await tcs.Task;
         }
 
         private void InferenceLoop()
         {
-            try
+            while (!_isDisposed)
             {
-                // 纯布尔值控制，彻底杜绝 OperationCanceledException
-                while (!_isDisposed)
+                // 等待信号，如果没有任务则进入休眠，不消耗 CPU
+                _signal.Wait(100); 
+                _signal.Reset();
+
+                if (_taskQueue.IsEmpty) continue;
+
+                var batchTasks = new List<InferenceTask>();
+                
+                // 极速收集任务，不进行任何异步切换
+                while (batchTasks.Count < _batchSize && _taskQueue.TryDequeue(out var task))
                 {
-                    var batchTasks = new List<InferenceTask>();
+                    batchTasks.Add(task);
+                }
 
-                    try
-                    {
-                        // 10ms 轮询，保证即便在 CPU 满载时也能快速响应 Dispose 信号
-                        if (_taskQueue.TryTake(out var firstTask, 10))
-                        {
-                            batchTasks.Add(firstTask);
-                            while (batchTasks.Count < _batchSize && _taskQueue.TryTake(out var nextTask))
-                            {
-                                batchTasks.Add(nextTask);
-                            }
-                        }
-                    }
-                    catch { if (_isDisposed) break; continue; }
-
-                    if (batchTasks.Count > 0)
-                    {
-                        ProcessBatch(batchTasks);
-                    }
+                if (batchTasks.Count > 0)
+                {
+                    ProcessBatch(batchTasks);
                 }
             }
-            finally
+
+            // 退出清理
+            while (_taskQueue.TryDequeue(out var task))
             {
-                // 【终极加固】：退出循环时，给所有还在等待的 TCS 一个正常的结果 (Result)
-                // 而不是 SetCanceled()，这样 await PredictAsync 的地方永远不会收到异常
-                try
-                {
-                    while (_taskQueue.TryTake(out var task))
-                    {
-                        task.Tcs.TrySetResult((new float[8100], 0f));
-                    }
-                }
-                catch { }
+                task.Tcs.TrySetResult((new float[8100], 0f));
             }
         }
 
@@ -102,7 +78,11 @@ namespace ChineseChessAI.MCTS
         {
             try
             {
-                if (_isDisposed) throw new ObjectDisposedException("engine");
+                if (_isDisposed) 
+                {
+                    foreach (var t in tasks) t.Tcs.TrySetResult((new float[8100], 0f));
+                    return;
+                }
 
                 _model.eval();
                 using var scope = torch.NewDisposeScope();
@@ -131,7 +111,7 @@ namespace ChineseChessAI.MCTS
                     tasks[i].Tcs.TrySetResult((policy, value));
                 }
             }
-            catch (Exception ex)
+            catch
             {
                 foreach (var t in tasks) t.Tcs.TrySetResult((new float[8100], 0f));
             }
@@ -139,16 +119,9 @@ namespace ChineseChessAI.MCTS
 
         public void Dispose()
         {
-            if (_isDisposed) return;
             _isDisposed = true;
-
-            try
-            {
-                _taskQueue.CompleteAdding();
-                // 彻底释放
-                Task.Delay(10).ContinueWith(_ => _taskQueue.Dispose());
-            }
-            catch { }
+            _signal.Set(); // 唤醒并退出
+            _signal.Dispose();
         }
 
         private record InferenceTask(float[] InputData, TaskCompletionSource<(float[], float)> Tcs);
