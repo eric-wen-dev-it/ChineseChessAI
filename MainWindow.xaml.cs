@@ -45,6 +45,12 @@ namespace ChineseChessAI
                 }
             };
 
+            _orchestrator.OnAuditFailureRequested += (history, illegalMove, reason) => 
+            {
+                // 当审计失败时，将该局面推送到演示队列
+                _replayChannel.Writer.TryWrite((history.Concat(new[] { illegalMove }).ToList(), 0, -1, $"审计失败: {reason}"));
+            };
+
             _orchestrator.OnError += err => Dispatcher.Invoke(() => MessageBox.Show(err, "错误", MessageBoxButton.OK, MessageBoxImage.Error));
             _orchestrator.OnTrainingStopped += () => Dispatcher.Invoke(() =>
             {
@@ -213,6 +219,25 @@ namespace ChineseChessAI
             }
 
             // 每一局最后一步都强制停顿 10 秒
+            if (gameId == -1 && historyMoves.Count > 0)
+            {
+                // 如果是审计失败，对最后一步非法走法进行 3 遍闪烁演示
+                var lastMove = historyMoves[^1];
+                for (int i = 0; i < 3; i++)
+                {
+                    Dispatcher.Invoke(() => {
+                        _cellButtons[lastMove.From].Tag = "From";
+                        _cellButtons[lastMove.To].Tag = "To";
+                    });
+                    await Task.Delay(500);
+                    Dispatcher.Invoke(() => {
+                        _cellButtons[lastMove.From].Tag = null;
+                        _cellButtons[lastMove.To].Tag = null;
+                    });
+                    await Task.Delay(500);
+                }
+            }
+
             await Task.Delay(10000);
 
             if (_isManualReplayActive && _replayChannel.Reader.Count == 0)

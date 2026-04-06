@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using ChineseChessAI.Core;
 
 namespace ChineseChessAI.Training
 {
@@ -38,7 +39,7 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public (int samples, int games) LoadOldSamples(int maxFiles = 200, bool randomize = false)
+        public (int samples, int games) LoadOldSamples(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null)
         {
             if (!Directory.Exists(_dataDir)) return (0, 0);
 
@@ -54,25 +55,79 @@ namespace ChineseChessAI.Training
             foreach (var filePath in files)
             {
                 if (_count >= _capacity) break;
+                string fileName = Path.GetFileName(filePath);
                 try
                 {
                     string json = File.ReadAllText(filePath);
                     List<TrainingExample>? examples = null;
+                    bool isAuditPassed = false;
+                    string discardReason = "未知错误";
 
-                    // 尝试两种反序列化路径
                     try {
                         var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
-                        if (masterData != null && masterData.Examples != null) examples = masterData.Examples;
-                    } catch { }
+                        if (masterData != null && masterData.Examples != null)
+                        {
+                            if (masterData.Examples.Count <= 10)
+                            {
+                                discardReason = "对局步数过短 (<10步)";
+                            }
+                            else if (masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
+                            {
+                                var tempBoard = new Board(); tempBoard.Reset();
+                                var gen = new Core.MoveGenerator();
+                                var history = new List<Move>();
+                                bool sequenceLegal = true;
+                                int moveIdx = 1;
 
-                    if (examples == null) {
-                        examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                                foreach (var ucci in masterData.MoveHistoryUcci)
+                                {
+                                    var move = Utils.NotationConverter.UcciToMove(ucci);
+                                    var legalMoves = gen.GenerateLegalMoves(tempBoard);
+                                    
+                                    if (move == null || !legalMoves.Any(m => m.From == move.Value.From && m.To == move.Value.To))
+                                    {
+                                        sequenceLegal = false;
+                                        sbyte piece = move.HasValue ? tempBoard.GetPiece(move.Value.From) : (sbyte)0;
+                                        string pieceName = Board.GetPieceName(piece);
+                                        
+                                        string detailReason;
+                                        if (piece == 0) detailReason = $"第{moveIdx}步 {ucci} 起点无棋子";
+                                        else if ((piece > 0) != tempBoard.IsRedTurn) detailReason = $"第{moveIdx}步 {ucci} 走子方错误 (应为{(tempBoard.IsRedTurn?"红":"黑")}方)";
+                                        else detailReason = $"第{moveIdx}步 {ucci} 非法 ({pieceName} 违规移动)";
+                                        
+                                        discardReason = detailReason;
+                                        // 触发 UI 演示
+                                        if (move.HasValue) onAuditFailure?.Invoke(history, move.Value, detailReason);
+                                        break;
+                                    }
+                                    tempBoard.Push(move.Value.From, move.Value.To);
+                                    history.Add(move.Value);
+                                    moveIdx++;
+                                }
+                                if (sequenceLegal) isAuditPassed = true;
+                            }
+                            else {
+                                isAuditPassed = true;
+                            }
+                            examples = masterData.Examples;
+                        }
+                    } catch { 
+                        discardReason = "JSON 结构解析失败";
                     }
 
-                    if (examples != null && examples.Count > 0) {
+                    if (!isAuditPassed && examples == null) {
+                        examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                        if (examples != null && examples.Count > 10) isAuditPassed = true;
+                    }
+
+                    if (isAuditPassed && examples != null) 
+                    {
                         this.AddRange(examples, saveToDisk: false);
                         totalLoaded += examples.Count;
                         totalGames++;
+                    }
+                    else {
+                        logAction?.Invoke($"[审计丢弃] {fileName} 原因: {discardReason}");
                     }
                 }
                 catch { }

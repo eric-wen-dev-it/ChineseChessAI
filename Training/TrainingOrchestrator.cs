@@ -40,6 +40,7 @@ namespace ChineseChessAI.Training
         public event Action<string> OnLog;
         public event Action<float> OnLossUpdated;
         public event Action<List<Move>, int, int, string> OnReplayRequested; // 增加结果参数
+        public event Action<List<Move>, Move, string> OnAuditFailureRequested; // 审计失败演示事件
         public event Action OnTrainingStopped;
         public event Action<string> OnError;
 
@@ -76,8 +77,8 @@ namespace ChineseChessAI.Training
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
 
-                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue);
-                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue);
+                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue, logAction: Log);
+                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue, logAction: Log);
                     Log($"[装载] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
 
                     const int maxParallelGames = 4;
