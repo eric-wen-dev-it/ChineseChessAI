@@ -153,9 +153,16 @@ namespace ChineseChessAI.MCTS
 
                 Interlocked.Increment(ref bestChild.Value.VirtualLoss);
                 board.Push(bestChild.Key.From, bestChild.Key.To);
-                await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1);
-                board.Pop();
-                Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
+                
+                try
+                {
+                    await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1);
+                }
+                finally
+                {
+                    board.Pop();
+                    Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
+                }
             }
             catch (Exception ex)
             {

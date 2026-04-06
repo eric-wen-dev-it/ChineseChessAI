@@ -91,6 +91,10 @@ namespace ChineseChessAI.Training
                     int masterLoaded = MasterBuffer.LoadOldSamples(int.MaxValue);
                     Log($"[系统] 已从大师库装载 {masterLoaded} 条高质量大师对局样本。");
 
+                    // 【核心修复】：恢复历史联赛对局样本，确保训练连续性
+                    int leagueLoaded = LeagueBuffer.LoadOldSamples(int.MaxValue);
+                    Log($"[系统] 已从联赛库恢复 {leagueLoaded} 条历史自对弈样本。");
+
                     const int trainEpochs = 3;
                     const int maxParallelGames = 4;
                     int gameCounter = 0;
@@ -152,13 +156,16 @@ namespace ChineseChessAI.Training
                                         if (result.IsSuccess)
                                         {
                                             float resA = result.ResultStr == "平局" ? 0 : (result.ResultStr == (aIsRed ? "红胜" : "黑胜") ? 1.0f : -1.0f);
-                                            
+
+                                            // 【核心修复】：锁外提前捕获赛前 ELO
+                                            double eloABefore = agentMetaA.Elo;
+                                            double eloBBefore = agentMetaB.Elo;
+
                                             lock(_leagueManager)
                                             {
-                                                _leagueManager.UpdateResult(agentMetaA.Id, resA, agentMetaB.Elo);
-                                                _leagueManager.UpdateResult(agentMetaB.Id, -resA, agentMetaA.Elo);
+                                                _leagueManager.UpdateResult(agentMetaA.Id, resA, eloBBefore);
+                                                _leagueManager.UpdateResult(agentMetaB.Id, -resA, eloABefore);
                                             }
-
                                             if (result.ExamplesA.Count > 0) LeagueBuffer.AddRange(result.ExamplesA);
                                             if (result.ExamplesB.Count > 0) LeagueBuffer.AddRange(result.ExamplesB);
 
@@ -204,9 +211,10 @@ namespace ChineseChessAI.Training
                             if (torch.cuda.is_available()) torch.cuda.synchronize();
                         });
 
-                        // 【核心修复 BUG-2】：修正排行榜刷新条件
-                        if (gameCounter > 0 && gameCounter % 10 == 0)
+                        // 【核心修复】：改用阈值追踪，确保每 10 局准确触发（不受 4 局并行跳跃增长影响）
+                        if (gameCounter >= nextLogAt)
                         {
+                            nextLogAt += 10;
                             _leagueManager.SaveMetadata();
                             var top = _leagueManager.GetTopAgents(5);
                             Log("--- [当前排名 Top 5] ---");

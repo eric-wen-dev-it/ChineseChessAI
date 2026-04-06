@@ -37,6 +37,7 @@ namespace ChineseChessAI.Training
             if (parameters.Count == 0)
                 return;
 
+            (_scheduler as IDisposable)?.Dispose(); // 安全清理旧的调度器
             _optimizer?.Dispose(); // 清理旧的优化器
 
             _optimizer = torch.optim.Adam(parameters, _learningRate, weight_decay: 1e-4);
@@ -46,6 +47,7 @@ namespace ChineseChessAI.Training
         // 【核心审计修复】：彻底释放底层 C++ 动量张量池
         public void Dispose()
         {
+            (_scheduler as IDisposable)?.Dispose();
             _optimizer?.Dispose();
         }
 

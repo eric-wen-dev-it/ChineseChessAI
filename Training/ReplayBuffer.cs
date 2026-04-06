@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -40,82 +40,64 @@ namespace ChineseChessAI.Training
 
         public int LoadOldSamples(int maxFiles = 200, bool randomize = false)
         {
-            if (!Directory.Exists(_dataDir))
-                return 0;
+            if (!Directory.Exists(_dataDir)) return 0;
 
             var allPaths = Directory.GetFiles(_dataDir, "*.json");
-
-            IEnumerable<string> ordered;
-            if (randomize)
-            {
-                // 随机打散，确保从整个数据集中均匀采样，而非只取最新文件
-                ordered = allPaths.OrderBy(_ => _random.Next());
-            }
-            else
-            {
-                // 自对弈缓存：取最近 N 个文件（有时效性要求）
-                ordered = allPaths.Select(f => new FileInfo(f))
-                                  .OrderByDescending(f => f.CreationTime)
-                                  .Select(f => f.FullName);
-            }
+            IEnumerable<string> ordered = randomize 
+                ? allPaths.OrderBy(_ => _random.Next())
+                : allPaths.Select(f => new FileInfo(f)).OrderByDescending(f => f.CreationTime).Select(f => f.FullName);
 
             var files = ordered.Take(maxFiles).ToList();
-            string absPath = Path.GetFullPath(_dataDir);
-            Console.WriteLine($"[ReplayBuffer] 正在从目录装载数据: {absPath}");
-
             int totalLoaded = 0;
+
             foreach (var filePath in files)
             {
-                if (_count >= _capacity) break; // 缓冲区满时提前退出，避免无谓 IO
+                if (_count >= _capacity) break;
                 try
                 {
                     string json = File.ReadAllText(filePath);
-                    var examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
-                    if (examples != null)
-                    {
+                    List<TrainingExample>? examples = null;
+
+                    // 【核心修复】：由于 master_data 存的是 MasterGameData 对象，而 self_play 存的是数组
+                    // 必须尝试两种反序列化路径
+                    try {
+                        var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
+                        if (masterData != null && masterData.Examples != null) examples = masterData.Examples;
+                    } catch { /* 不是对象格式，尝试数组格式 */ }
+
+                    if (examples == null) {
+                        examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                    }
+
+                    if (examples != null && examples.Count > 0) {
                         this.AddRange(examples, saveToDisk: false);
                         totalLoaded += examples.Count;
                     }
                 }
-                catch { /* 忽略损坏的文件 */ }
+                catch { /* 忽略损坏文件 */ }
             }
-            Console.WriteLine($"[ReplayBuffer] 已从磁盘预加载 {totalLoaded} 条样本（共 {allPaths.Length} 个文件可用）");
             return totalLoaded;
         }
 
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)
         {
-            if (saveToDisk)
-                SaveExamples(newExamples);
-
-            lock (_buffer) // 【并发保护】：确保多线程写入安全
-            {
-                foreach (var ex in newExamples)
-                {
+            if (saveToDisk) SaveExamples(newExamples);
+            lock (_buffer) {
+                foreach (var ex in newExamples) {
                     _buffer[_head] = ex;
                     _head = (_head + 1) % _capacity;
-                    if (_count < _capacity)
-                        _count++;
+                    if (_count < _capacity) _count++;
                 }
             }
         }
 
         public List<TrainingExample> Sample(int batchSize)
         {
-            lock (_buffer) // 【并发保护】：防止多线程竞争导致 Random 崩溃
-            {
+            lock (_buffer) {
                 int count = Math.Min(batchSize, _count);
                 var batch = new List<TrainingExample>(count);
-
-                // 使用 Fisher-Yates 思想的快速索引采样
-                int[] indices = Enumerable.Range(0, _count).ToArray();
-                for (int i = 0; i < count; i++)
-                {
-                    int j = _random.Next(i, _count);
-                    (indices[i], indices[j]) = (indices[j], indices[i]);
-                    batch.Add(_buffer[indices[i]]);
-                }
-
+                int[] indices = Enumerable.Range(0, _count).OrderBy(_ => _random.Next()).Take(count).ToArray();
+                foreach (var i in indices) batch.Add(_buffer[i]);
                 return batch;
             }
         }
