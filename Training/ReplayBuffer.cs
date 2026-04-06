@@ -38,9 +38,9 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public int LoadOldSamples(int maxFiles = 200, bool randomize = false)
+        public (int samples, int games) LoadOldSamples(int maxFiles = 200, bool randomize = false)
         {
-            if (!Directory.Exists(_dataDir)) return 0;
+            if (!Directory.Exists(_dataDir)) return (0, 0);
 
             var allPaths = Directory.GetFiles(_dataDir, "*.json");
             IEnumerable<string> ordered = randomize 
@@ -49,6 +49,7 @@ namespace ChineseChessAI.Training
 
             var files = ordered.Take(maxFiles).ToList();
             int totalLoaded = 0;
+            int totalGames = 0;
 
             foreach (var filePath in files)
             {
@@ -58,12 +59,11 @@ namespace ChineseChessAI.Training
                     string json = File.ReadAllText(filePath);
                     List<TrainingExample>? examples = null;
 
-                    // 【核心修复】：由于 master_data 存的是 MasterGameData 对象，而 self_play 存的是数组
-                    // 必须尝试两种反序列化路径
+                    // 尝试两种反序列化路径
                     try {
                         var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
                         if (masterData != null && masterData.Examples != null) examples = masterData.Examples;
-                    } catch { /* 不是对象格式，尝试数组格式 */ }
+                    } catch { }
 
                     if (examples == null) {
                         examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
@@ -72,11 +72,12 @@ namespace ChineseChessAI.Training
                     if (examples != null && examples.Count > 0) {
                         this.AddRange(examples, saveToDisk: false);
                         totalLoaded += examples.Count;
+                        totalGames++;
                     }
                 }
-                catch { /* 忽略损坏文件 */ }
+                catch { }
             }
-            return totalLoaded;
+            return (totalLoaded, totalGames);
         }
 
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)

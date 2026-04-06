@@ -18,7 +18,7 @@ namespace ChineseChessAI
     public partial class MainWindow : Window
     {
         private Button[] _cellButtons = new Button[90];
-        private Channel<(List<Move> moves, int limit)> _replayChannel;
+        private Channel<(List<Move> moves, int limit, int gameId, string result)> _replayChannel;
         private TrainingOrchestrator _orchestrator;
         private volatile bool _isManualReplayActive = false;
 
@@ -28,7 +28,7 @@ namespace ChineseChessAI
             InitializeBoardUI();
             this.Loaded += (s, e) => DrawBoardLines();
 
-            _replayChannel = Channel.CreateBounded<(List<Move>, int)>(new BoundedChannelOptions(10)
+            _replayChannel = Channel.CreateBounded<(List<Move>, int, int, string)>(new BoundedChannelOptions(10)
             {
                 FullMode = BoundedChannelFullMode.DropOldest
             });
@@ -37,11 +37,11 @@ namespace ChineseChessAI
             _orchestrator.OnLog += msg => AppendLog(msg);
             _orchestrator.OnLossUpdated += loss => Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
 
-            _orchestrator.OnReplayRequested += (moves, limit) =>
+            _orchestrator.OnReplayRequested += (moves, limit, gameId, result) =>
             {
                 if (!_isManualReplayActive)
                 {
-                    _replayChannel.Writer.TryWrite((moves, limit));
+                    _replayChannel.Writer.TryWrite((moves, limit, gameId, result));
                 }
             };
 
@@ -137,24 +137,39 @@ namespace ChineseChessAI
             Dispatcher.Invoke(() =>
             {
                 LogBox.AppendText($"{DateTime.Now:HH:mm:ss} - {msg}\n");
-                LogBox.ScrollToEnd();
             });
+        }
+
+        private void OnLogBoxTextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (sender is TextBox tb)
+            {
+                tb.ScrollToEnd();
+            }
         }
 
         private async Task StartReplayLoopAsync()
         {
             try
             {
-                await foreach (var (moves, limit) in _replayChannel.Reader.ReadAllAsync())
+                await foreach (var (moves, limit, gameId, result) in _replayChannel.Reader.ReadAllAsync())
                 {
-                    AppendLog($"[观战] 开始播放对局动画，步数: {moves.Count}");
-                    await ReplayGameInternalAsync(moves, limit);
+                    string gameInfo = gameId > 0 ? $"第 {gameId} 局" : "外部棋谱";
+                    AppendLog($"[观战] {gameInfo} 开始播放，共 {moves.Count} 步");
+                    
+                    // 立即更新 UI 上的局号和结果
+                    Dispatcher.Invoke(() => {
+                        GameIdLabel.Text = gameId > 0 ? gameId.ToString() : "外部";
+                        GameResultLabel.Text = $"({result})";
+                    });
+
+                    await ReplayGameInternalAsync(moves, limit, gameId, result);
                 }
             }
             catch (ChannelClosedException) { }
         }
 
-        private async Task ReplayGameInternalAsync(List<Move> historyMoves, int maxMovesLimit = 0)
+        private async Task ReplayGameInternalAsync(List<Move> historyMoves, int maxMovesLimit = 0, int gameId = 0, string result = "")
         {
             Board uiBoard = new Board();
             uiBoard.Reset();
@@ -163,6 +178,8 @@ namespace ChineseChessAI
                 RefreshBoardOnly(uiBoard);
                 StepProgressLabel.Text = $"0 / {historyMoves.Count}";
                 RemainingStepsLabel.Text = maxMovesLimit > 0 ? maxMovesLimit.ToString() : historyMoves.Count.ToString();
+                GameIdLabel.Text = gameId > 0 ? gameId.ToString() : "外部";
+                GameResultLabel.Text = string.IsNullOrEmpty(result) ? "" : $"({result})";
             });
 
             int currentStep = 0;
@@ -195,14 +212,13 @@ namespace ChineseChessAI
                 await Task.Delay(1500);
             }
 
-            if (_replayChannel.Reader.Count == 0)
+            // 每一局最后一步都强制停顿 10 秒
+            await Task.Delay(10000);
+
+            if (_isManualReplayActive && _replayChannel.Reader.Count == 0)
             {
-                await Task.Delay(3000);
-                if (_isManualReplayActive)
-                {
-                    _isManualReplayActive = false;
-                    AppendLog("[观战] 手动棋谱播放完毕，已恢复接收后台最新实战对局...");
-                }
+                _isManualReplayActive = false;
+                AppendLog("[观战] 手动棋谱播放完毕，已恢复接收后台最新实战对局...");
             }
         }
 
@@ -224,13 +240,15 @@ namespace ChineseChessAI
             {
                 if (_orchestrator.IsTraining) return;
                 var config = (TrainingConfig)DataContext;
-                if (!int.TryParse(config.MaxMoves, out int maxMoves) || maxMoves <= 0) return;
-                if (!int.TryParse(config.ExploreMoves, out int exploreMoves) || exploreMoves < 0) return;
-                if (!float.TryParse(config.MaterialBias, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float materialBias)) return;
                 if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0) return;
 
                 StartLeagueBtn.IsEnabled = false;
-                await _orchestrator.StartLeagueTrainingAsync(populationSize, maxMoves, exploreMoves, materialBias);
+                // 使用推荐默认值，AI DNA 将在对局中起主导作用
+                await _orchestrator.StartLeagueTrainingAsync(
+                    populationSize: populationSize, 
+                    maxMoves: 150, 
+                    exploreMoves: 40, 
+                    materialBias: 0.1f);
             }
             catch (Exception ex)
             {
@@ -241,10 +259,7 @@ namespace ChineseChessAI
 
         public class TrainingConfig
         {
-            public string MaxMoves { get; set; } = "150";
-            public string ExploreMoves { get; set; } = "40";
-            public string MaterialBias { get; set; } = "0.1";
-            public string PopulationSize { get; set; } = "10000";
+            public string PopulationSize { get; set; } = "50";
         }
 
         public void OnReplayLastClick(object sender, RoutedEventArgs e)
@@ -257,65 +272,13 @@ namespace ChineseChessAI
             }
         }
 
-        public void OnLoadFileClick(object sender, RoutedEventArgs e)
-        {
-            var openFileDialog = new Microsoft.Win32.OpenFileDialog
-            {
-                Title = "选择文本棋谱文件",
-                Filter = "Text/PGN files (*.txt;*.pgn)|*.txt;*.pgn|All files (*.*)|*.*",
-                InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "game_logs")
-            };
-
-            if (openFileDialog.ShowDialog() == true)
-            {
-                try
-                {
-                    string fileContent = File.ReadAllText(openFileDialog.FileName);
-                    string movesStr = "";
-                    if (fileContent.Contains("棋谱:"))
-                    {
-                        var lines = fileContent.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                        foreach (var line in lines) if (line.StartsWith("棋谱:")) { movesStr = line.Substring(3).Trim(); break; }
-                    }
-                    else
-                    {
-                        movesStr = System.Text.RegularExpressions.Regex.Replace(fileContent, @"\[[^\]]*\]", "");
-                        movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\{[^}]*\}", "");
-                        movesStr = System.Text.RegularExpressions.Regex.Replace(movesStr, @"\b\d+\.", "");
-                        movesStr = movesStr.Replace("1-0", "").Replace("0-1", "").Replace("1/2-1/2", "").Replace("*", "");
-                    }
-
-                    var moveList = new List<Move>();
-                    var rawMoves = movesStr.Split(new[] { ' ', '\n', '\r', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries);
-                    var tempBoard = new Board(); tempBoard.Reset();
-                    var generator = new MoveGenerator();
-                    foreach (var mStr in rawMoves)
-                    {
-                        string? ucci = NotationConverter.ConvertToUcci(tempBoard, mStr, generator);
-                        if (!string.IsNullOrEmpty(ucci))
-                        {
-                            var move = NotationConverter.UcciToMove(ucci);
-                            if (move != null) { moveList.Add(move.Value); tempBoard.Push(move.Value.From, move.Value.To); }
-                        }
-                    }
-                    if (moveList.Count > 0)
-                    {
-                        _isManualReplayActive = true;
-                        AppendLog($"[观战] 已成功加载文本棋谱，共 {moveList.Count} 步。");
-                        _replayChannel.Writer.TryWrite((moveList, 0));
-                    }
-                }
-                catch (Exception ex) { MessageBox.Show($"解析失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error); }
-            }
-        }
-
         public void OnOpenMasterJsonClick(object sender, RoutedEventArgs e)
         {
             var openFileDialog = new Microsoft.Win32.OpenFileDialog
             {
-                Title = "打开大师 JSON 棋谱",
-                Filter = "Master JSON (*.json)|*.json",
-                InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "master_data")
+                Title = "打开 JSON 棋谱",
+                Filter = "Chess JSON (*.json)|*.json",
+                InitialDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data")
             };
 
             if (openFileDialog.ShowDialog() == true)
@@ -349,13 +312,13 @@ namespace ChineseChessAI
                         if (moveList.Count > 0)
                         {
                             _isManualReplayActive = true;
-                            AppendLog($"[观战] 精准加载 JSON 棋谱 ({Path.GetFileName(openFileDialog.FileName)})，共 {moveList.Count} 步。");
-                            _replayChannel.Writer.TryWrite((moveList, 0));
+                            AppendLog($"[观战] 加载 JSON 棋谱 ({Path.GetFileName(openFileDialog.FileName)})，共 {moveList.Count} 步。");
+                            _replayChannel.Writer.TryWrite((moveList, 0, 0, "手动"));
                         }
                     }
                     else
                     {
-                        // 兼容尝试：旧版 JSON 处理
+                        // 尝试作为纯训练样本列表加载 (如 league_data)
                         var examples = System.Text.Json.JsonSerializer.Deserialize<List<TrainingExample>>(json);
                         if (examples != null && examples.Count > 1)
                         {
@@ -366,8 +329,8 @@ namespace ChineseChessAI
                                 if (m != null) moveList.Add(m.Value);
                             }
                             _isManualReplayActive = true;
-                            AppendLog($"[观战] 从旧版 JSON 还原棋谱，共 {moveList.Count} 步。");
-                            _replayChannel.Writer.TryWrite((moveList, 0));
+                            AppendLog($"[观战] 加载自对弈样本 ({Path.GetFileName(openFileDialog.FileName)})，共 {moveList.Count} 步。");
+                            _replayChannel.Writer.TryWrite((moveList, 0, 0, "回溯"));
                         }
                     }
                 }

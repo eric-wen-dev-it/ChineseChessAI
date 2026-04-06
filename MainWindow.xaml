@@ -66,43 +66,32 @@
 
             <Border Grid.Row="0" BorderBrush="#555" BorderThickness="1" Margin="0,0,0,10" Padding="10" CornerRadius="5" Background="#2A2A2A">
                 <StackPanel>
-                    <TextBlock Text="⚙️ 炼丹炉超参数设置" Foreground="White" FontWeight="Bold" Margin="0,0,0,10" FontSize="14"/>
-                    <Grid Margin="0,0,0,8">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="强制平局步数 (Max Moves):" Foreground="#CCC" VerticalAlignment="Center"/>
-                        <TextBox Text="{Binding MaxMoves, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
-                    </Grid>
-                    <Grid Margin="0,0,0,8">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="高温探索步数 (Explore):" Foreground="#CCC" VerticalAlignment="Center"/>
-                        <TextBox Text="{Binding ExploreMoves, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
-                    </Grid>
-                    <Grid Margin="0,0,0,8">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="破冰微调偏置 (Material Bias):" Foreground="#CCC" VerticalAlignment="Center"/>
-                        <TextBox Text="{Binding MaterialBias, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
-                    </Grid>
+                    <TextBlock Text="⚙️ 联赛全局配置" Foreground="White" FontWeight="Bold" Margin="0,0,0,10" FontSize="14"/>
                     <Grid>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="60"/></Grid.ColumnDefinitions>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="80"/></Grid.ColumnDefinitions>
                         <TextBlock Text="种群规模 (Population):" Foreground="#CCC" VerticalAlignment="Center"/>
-                        <TextBox Text="{Binding PopulationSize, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0"/>
+                        <TextBox Text="{Binding PopulationSize, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0" Height="22"/>
                     </Grid>
                 </StackPanel>
             </Border>
 
             <StackPanel Grid.Row="1" Margin="0,0,0,10">
                 <Button x:Name="StartLeagueBtn" Content="万王之王联赛" Height="40" FontSize="15" FontWeight="Bold" Click="OnStartLeagueClick" Background="#E91E63" Foreground="White" Margin="0,0,0,8"/>
-                <UniformGrid Columns="2" Margin="0,0,0,8">
-                    <Button Content="观看最新一局" Height="28" FontSize="12" Click="OnReplayLastClick" Background="#2196F3" Foreground="White" Margin="0,0,4,0"/>
-                    <Button Content="打开文本棋谱" Height="28" FontSize="12" Click="OnLoadFileClick" Background="#FF9800" Foreground="White" Margin="4,0,0,0"/>
-                </UniformGrid>
+                <Button Content="观看最新一局" Height="32" FontSize="13" Click="OnReplayLastClick" Background="#2196F3" Foreground="White" Margin="0,0,0,8"/>
                 <Button Content="导入数据集 (PGN/TXT)" Height="28" FontSize="12" Click="OnLoadDatasetClick" Background="#9C27B0" Foreground="White" Margin="0,0,0,8"/>
-                <Button Content="📁 打开大师 JSON" Height="32" FontSize="13" FontWeight="Bold" Click="OnOpenMasterJsonClick" Background="#607D8B" Foreground="White"/>
+                <Button Content="📁 打开 JSON 棋谱" Height="32" FontSize="13" FontWeight="Bold" Click="OnOpenMasterJsonClick" Background="#607D8B" Foreground="White"/>
             </StackPanel>
 
             <StackPanel Grid.Row="2" Margin="0,0,0,10">
                 <TextBlock Text="平均 Loss:" Foreground="White" FontSize="12"/>
                 <TextBlock x:Name="LossLabel" Text="0.0000" Foreground="Yellow" FontSize="16" FontWeight="Bold" Margin="0,0,0,5"/>
+                
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                    <TextBlock Text="正在观战: #" Foreground="SkyBlue" FontSize="14" FontWeight="Bold"/>
+                    <TextBlock x:Name="GameIdLabel" Text="---" Foreground="SkyBlue" FontSize="16" FontWeight="Bold"/>
+                    <TextBlock x:Name="GameResultLabel" Text="" Foreground="#FFD700" FontSize="14" FontWeight="Bold" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,2">
                     <TextBlock Text="对局进度: " Foreground="White" FontSize="13"/>
                     <TextBlock x:Name="StepProgressLabel" Text="0 / 0" Foreground="#00FF7F" FontSize="14" FontWeight="Bold"/>
@@ -116,7 +105,8 @@
 
             <TextBlock Grid.Row="3" Text="训练日志:" Foreground="White" Margin="0,5,0,2"/>
             <TextBox x:Name="LogBox" Grid.Row="4" VerticalScrollBarVisibility="Auto" IsReadOnly="True" 
-                     Background="Black" Foreground="Lime" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"/>
+                     Background="Black" Foreground="Lime" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"
+                     TextChanged="OnLogBoxTextChanged"/>
         </Grid>
 
         <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="20,0,20,15">

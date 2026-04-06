@@ -39,13 +39,13 @@ namespace ChineseChessAI.Training
     {
         public event Action<string> OnLog;
         public event Action<float> OnLossUpdated;
-        public event Action<List<Move>, int> OnReplayRequested;
+        public event Action<List<Move>, int, int, string> OnReplayRequested; // 增加结果参数
         public event Action OnTrainingStopped;
         public event Action<string> OnError;
 
         public bool IsTraining { get; private set; } = false;
-        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(500000, "data/master_data");
-        public ReplayBuffer LeagueBuffer { get; private set; } = new ReplayBuffer(200000, "data/league_data");
+        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(5000000, "data/master_data"); // 提升至 500 万条
+        public ReplayBuffer LeagueBuffer { get; private set; } = new ReplayBuffer(1000000, "data/league_data"); // 提升至 100 万条
 
         private LeagueManager _leagueManager;
         private static readonly object _gpuTrainingLock = new object();
@@ -75,10 +75,10 @@ namespace ChineseChessAI.Training
                 try
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
-                    Log($"[配置] 步数上限: {maxMoves} | 高温探索: {exploreMoves} | 破冰偏置: {materialBias}");
 
-                    MasterBuffer.LoadOldSamples(int.MaxValue);
-                    LeagueBuffer.LoadOldSamples(int.MaxValue);
+                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue);
+                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue);
+                    Log($"[装载] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
 
                     const int maxParallelGames = 4;
                     int gameCounter = 0;
@@ -119,6 +119,10 @@ namespace ChineseChessAI.Training
                                                                     lowTempA: agentMetaA.Temperature, lowTempB: agentMetaB.Temperature, 
                                                                     simsA: agentMetaA.MctsSimulations, simsB: agentMetaB.MctsSimulations);
                                         
+                                        int currentId = Interlocked.Increment(ref gameCounter);
+                                        Log($"[对局 #{currentId} 开始] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0} DNA:S{agentMetaA.MctsSimulations}/C{agentMetaA.Cpuct:F1}/T{agentMetaA.Temperature:F1}) " +
+                                            $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1})");
+
                                         bool aIsRed = Random.Shared.Next(2) == 0;
                                         var result = await selfPlay.RunGameAsync(aIsRed, null);
 
@@ -139,12 +143,9 @@ namespace ChineseChessAI.Training
                                             if (result.ExamplesA.Count > 0) LeagueBuffer.AddRange(result.ExamplesA);
                                             if (result.ExamplesB.Count > 0) LeagueBuffer.AddRange(result.ExamplesB);
 
-                                            Log($"[对阵] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0} DNA:S{agentMetaA.MctsSimulations}/C{agentMetaA.Cpuct:F1}/T{agentMetaA.Temperature:F1}) " +
-                                                $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1}) " +
-                                                $"| {result.ResultStr} | {result.MoveCount}步");
+                                            Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
 
-                                            Interlocked.Increment(ref gameCounter);
-                                            OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves);
+                                            OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
                                         }
                                     }
                                     finally { lockSecond.Release(); }
