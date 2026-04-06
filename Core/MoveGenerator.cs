@@ -78,7 +78,15 @@ namespace ChineseChessAI.Core
 
             foreach (var m in attacks)
             {
-                if (m.To == enemyKingIndex)
+                if (m.To != enemyKingIndex)
+                    continue;
+
+                // 验证该招法合法（不导致自方将暴露）
+                sbyte captured = board.PerformMoveInternal(m.From, m.To);
+                bool safe = IsKingSafe(board, isRedAttacker);
+                board.UndoMoveInternal(m.From, m.To, captured);
+
+                if (safe)
                     return m;
             }
 

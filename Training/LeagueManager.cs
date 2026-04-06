@@ -17,17 +17,16 @@ namespace ChineseChessAI.Training
         public string ModelPath { get; set; } = "";
         public DateTime LastActive { get; set; } = DateTime.Now;
 
-        // --- 个性化基因 (性格超参数) ---
-        public double Temperature { get; set; } = 1.0;     // 探索温度 [0.1, 2.0]
-        public double Cpuct { get; set; } = 2.5;           // 探索常数 [1.0, 5.0]
-        public int MctsSimulations { get; set; } = 400;    // 模拟次数 [100, 800]
+        public double Temperature { get; set; } = 1.0;
+        public double Cpuct { get; set; } = 2.5;
+        public int MctsSimulations { get; set; } = 400;
 
         public void RandomizePersonality(Random? customRnd = null)
         {
             var rnd = customRnd ?? Random.Shared;
-            Temperature = 0.1 + rnd.NextDouble() * 1.9;    // 随机温度 [0.1, 2.0]
-            Cpuct = 1.0 + rnd.NextDouble() * 4.0;          // 随机好奇心 [1.0, 5.0]
-            MctsSimulations = 100 + rnd.Next(701);         // 随机思考深度 [100, 800]
+            Temperature = 0.1 + rnd.NextDouble() * 1.9;
+            Cpuct = 1.0 + rnd.NextDouble() * 4.0;
+            MctsSimulations = 100 + rnd.Next(701);
         }
     }
 
@@ -36,6 +35,9 @@ namespace ChineseChessAI.Training
         private readonly string _metadataPath;
         private readonly string _modelsDir;
         private List<AgentMetadata> _agents = new List<AgentMetadata>();
+        
+        // 【公平性核心】：全局参赛待办队列
+        private List<int> _waitList = new List<int>();
         private readonly object _lock = new object();
 
         public LeagueManager(int populationSize = 10000)
@@ -43,10 +45,7 @@ namespace ChineseChessAI.Training
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             _metadataPath = Path.Combine(baseDir, "data", "league_metadata.json");
             _modelsDir = Path.Combine(baseDir, "data", "models", "league");
-
-            if (!Directory.Exists(_modelsDir))
-                Directory.CreateDirectory(_modelsDir);
-
+            if (!Directory.Exists(_modelsDir)) Directory.CreateDirectory(_modelsDir);
             LoadMetadata(populationSize);
         }
 
@@ -60,41 +59,24 @@ namespace ChineseChessAI.Training
                     {
                         string json = File.ReadAllText(_metadataPath);
                         _agents = JsonSerializer.Deserialize<List<AgentMetadata>>(json) ?? new List<AgentMetadata>();
-                        
-                        // 【核心增强】：不仅检查默认值，还要检查是否发生了“随机数同步（即不同智能体性格一模一样）”
-                        bool needFix = _agents.Count > 1 && 
-                                       _agents.Take(10).All(a => a.MctsSimulations == _agents[0].MctsSimulations && a.Cpuct == _agents[0].Cpuct);
-
-                        if (needFix || (_agents.Count > 0 && _agents.All(a => a.MctsSimulations == 400 && a.Cpuct == 2.5)))
-                        {
-                            var fixRnd = new Random();
-                            foreach (var agent in _agents) agent.RandomizePersonality(fixRnd);
-                            SaveMetadata();
-                        }
                     }
-                    catch
-                    {
-                        _agents = new List<AgentMetadata>();
-                    }
+                    catch { _agents = new List<AgentMetadata>(); }
                 }
 
-                // 补齐到 populationSize
                 if (_agents.Count < populationSize)
                 {
-                    // 【核心修复】：使用同一个随机数实例连续生成，防止高频创建导致的种子重合
-                    var seedRnd = new Random(); 
+                    var seedRnd = new Random();
                     for (int i = _agents.Count; i < populationSize; i++)
                     {
-                        var agent = new AgentMetadata
-                        {
-                            Id = i,
-                            ModelPath = Path.Combine(_modelsDir, $"agent_{i}.pt")
-                        };
-                        agent.RandomizePersonality(seedRnd); // 注入唯一的随机实例
+                        var agent = new AgentMetadata { Id = i, ModelPath = Path.Combine(_modelsDir, $"agent_{i}.pt") };
+                        agent.RandomizePersonality(seedRnd);
                         _agents.Add(agent);
                     }
                     SaveMetadata();
                 }
+
+                // 初始化待赛队列：包含所有智能体 ID
+                _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();
             }
         }
 
@@ -107,40 +89,48 @@ namespace ChineseChessAI.Training
             }
         }
 
+        public AgentMetadata? GetAgentMeta(int id)
+        {
+            lock (_lock) return _agents.FirstOrDefault(a => a.Id == id);
+        }
+
         public (AgentMetadata, AgentMetadata) PickMatch()
         {
             lock (_lock)
             {
-                var rnd = Random.Shared;
-                int idx1 = rnd.Next(_agents.Count);
-                var agentA = _agents[idx1];
+                // 1. 如果待赛队列空了，重置它，开始新的一轮大循环
+                if (_waitList.Count == 0)
+                {
+                    _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();
+                }
 
-                // 【核心改进】：ELO 邻近匹配策略 (±300 范围内挑选)
-                var candidates = _agents.Where(a => a.Id != agentA.Id && Math.Abs(a.Elo - agentA.Elo) < 300).ToList();
+                // 2. 取出队列头部的智能体作为 Agent A (确保他这一轮一定参赛)
+                int idA = _waitList[0];
+                _waitList.RemoveAt(0);
+                var agentA = _agents.First(a => a.Id == idA);
+
+                // 3. 在全量池中寻找一个 ELO 最接近的对手 Agent B
+                // 优先从还没打过这一轮的人（待赛队列）里找，如果待赛队列里没人了，则从全量池找
+                var searchPool = _waitList.Count > 0 ? _waitList : _agents.Select(a => a.Id).ToList();
                 
-                AgentMetadata agentB;
-                if (candidates.Count > 0)
-                {
-                    agentB = candidates[rnd.Next(candidates.Count)];
-                }
-                else
-                {
-                    // 如果范围内没人，则选最接近的一个
-                    agentB = _agents.Where(a => a.Id != agentA.Id)
-                                    .OrderBy(a => Math.Abs(a.Elo - agentA.Elo))
-                                    .First();
-                }
+                var agentBId = searchPool
+                    .Where(id => id != idA)
+                    .OrderBy(id => Math.Abs(_agents.First(a => a.Id == id).Elo - agentA.Elo))
+                    .Take(10) // 在最接近的 10 人中随机选一个，增加多样性
+                    .OrderBy(_ => Random.Shared.Next())
+                    .First();
 
+                // 如果 Agent B 也在待赛队列中，同步将其移除，防止他这一轮打两次
+                _waitList.Remove(agentBId);
+
+                var agentB = _agents.First(a => a.Id == agentBId);
                 return (agentA, agentB);
             }
         }
 
         public List<AgentMetadata> GetTopAgents(int count = 10)
         {
-            lock (_lock)
-            {
-                return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
-            }
+            lock (_lock) return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
         }
 
         public void UpdateResult(int agentId, float result, double opponentElo)
@@ -149,15 +139,12 @@ namespace ChineseChessAI.Training
             {
                 var agent = _agents.FirstOrDefault(a => a.Id == agentId);
                 if (agent == null) return;
-
                 agent.GamesPlayed++;
                 if (result > 0.5f) agent.Wins++;
                 else if (result < -0.5f) agent.Losses++;
                 else agent.Draws++;
-
-                // K-factor = 32
                 double expectedScore = 1.0 / (1.0 + Math.Pow(10, (opponentElo - agent.Elo) / 400.0));
-                double actualScore = (result + 1.0) / 2.0; // [-1, 1] -> [0, 1]
+                double actualScore = (result + 1.0) / 2.0;
                 agent.Elo += 32 * (actualScore - expectedScore);
                 agent.LastActive = DateTime.Now;
             }

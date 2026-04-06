@@ -57,7 +57,8 @@ namespace ChineseChessAI.MCTS
             double w_raw = W;
 
             int n = n_raw + vl;
-            double q = n == 0 ? 0 : (w_raw - vl) / n;
+            // 【核心修复 P0】：取负号。Negamax 结构下，子节点的 Q 是对手视角，父节点需取 -Q。
+            double q = n == 0 ? 0 : -(w_raw - vl) / n;
             double u = cPuct * P * Math.Sqrt(parentN) / (1 + n);
             return q + u;
         }

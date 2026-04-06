@@ -28,7 +28,7 @@ namespace ChineseChessAI
             InitializeBoardUI();
             this.Loaded += (s, e) => DrawBoardLines();
 
-            _replayChannel = Channel.CreateBounded<(List<Move>, int)>(new BoundedChannelOptions(1)
+            _replayChannel = Channel.CreateBounded<(List<Move>, int)>(new BoundedChannelOptions(10)
             {
                 FullMode = BoundedChannelFullMode.DropOldest
             });
@@ -171,12 +171,6 @@ namespace ChineseChessAI
 
             foreach (var move in historyMoves)
             {
-                if (_replayChannel.Reader.Count > 0)
-                {
-                    AppendLog("[观战] 接收到最新指令，中断当前回放...");
-                    break;
-                }
-
                 Dispatcher.Invoke(() =>
                 {
                     RefreshBoardOnly(uiBoard);
@@ -184,8 +178,6 @@ namespace ChineseChessAI
                 });
 
                 await Task.Delay(800);
-
-                if (_replayChannel.Reader.Count > 0) break;
 
                 uiBoard.Push(move.From, move.To);
                 currentStep++;
@@ -251,7 +243,7 @@ namespace ChineseChessAI
         {
             public string MaxMoves { get; set; } = "150";
             public string ExploreMoves { get; set; } = "40";
-            public string MaterialBias { get; set; } = "0.6";
+            public string MaterialBias { get; set; } = "0.1";
             public string PopulationSize { get; set; } = "10000";
         }
 
