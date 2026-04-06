@@ -77,8 +77,8 @@ namespace ChineseChessAI.Training
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
 
-                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue, logAction: Log);
-                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue, logAction: Log);
+                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r));
+                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r));
                     Log($"[装载] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
 
                     const int maxParallelGames = 4;
@@ -199,8 +199,9 @@ namespace ChineseChessAI.Training
                     if (_activeAgentQueue.TryDequeue(out int oldId) && _agentPool.TryRemove(oldId, out var oldLazy))
                     {
                         if (oldLazy.IsValueCreated) oldLazy.Value.Dispose();
-                        // 【改进 P2】：同步清理信号量，防止无界增长
-                        _agentActiveLocks.TryRemove(oldId, out _);
+                        // 【修复 P2】：显式释放信号量句柄，防止句柄泄漏
+                        if (_agentActiveLocks.TryRemove(oldId, out var removedSem))
+                            removedSem.Dispose();
                     }
                 }
                 return pa;
@@ -378,26 +379,15 @@ namespace ChineseChessAI.Training
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}.json"), JsonSerializer.Serialize(masterData));
 
-                // 【核心修复 P0】：大师数据镜像增广 (物理上平衡红黑偏差)
+                // 【核心修复 P0】：大师数据镜像增广 (修正审计第17轮发现的数学错误)
                 var flippedExamples = examples.Select(ex => {
-                    // 1. 状态 180 度翻转 + 角色通道互换 (StateEncoder 处理的是 14 层数据)
-                    float[] flippedState = new float[14 * 10 * 9];
-                    for (int layer = 0; layer < 14; layer++) {
-                        int targetLayer = layer < 7 ? layer + 7 : layer - 7; // 红黑通道对调
-                        for (int r = 0; r < 10; r++) {
-                            for (int c = 0; c < 9; c++) {
-                                // 180 度旋转：(r, c) -> (9-r, 8-c)
-                                flippedState[targetLayer * 90 + (9 - r) * 9 + (8 - c)] = ex.State[layer * 90 + r * 9 + c];
-                            }
-                        }
-                    }
-                    // 2. 策略坐标翻转
+                    // 1. 策略坐标翻转
                     float[] densePi = new float[8100]; foreach (var p in ex.SparsePolicy) densePi[p.Index] = p.Prob;
                     float[] flippedPi = StateEncoder.FlipPolicy(densePi);
                     var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
                     
-                    // 3. 结果取反
-                    return new TrainingExample(flippedState, sparseFlipped, -ex.Value);
+                    // 2. State 和 Value 保持不变 (StateEncoder 已处理轮次翻转)
+                    return new TrainingExample(ex.State, sparseFlipped, ex.Value);
                 }).ToList();
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, new List<string>())));
                 
@@ -433,14 +423,13 @@ namespace ChineseChessAI.Training
                 
                 // 【同步 P0 修复】：对 CSV 数据也进行镜像增广
                 var flippedExamples = examples.Select(ex => {
-                    float[] flippedState = new float[14 * 10 * 9];
-                    for (int layer = 0; layer < 14; layer++) {
-                        int targetLayer = layer < 7 ? layer + 7 : layer - 7;
-                        for (int r = 0; r < 10; r++) for (int c = 0; c < 9; c++) flippedState[targetLayer * 90 + (9 - r) * 9 + (8 - c)] = ex.State[layer * 90 + r * 9 + c];
-                    }
+                    // 1. 策略坐标翻转
                     float[] densePi = new float[8100]; foreach (var p in ex.SparsePolicy) densePi[p.Index] = p.Prob;
                     float[] flippedPi = StateEncoder.FlipPolicy(densePi);
-                    return new TrainingExample(flippedState, flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray(), -ex.Value);
+                    var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
+                    
+                    // 2. State 和 Value 保持不变
+                    return new TrainingExample(ex.State, sparseFlipped, ex.Value);
                 }).ToList();
 
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");

@@ -8,6 +8,35 @@ namespace ChineseChessAI.Core
         private const int ROWS = 10;
         private const int COLS = 9;
 
+        public string GetMoveValidationResult(Board board, Move move)
+        {
+            var pseudoMoves = new List<Move>(64);
+            sbyte piece = board.GetPiece(move.From);
+            if (piece == 0) return "起点无棋子";
+            bool isRed = piece > 0;
+            if (isRed != board.IsRedTurn) return "走子方错误";
+
+            // 1. 检查基础物理走法
+            GeneratePieceMoves(board, move.From, piece, pseudoMoves);
+            if (!pseudoMoves.Any(m => m.From == move.From && m.To == move.To))
+                return "违规移动";
+
+            // 2. 检查是否导致自方被将军（送将）
+            sbyte captured = board.PerformMoveInternal(move.From, move.To);
+            bool safe = IsKingSafe(board, isRed);
+            board.UndoMoveInternal(move.From, move.To, captured);
+            if (!safe) return "自方王受威胁 (送将)";
+
+            // 3. 检查禁手规则（长打/长捉）
+            if (board.GetRepetitionCount() >= 2)
+            {
+                if (IsForbiddenPerpetualMove(board, move))
+                    return "禁手 (违规长打/长捉)";
+            }
+
+            return "合法";
+        }
+
         /// <summary>
         /// 生成当前局面的所有合法走法（已过滤送将、飞将及违反长将/长捉规则的走法）
         /// </summary>

@@ -194,13 +194,16 @@ namespace ChineseChessAI
 
             foreach (var move in historyMoves)
             {
+                bool isLastStep = (currentStep == totalGameSteps - 1);
+                bool isFastMode = (gameId == -1 && !isLastStep);
+
                 Dispatcher.Invoke(() =>
                 {
                     RefreshBoardOnly(uiBoard);
                     _cellButtons[move.From].Tag = "From";
                 });
 
-                await Task.Delay(800);
+                if (!isFastMode) await Task.Delay(800);
 
                 uiBoard.Push(move.From, move.To);
                 currentStep++;
@@ -215,7 +218,7 @@ namespace ChineseChessAI
                     RemainingStepsLabel.Text = Math.Max(0, remaining).ToString();
                 });
 
-                await Task.Delay(1500);
+                if (!isFastMode) await Task.Delay(1500);
             }
 
             // 每一局最后一步都强制停顿 10 秒
