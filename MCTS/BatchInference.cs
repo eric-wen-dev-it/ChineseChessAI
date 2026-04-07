@@ -78,9 +78,9 @@ namespace ChineseChessAI.MCTS
         {
             try
             {
-                if (_isDisposed) 
+                if (_isDisposed)
                 {
-                    foreach (var t in tasks) t.Tcs.TrySetResult((new float[8100], 0f));
+                    foreach (var t in tasks) t.Tcs.TrySetException(new ObjectDisposedException(nameof(BatchInference)));
                     return;
                 }
 
@@ -111,12 +111,11 @@ namespace ChineseChessAI.MCTS
                     tasks[i].Tcs.TrySetResult((policy, value));
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                foreach (var t in tasks) t.Tcs.TrySetResult((new float[8100], 0f));
+                foreach (var t in tasks) t.Tcs.TrySetException(ex);
             }
         }
-
         public void Dispose()
         {
             _isDisposed = true;
