@@ -246,7 +246,16 @@ namespace ChineseChessAI.Training
                     catch { }
                 }
                 catch (Exception ex) { OnError?.Invoke($"[系统故障] {ex.Message}"); }
-                finally { IsTraining = false; _leagueManager?.SaveMetadata(); OnTrainingStopped?.Invoke(); }
+                finally 
+                { 
+                    if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
+                    {
+                        try { await _backgroundLoadTask; } catch { }
+                    }
+                    IsTraining = false; 
+                    _leagueManager?.SaveMetadata(); 
+                    OnTrainingStopped?.Invoke(); 
+                }
             });
         }
 
@@ -326,7 +335,7 @@ namespace ChineseChessAI.Training
             }
             IsTraining = true;
             _cts = new CancellationTokenSource();
-            _currentTrainingTask = Task.Run(() =>
+            _currentTrainingTask = Task.Run(async () =>
             {
                 try
                 {
@@ -335,7 +344,15 @@ namespace ChineseChessAI.Training
                     else if (ext == ".pgn" || ext == ".txt") ProcessPgnDatasetStreaming(filePath, _cts.Token);
                 }
                 catch (Exception ex) { OnError?.Invoke($"[解析错误] {ex.Message}"); }
-                finally { IsTraining = false; OnTrainingStopped?.Invoke(); }
+                finally 
+                { 
+                    if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
+                    {
+                        try { await _backgroundLoadTask; } catch { }
+                    }
+                    IsTraining = false; 
+                    OnTrainingStopped?.Invoke(); 
+                }
             });
         }
 
