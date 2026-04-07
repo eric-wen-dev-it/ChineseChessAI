@@ -59,6 +59,7 @@ namespace ChineseChessAI.Training
 
         private CancellationTokenSource? _cts;
         private Task? _currentTrainingTask;
+        private Task? _backgroundLoadTask;
 
         public void StopTraining()
         {
@@ -76,6 +77,10 @@ namespace ChineseChessAI.Training
             {
                 try { await _currentTrainingTask; } catch { }
             }
+            if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
+            {
+                try { await _backgroundLoadTask; } catch { }
+            }
 
             IsTraining = true;
             _cts = new CancellationTokenSource();
@@ -85,6 +90,10 @@ namespace ChineseChessAI.Training
             _agentPool.Clear();
             _agentActiveLocks.Clear();
 
+            DateTime startTime = DateTime.Now;
+            MasterBuffer.Clear();
+            LeagueBuffer.Clear();
+
             _currentTrainingTask = Task.Run(async () =>
             {
                 try
@@ -92,16 +101,14 @@ namespace ChineseChessAI.Training
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
 
                     // 将数据装载放入独立的后台任务，不阻塞联赛和对局的立即启动
-                    _ = Task.Run(async () =>
+                    _backgroundLoadTask = Task.Run(async () =>
                     {
                         try
                         {
                             Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
-                            MasterBuffer.Clear();
-                            LeagueBuffer.Clear();
                             
-                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
-                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token, cutoffTime: startTime);
+                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token, cutoffTime: startTime);
                             
                             await Task.WhenAll(masterTask, leagueTask);
                             

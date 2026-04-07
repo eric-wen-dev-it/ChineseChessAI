@@ -39,14 +39,19 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public async Task<(int samples, int games)> LoadOldSamplesAsync(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null, CancellationToken cancellationToken = default)
+        public async Task<(int samples, int games)> LoadOldSamplesAsync(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null, CancellationToken cancellationToken = default, DateTime? cutoffTime = null)
         {
             if (!Directory.Exists(_dataDir)) return (0, 0);
 
-            var allPaths = Directory.GetFiles(_dataDir, "*.json");
+            var allFilesInfo = Directory.GetFiles(_dataDir, "*.json").Select(f => new FileInfo(f));
+            if (cutoffTime.HasValue)
+            {
+                allFilesInfo = allFilesInfo.Where(f => f.CreationTime < cutoffTime.Value);
+            }
+
             IEnumerable<string> ordered = randomize 
-                ? allPaths.OrderBy(_ => _random.Next())
-                : allPaths.Select(f => new FileInfo(f)).OrderByDescending(f => f.CreationTime).Select(f => f.FullName);
+                ? allFilesInfo.OrderBy(_ => _random.Next()).Select(f => f.FullName)
+                : allFilesInfo.OrderByDescending(f => f.CreationTime).Select(f => f.FullName);
 
             var files = ordered.Take(maxFiles).ToList();
             int totalFiles = files.Count;
