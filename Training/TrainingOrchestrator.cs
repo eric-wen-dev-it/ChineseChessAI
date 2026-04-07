@@ -232,41 +232,48 @@ namespace ChineseChessAI.Training
         {
             await Task.Run(() =>
             {
-                lock (_gpuTrainingLock)
+                try
                 {
-                    const int batchSize = 128;
-                    const float masterRatio = 0.4f;
-                    const float leagueRatio = 0.6f;
-
-                    foreach (var agentEntry in _agentPool)
+                    lock (_gpuTrainingLock)
                     {
-                        if (token.IsCancellationRequested) return;
+                        const int batchSize = 128;
+                        const float masterRatio = 0.4f;
+                        const float leagueRatio = 0.6f;
 
-                        if (!agentEntry.Value.IsValueCreated) continue;
-                        var pa = agentEntry.Value.Value;
-
-                        var aLock = GetAgentActiveLock(agentEntry.Key);
-                        if (aLock.Wait(0))
+                        foreach (var agentEntry in _agentPool)
                         {
-                            try
+                            if (token.IsCancellationRequested) return;
+
+                            if (!agentEntry.Value.IsValueCreated) continue;
+                            var pa = agentEntry.Value.Value;
+
+                            var aLock = GetAgentActiveLock(agentEntry.Key);
+                            if (aLock.Wait(0))
                             {
-                                var mixedBatch = new List<TrainingExample>();
-                                if (MasterBuffer.Count > 0) mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
-                                if (LeagueBuffer.Count > 0) mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
-                                
-                                if (mixedBatch.Count > 0)
+                                try
                                 {
-                                    pa.Trainer.Train(mixedBatch, epochs: 1);
-                                    var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
-                                    if (meta != null)
+                                    var mixedBatch = new List<TrainingExample>();
+                                    if (MasterBuffer.Count > 0) mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
+                                    if (LeagueBuffer.Count > 0) mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
+                                    
+                                    if (mixedBatch.Count > 0)
                                     {
-                                        lock (GetFileLock(meta.ModelPath)) ModelManager.SaveModel(pa.Model, meta.ModelPath);
+                                        pa.Trainer.Train(mixedBatch, epochs: 1);
+                                        var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
+                                        if (meta != null)
+                                        {
+                                            lock (GetFileLock(meta.ModelPath)) ModelManager.SaveModel(pa.Model, meta.ModelPath);
+                                        }
                                     }
                                 }
+                                finally { aLock.Release(); }
                             }
-                            finally { aLock.Release(); }
                         }
                     }
+                }
+                catch (Exception ex)
+                {
+                    OnError?.Invoke($"[周期训练异常] {ex.Message}");
                 }
             });
         }
