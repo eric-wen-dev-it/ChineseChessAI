@@ -89,9 +89,28 @@ namespace ChineseChessAI.Training
                     {
                         if (examples[0].State != null && examples[0].State.Length == 14 * 90)
                         {
-                            this.AddRange(examples, saveToDisk: false);
-                            totalLoaded += examples.Count;
-                            totalGames++;
+                            // 【核心修复】：完整的审计过滤。如果审计失败，则跳过装载。
+                            // 审计逻辑仅对包含 UCCI 历史的大师数据生效。
+                            bool auditPassed = true;
+                            if (json.StartsWith("{")) 
+                            {
+                                var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
+                                if (masterData != null && masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
+                                {
+                                    auditPassed = AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
+                                }
+                            }
+
+                            if (auditPassed)
+                            {
+                                this.AddRange(examples, saveToDisk: false);
+                                totalLoaded += examples.Count;
+                                totalGames++;
+                            }
+                            else
+                            {
+                                logAction?.Invoke($"[审计拒绝] {fileName}: 存在非法走法，已从训练集中剔除。");
+                            }
                         }
                     }
                 }
@@ -103,7 +122,7 @@ namespace ChineseChessAI.Training
             return (totalLoaded, totalGames);
         }
 
-        private void AuditGame(List<string> ucciHistory, string fileName, Action<string>? logAction, Action<List<Move>, Move, string>? onAuditFailure)
+        private bool AuditGame(List<string> ucciHistory, string fileName, Action<string>? logAction, Action<List<Move>, Move, string>? onAuditFailure)
         {
             var tempBoard = new Board(); tempBoard.Reset();
             var gen = new Core.MoveGenerator();
@@ -113,8 +132,10 @@ namespace ChineseChessAI.Training
             foreach (var ucci in ucciHistory)
             {
                 var move = Utils.NotationConverter.UcciToMove(ucci);
-                if (!move.HasValue) break;
+                if (!move.HasValue) return false;
 
+                // 审计时允许跳过长打/长捉检测（因为大师对局可能包含此类战术，或者规则集略有不同）
+                // 但物理走法和送将必须是合法的。
                 string validationResult = gen.GetMoveValidationResult(tempBoard, move.Value, skipPerpetualCheck: true);
                 if (validationResult != "合法")
                 {
@@ -124,13 +145,14 @@ namespace ChineseChessAI.Training
                     
                     logAction?.Invoke($"[审计警告] {fileName} {msg}");
                     onAuditFailure?.Invoke(history, move.Value, msg);
-                    break; // 发现一处错误即停止后续审计
+                    return false; // 审计失败
                 }
 
                 tempBoard.Push(move.Value.From, move.Value.To);
                 history.Add(move.Value);
                 moveIdx++;
             }
+            return true; // 审计通过
         }
 
         public void AddRange(List<TrainingExample> newExamples, bool saveToDisk = true)
