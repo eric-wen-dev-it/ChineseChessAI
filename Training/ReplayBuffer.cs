@@ -58,33 +58,35 @@ namespace ChineseChessAI.Training
                 string fileName = Path.GetFileName(filePath);
                 try
                 {
-                    string json = File.ReadAllText(filePath);
+                    string json = File.ReadAllText(filePath).TrimStart();
+                    if (string.IsNullOrEmpty(json)) continue;
+
                     List<TrainingExample>? examples = null;
                     
-                    // --- 1. 尝试解析大师数据格式 ---
-                    MasterGameData? masterData = null;
-                    try { masterData = JsonSerializer.Deserialize<MasterGameData>(json); } catch { }
-
-                    if (masterData != null && masterData.Examples != null && masterData.Examples.Count > 0)
+                    // --- 1. 探测 JSON 格式 ---
+                    if (json.StartsWith("{")) // 对象格式，可能是 MasterGameData
                     {
-                        examples = masterData.Examples;
-                        
-                        // 执行审计（但不因审计失败而丢弃数据，仅用于演示和日志）
-                        if (masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
+                        MasterGameData? masterData = null;
+                        try { masterData = JsonSerializer.Deserialize<MasterGameData>(json); } catch { }
+
+                        if (masterData != null && masterData.Examples != null && masterData.Examples.Count > 0)
                         {
-                            AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
+                            examples = masterData.Examples;
+                            // 执行审计
+                            if (masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
+                            {
+                                AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
+                            }
                         }
                     }
-                    else
+                    else if (json.StartsWith("[")) // 数组格式，直接按列表解析
                     {
-                        // --- 2. 尝试解析纯样本数组格式 (Fallback) ---
                         try { examples = JsonSerializer.Deserialize<List<TrainingExample>>(json); } catch { }
                     }
 
-                    // --- 3. 最终装载数据 ---
+                    // --- 2. 最终装载数据 ---
                     if (examples != null && examples.Count > 0)
                     {
-                        // 确保数据维度正确
                         if (examples[0].State != null && examples[0].State.Length == 14 * 90)
                         {
                             this.AddRange(examples, saveToDisk: false);
@@ -113,7 +115,7 @@ namespace ChineseChessAI.Training
                 var move = Utils.NotationConverter.UcciToMove(ucci);
                 if (!move.HasValue) break;
 
-                string validationResult = gen.GetMoveValidationResult(tempBoard, move.Value);
+                string validationResult = gen.GetMoveValidationResult(tempBoard, move.Value, skipPerpetualCheck: true);
                 if (validationResult != "合法")
                 {
                     sbyte piece = tempBoard.GetPiece(move.Value.From);

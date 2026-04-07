@@ -8,7 +8,7 @@ namespace ChineseChessAI.Core
         private const int ROWS = 10;
         private const int COLS = 9;
 
-        public string GetMoveValidationResult(Board board, Move move)
+        public string GetMoveValidationResult(Board board, Move move, bool skipPerpetualCheck = false)
         {
             var pseudoMoves = new List<Move>(64);
             sbyte piece = board.GetPiece(move.From);
@@ -28,7 +28,7 @@ namespace ChineseChessAI.Core
             if (!safe) return "自方王受威胁 (送将)";
 
             // 3. 检查禁手规则（长打/长捉）
-            if (board.GetRepetitionCount() >= 2)
+            if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
             {
                 if (IsForbiddenPerpetualMove(board, move))
                     return "禁手 (违规长打/长捉)";

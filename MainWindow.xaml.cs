@@ -314,7 +314,8 @@ namespace ChineseChessAI
                 try
                 {
                     string json = File.ReadAllText(openFileDialog.FileName);
-                    var masterData = System.Text.Json.JsonSerializer.Deserialize<MasterGameData>(json);
+                    MasterGameData? masterData = null;
+                    try { masterData = System.Text.Json.JsonSerializer.Deserialize<MasterGameData>(json); } catch { }
 
                     if (masterData != null && masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
                     {
@@ -322,7 +323,6 @@ namespace ChineseChessAI
                         var tempBoard = new Board(); tempBoard.Reset();
                         var generator = new MoveGenerator();
 
-                        // 【核心改进】：维持棋盘状态逐步解析，确保兼容代数记谱法 (如 C2.5)
                         foreach (var rawStr in masterData.MoveHistoryUcci)
                         {
                             string? ucci = NotationConverter.ConvertToUcci(tempBoard, rawStr, generator);
@@ -347,7 +347,9 @@ namespace ChineseChessAI
                     else
                     {
                         // 尝试作为纯训练样本列表加载 (如 league_data)
-                        var examples = System.Text.Json.JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                        List<TrainingExample>? examples = null;
+                        try { examples = System.Text.Json.JsonSerializer.Deserialize<List<TrainingExample>>(json); } catch { }
+                        
                         if (examples != null && examples.Count > 1)
                         {
                             var moveList = new List<Move>();
