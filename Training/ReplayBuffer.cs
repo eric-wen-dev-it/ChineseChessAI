@@ -39,7 +39,7 @@ namespace ChineseChessAI.Training
             catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
         }
 
-        public (int samples, int games) LoadOldSamples(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null)
+        public async Task<(int samples, int games)> LoadOldSamplesAsync(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null, CancellationToken cancellationToken = default)
         {
             if (!Directory.Exists(_dataDir)) return (0, 0);
 
@@ -49,13 +49,24 @@ namespace ChineseChessAI.Training
                 : allPaths.Select(f => new FileInfo(f)).OrderByDescending(f => f.CreationTime).Select(f => f.FullName);
 
             var files = ordered.Take(maxFiles).ToList();
+            int totalFiles = files.Count;
             int totalLoaded = 0;
             int totalGames = 0;
+            int processedCount = 0;
 
             foreach (var filePath in files)
             {
+                if (cancellationToken.IsCancellationRequested) break;
                 if (_count >= _capacity) break;
                 string fileName = Path.GetFileName(filePath);
+                processedCount++;
+                
+                if (processedCount % 1000 == 0)
+                {
+                    logAction?.Invoke($"[装载进度] '{Path.GetFileName(_dataDir)}': 已处理 {processedCount}/{totalFiles} 文件, 有效 {totalGames} 局 ({totalLoaded} 条)");
+                    await Task.Yield(); // 释放控制权，防止阻塞后台线程导致 UI/其他任务饿死
+                }
+
                 try
                 {
                     string json = File.ReadAllText(filePath).TrimStart();

@@ -91,8 +91,8 @@ namespace ChineseChessAI.Training
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
 
-                    var (masterSamples, masterGames) = MasterBuffer.LoadOldSamples(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r));
-                    var (leagueSamples, leagueGames) = LeagueBuffer.LoadOldSamples(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r));
+                    var (masterSamples, masterGames) = await MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                    var (leagueSamples, leagueGames) = await LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
                     Log($"[装载] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
 
                     const int maxParallelGames = 4;
