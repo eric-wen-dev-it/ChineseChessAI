@@ -174,5 +174,15 @@ namespace ChineseChessAI.Training
         }
 
         public int Count => _count;
+
+        public void Clear()
+        {
+            lock (_buffer)
+            {
+                _count = 0;
+                _head = 0;
+                Array.Clear(_buffer, 0, _capacity);
+            }
+        }
     }
 }

@@ -97,6 +97,9 @@ namespace ChineseChessAI.Training
                         try
                         {
                             Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
+                            MasterBuffer.Clear();
+                            LeagueBuffer.Clear();
+                            
                             var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
                             var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
                             
@@ -439,8 +442,9 @@ namespace ChineseChessAI.Training
                 }).ToList();
 
                 var masterData = new MasterGameData(examples, standardizedMoves);
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}.json"), JsonSerializer.Serialize(masterData));
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string guid = Guid.NewGuid().ToString("N");
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}_{guid}.json"), JsonSerializer.Serialize(masterData));
 
                 // 【核心修复 P0】：大师数据镜像增广 (修正审计第17轮发现的数学错误)
                 var flippedExamples = examples.Select(ex => {
@@ -473,7 +477,7 @@ namespace ChineseChessAI.Training
                     return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
                 }).ToList();
 
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
                 
                 totalGames++;
             }
@@ -536,9 +540,10 @@ namespace ChineseChessAI.Training
                     return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
                 }).ToList();
 
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string guid = Guid.NewGuid().ToString("N");
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
                 totalGames++;
             }
         }

@@ -380,11 +380,12 @@ namespace ChineseChessAI.Core
         public bool IsThreateningToMate(Board board, bool isRedAttacker)
         {
             // 【BUG B 修复】：直接通过伪合法走法 + IsKingSafe 判定是否还有合法走法，绕过 GenerateLegalMoves 避免无限递归。
-            bool isRed = board.IsRedTurn;
+            // 对方是被攻击方，如果对方没有任何安全合法的走法，说明已形成绝杀威胁。
+            bool isDefenderRed = !isRedAttacker;
             for (int i = 0; i < 90; i++)
             {
                 sbyte piece = board.GetPiece(i);
-                if (piece == 0 || (isRed ? piece < 0 : piece > 0)) continue;
+                if (piece == 0 || (isDefenderRed ? piece < 0 : piece > 0)) continue;
 
                 var pseudoMoves = new List<Move>();
                 GeneratePieceMoves(board, i, piece, pseudoMoves);
@@ -392,7 +393,7 @@ namespace ChineseChessAI.Core
                 foreach (var move in pseudoMoves)
                 {
                     sbyte captured = board.PerformMoveInternal(move.From, move.To);
-                    bool safe = IsKingSafe(board, isRed);
+                    bool safe = IsKingSafe(board, isDefenderRed);
                     board.UndoMoveInternal(move.From, move.To, captured);
 
                     if (safe) return false; // 只要有一个合法走法，就不是杀（困毙）

@@ -77,7 +77,7 @@
 
             <StackPanel Grid.Row="1" Margin="0,0,0,10">
                 <Button x:Name="StartLeagueBtn" Content="万王之王联赛" Height="40" FontSize="15" FontWeight="Bold" Click="OnStartLeagueClick" Background="#E91E63" Foreground="White" Margin="0,0,0,8"/>
-                <Button Content="观看最新一局" Height="32" FontSize="13" Click="OnReplayLastClick" Background="#2196F3" Foreground="White" Margin="0,0,0,8"/>
+                <Button Content="恢复自动观战" Height="32" FontSize="13" Click="OnReplayLastClick" Background="#2196F3" Foreground="White" Margin="0,0,0,8"/>
                 <Button Content="导入数据集 (PGN/TXT)" Height="28" FontSize="12" Click="OnLoadDatasetClick" Background="#9C27B0" Foreground="White" Margin="0,0,0,8"/>
                 <Button Content="📁 打开 JSON 棋谱" Height="32" FontSize="13" FontWeight="Bold" Click="OnOpenMasterJsonClick" Background="#607D8B" Foreground="White"/>
             </StackPanel>
