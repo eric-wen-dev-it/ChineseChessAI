@@ -32,7 +32,7 @@ namespace ChineseChessAI.MCTS
             _batchInference = new BatchInference(_model, batchSize);
         }
 
-        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999)
+        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999, System.Threading.CancellationToken cancellationToken = default)
         {
             var root = new MCTSNode(null, 1.0);
             try
@@ -53,6 +53,7 @@ namespace ChineseChessAI.MCTS
                 int taskSims = (t == 0) ? baseSims + extraSims : baseSims;
                 for (int i = 0; i < taskSims; i++)
                 {
+                    if (cancellationToken.IsCancellationRequested) break;
                     try
                     {
                         await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
@@ -120,7 +121,7 @@ namespace ChineseChessAI.MCTS
                         var legalMoves = _generator.GenerateLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
-                            node.Update(board.IsRedTurn ? -1.0 : 1.0);
+                            node.Update(-1.0);
                             return;
                         }
 

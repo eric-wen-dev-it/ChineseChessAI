@@ -60,12 +60,19 @@ namespace ChineseChessAI.Training
         private SemaphoreSlim GetAgentActiveLock(int id) => _agentActiveLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
         private object GetFileLock(string path) => _fileLocks.GetOrAdd(path, _ => new object());
 
-        public void StopTraining() => IsTraining = false;
+        private CancellationTokenSource _cts;
+
+        public void StopTraining()
+        {
+            IsTraining = false;
+            _cts?.Cancel();
+        }
 
         public async Task StartLeagueTrainingAsync(int populationSize = 50, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.1f)
         {
             if (IsTraining) return;
             IsTraining = true;
+            _cts = new CancellationTokenSource();
 
             _leagueManager = new LeagueManager(populationSize);
             foreach (var lazyAgent in _agentPool.Values) if (lazyAgent.IsValueCreated) lazyAgent.Value.Dispose();
@@ -125,7 +132,7 @@ namespace ChineseChessAI.Training
                                             $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1})");
 
                                         bool aIsRed = Random.Shared.Next(2) == 0;
-                                        var result = await selfPlay.RunGameAsync(aIsRed, null);
+                                        var result = await selfPlay.RunGameAsync(aIsRed, null, _cts.Token);
 
                                         if (result.IsSuccess)
                                         {
@@ -166,7 +173,8 @@ namespace ChineseChessAI.Training
                         if (gameCounter >= nextTrainAt)
                         {
                             nextTrainAt += 20;
-                            _ = Task.Run(() => PerformDiverseTraining());
+                            var trainTask = PerformDiverseTrainingAsync(_cts.Token);
+                            gameTasks.Enqueue(trainTask);
                         }
 
                         if (gameCounter >= nextLogAt)
@@ -207,42 +215,47 @@ namespace ChineseChessAI.Training
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         }
 
-        private void PerformDiverseTraining()
+        private async Task PerformDiverseTrainingAsync(CancellationToken token)
         {
-            lock (_gpuTrainingLock)
+            await Task.Run(() =>
             {
-                const int batchSize = 128;
-                const float masterRatio = 0.4f;
-                const float leagueRatio = 0.6f;
-
-                foreach (var agentEntry in _agentPool)
+                lock (_gpuTrainingLock)
                 {
-                    if (!agentEntry.Value.IsValueCreated) continue;
-                    var pa = agentEntry.Value.Value;
+                    const int batchSize = 128;
+                    const float masterRatio = 0.4f;
+                    const float leagueRatio = 0.6f;
 
-                    var aLock = GetAgentActiveLock(agentEntry.Key);
-                    if (aLock.Wait(0))
+                    foreach (var agentEntry in _agentPool)
                     {
-                        try
+                        if (token.IsCancellationRequested) return;
+
+                        if (!agentEntry.Value.IsValueCreated) continue;
+                        var pa = agentEntry.Value.Value;
+
+                        var aLock = GetAgentActiveLock(agentEntry.Key);
+                        if (aLock.Wait(0))
                         {
-                            var mixedBatch = new List<TrainingExample>();
-                            if (MasterBuffer.Count > 0) mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
-                            if (LeagueBuffer.Count > 0) mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
-                            
-                            if (mixedBatch.Count > 0)
+                            try
                             {
-                                pa.Trainer.Train(mixedBatch, epochs: 1);
-                                var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
-                                if (meta != null)
+                                var mixedBatch = new List<TrainingExample>();
+                                if (MasterBuffer.Count > 0) mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
+                                if (LeagueBuffer.Count > 0) mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
+                                
+                                if (mixedBatch.Count > 0)
                                 {
-                                    lock (GetFileLock(meta.ModelPath)) ModelManager.SaveModel(pa.Model, meta.ModelPath);
+                                    pa.Trainer.Train(mixedBatch, epochs: 1);
+                                    var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
+                                    if (meta != null)
+                                    {
+                                        lock (GetFileLock(meta.ModelPath)) ModelManager.SaveModel(pa.Model, meta.ModelPath);
+                                    }
                                 }
                             }
+                            finally { aLock.Release(); }
                         }
-                        finally { aLock.Release(); }
                     }
                 }
-            }
+            });
         }
 
         public static float CalculateMaterialScore(Board board, bool isRed) => isRed ? board.RedMaterial : board.BlackMaterial;
@@ -257,20 +270,21 @@ namespace ChineseChessAI.Training
         {
             if (IsTraining) return;
             IsTraining = true;
+            _cts = new CancellationTokenSource();
             await Task.Run(() =>
             {
                 try
                 {
                     string ext = Path.GetExtension(filePath).ToLower();
-                    if (ext == ".csv") ProcessCsvDataset(filePath);
-                    else if (ext == ".pgn" || ext == ".txt") ProcessPgnDatasetStreaming(filePath);
+                    if (ext == ".csv") ProcessCsvDataset(filePath, _cts.Token);
+                    else if (ext == ".pgn" || ext == ".txt") ProcessPgnDatasetStreaming(filePath, _cts.Token);
                 }
                 catch (Exception ex) { OnError?.Invoke($"[解析错误] {ex.Message}"); }
                 finally { IsTraining = false; OnTrainingStopped?.Invoke(); }
             });
         }
 
-        private void ProcessPgnDatasetStreaming(string filePath)
+        private void ProcessPgnDatasetStreaming(string filePath, CancellationToken token)
         {
             Log("[PGN 吞噬者] 正在以流式方式解析文件...");
             var generator = new MoveGenerator();
@@ -284,7 +298,7 @@ namespace ChineseChessAI.Training
                 string line;
                 while ((line = reader.ReadLine()) != null)
                 {
-                    if (!IsTraining) break;
+                    if (token.IsCancellationRequested) break;
                     if (line.StartsWith("[Event ") && blockBuilder.Length > 0)
                     {
                         ParseSinglePgnBlock(blockBuilder.ToString(), generator, currentBuffer, ref totalProcessedGames, ref currentBatchGames);
@@ -292,13 +306,13 @@ namespace ChineseChessAI.Training
                     }
                     blockBuilder.AppendLine(line);
                 }
-                if (IsTraining && blockBuilder.Length > 0)
+                if (!token.IsCancellationRequested && blockBuilder.Length > 0)
                     ParseSinglePgnBlock(blockBuilder.ToString(), generator, currentBuffer, ref totalProcessedGames, ref currentBatchGames);
             }
             Log($"[PGN 吞噬者] 解析完毕！总吞噬 {totalProcessedGames} 局。");
         }
 
-        private void ProcessCsvDataset(string filePath)
+        private void ProcessCsvDataset(string filePath, CancellationToken token)
         {
             Log("[CSV 解析] 开始读取文件...");
             var generator = new MoveGenerator();
@@ -314,6 +328,7 @@ namespace ChineseChessAI.Training
                 string line;
                 while ((line = reader.ReadLine()) != null)
                 {
+                    if (token.IsCancellationRequested) break;
                     var parts = line.Split(',');
                     if (parts.Length < 4) continue;
                     string gameId = parts[0].Trim();
@@ -328,6 +343,12 @@ namespace ChineseChessAI.Training
                     }
                     currentGameId = gameId;
                     if (side == "red") redMoves.Add((turn, move)); else blackMoves.Add((turn, move));
+                }
+
+                if (currentGameId != null && (redMoves.Count > 0 || blackMoves.Count > 0))
+                {
+                    ProcessCsvGame(redMoves, blackMoves, generator, currentBuffer, ref totalGames, ref batchGames);
+                    redMoves.Clear(); blackMoves.Clear();
                 }
             }
             Log($"[CSV 解析] 完成！总解析 {totalGames} 局。");
@@ -386,10 +407,31 @@ namespace ChineseChessAI.Training
                     float[] flippedPi = StateEncoder.FlipPolicy(densePi);
                     var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
                     
-                    // 2. State 和 Value 保持不变 (StateEncoder 已处理轮次翻转)
-                    return new TrainingExample(ex.State, sparseFlipped, ex.Value);
+                    // 2. State翻转：180度旋转 + 敌我身份交换
+                    float[] flippedState = new float[1260];
+                    for (int plane = 0; plane < 14; plane++)
+                    {
+                        int newPlane = plane < 7 ? plane + 7 : plane - 7;
+                        for (int i = 0; i < 90; i++)
+                        {
+                            flippedState[newPlane * 90 + i] = ex.State[plane * 90 + (89 - i)];
+                        }
+                    }
+
+                    // 3. Value取反：视角转换后胜负颠倒
+                    return new TrainingExample(flippedState, sparseFlipped, -ex.Value);
                 }).ToList();
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, new List<string>())));
+
+                var flippedMoves = standardizedMoves.Select(m => {
+                    if (m.Length < 4) return m;
+                    char c1 = (char)('a' + 'i' - m[0]);
+                    char r1 = (char)('0' + '9' - m[1]);
+                    char c2 = (char)('a' + 'i' - m[2]);
+                    char r2 = (char)('0' + '9' - m[3]);
+                    return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
+                }).ToList();
+
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
                 
                 totalGames++; batchGames++;
             }
@@ -428,13 +470,33 @@ namespace ChineseChessAI.Training
                     float[] flippedPi = StateEncoder.FlipPolicy(densePi);
                     var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
                     
-                    // 2. State 和 Value 保持不变
-                    return new TrainingExample(ex.State, sparseFlipped, ex.Value);
+                    // 2. State翻转：180度旋转 + 敌我身份交换
+                    float[] flippedState = new float[1260];
+                    for (int plane = 0; plane < 14; plane++)
+                    {
+                        int newPlane = plane < 7 ? plane + 7 : plane - 7;
+                        for (int i = 0; i < 90; i++)
+                        {
+                            flippedState[newPlane * 90 + i] = ex.State[plane * 90 + (89 - i)];
+                        }
+                    }
+
+                    // 3. Value取反：视角转换后胜负颠倒
+                    return new TrainingExample(flippedState, sparseFlipped, -ex.Value);
+                }).ToList();
+
+                var flippedMoves = standardizedMoves.Select(m => {
+                    if (m.Length < 4) return m;
+                    char c1 = (char)('a' + 'i' - m[0]);
+                    char r1 = (char)('0' + '9' - m[1]);
+                    char c2 = (char)('a' + 'i' - m[2]);
+                    char r2 = (char)('0' + '9' - m[3]);
+                    return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
                 }).ToList();
 
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, new List<string>())));
+                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
                 totalGames++; batchGames++;
             }
         }

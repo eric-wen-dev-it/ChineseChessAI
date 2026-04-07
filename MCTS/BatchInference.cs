@@ -120,8 +120,8 @@ namespace ChineseChessAI.MCTS
         public void Dispose()
         {
             _isDisposed = true;
-            _signal.Set(); // 唤醒并退出
-            _signal.Dispose();
+            try { _signal.Set(); } catch { } // 唤醒并退出，避免抛出异常
+            // 不立刻调用 Dispose()，让 GC 自动回收，防止后台线程 Wait 被打断引发 ObjectDisposedException
         }
 
         private record InferenceTask(float[] InputData, TaskCompletionSource<(float[], float)> Tcs);

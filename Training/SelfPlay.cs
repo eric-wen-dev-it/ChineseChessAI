@@ -47,7 +47,7 @@ namespace ChineseChessAI.Training
             _lateDrawPenalty = lateDrawPenalty;
         }
 
-        public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null)
+        public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null, System.Threading.CancellationToken cancellationToken = default)
         {
             var board = new Board();
             board.Reset();
@@ -62,12 +62,20 @@ namespace ChineseChessAI.Training
             bool isSuccess = true;
 
             var positionHistory = new Dictionary<ulong, int>();
+            positionHistory[board.CurrentHash] = 1; // 【修复 P1】：初始局面入记录
             int noProgressCount = 0;
 
             while (true)
             {
                 try
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        isSuccess = false;
+                        endReason = "训练被强制终止";
+                        break;
+                    }
+
                     using (var moveScope = torch.NewDisposeScope())
                     {
                         bool isRed = board.IsRedTurn;
@@ -116,7 +124,7 @@ namespace ChineseChessAI.Training
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
                         // 【核心修复 BUG-5】：使用基因传入的 activeSims，而非硬编码的 800
-                        (Move mctsBestMove, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, activeSims, moveCount, _maxMoves);
+                        (Move mctsBestMove, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, activeSims, moveCount, _maxMoves, cancellationToken);
 
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         

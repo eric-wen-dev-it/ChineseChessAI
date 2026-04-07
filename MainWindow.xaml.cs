@@ -346,22 +346,7 @@ namespace ChineseChessAI
                     }
                     else
                     {
-                        // 尝试作为纯训练样本列表加载 (如 league_data)
-                        List<TrainingExample>? examples = null;
-                        try { examples = System.Text.Json.JsonSerializer.Deserialize<List<TrainingExample>>(json); } catch { }
-                        
-                        if (examples != null && examples.Count > 1)
-                        {
-                            var moveList = new List<Move>();
-                            for (int i = 0; i < examples.Count - 1; i++)
-                            {
-                                var m = ReconstructMove(examples[i].State, examples[i + 1].State);
-                                if (m != null) moveList.Add(m.Value);
-                            }
-                            _isManualReplayActive = true;
-                            AppendLog($"[观战] 加载自对弈样本 ({Path.GetFileName(openFileDialog.FileName)})，共 {moveList.Count} 步。");
-                            _replayChannel.Writer.TryWrite((moveList, 0, 0, "回溯"));
-                        }
+                        AppendLog($"[错误] 无法解析该文件为包含对局历史的有效 JSON。当前样本格式不支持通过状态反推走法。");
                     }
                 }
                 catch (Exception ex) { MessageBox.Show($"加载 JSON 失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error); }

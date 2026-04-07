@@ -7,7 +7,7 @@ namespace ChineseChessAI.Core
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
     /// </summary>
-    public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore);
+    public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore, Dictionary<ulong, int>? HashCountsSnapshot = null);
 
     public class Board
     {
@@ -151,7 +151,13 @@ namespace ChineseChessAI.Core
 
             LastMoveWasIrreversible = (captured != 0) || isPawnMove;
 
-            _history.Push(new GameState(from, to, captured, CurrentHash, LastMove));
+            Dictionary<ulong, int>? snapshot = null;
+            if (LastMoveWasIrreversible)
+            {
+                snapshot = new Dictionary<ulong, int>(_hashCounts);
+            }
+
+            _history.Push(new GameState(from, to, captured, CurrentHash, LastMove, snapshot));
             LastMove = new Move(from, to);
 
             TogglePieceHash(from, piece);
@@ -195,6 +201,13 @@ namespace ChineseChessAI.Core
 
             var last = _history.Pop();
             
+            if (last.HashCountsSnapshot != null)
+            {
+                _hashCounts.Clear();
+                foreach (var kvp in last.HashCountsSnapshot)
+                    _hashCounts[kvp.Key] = kvp.Value;
+            }
+
             // 【新增】：恢复被吃掉的子力
             if (last.Captured != 0)
             {
