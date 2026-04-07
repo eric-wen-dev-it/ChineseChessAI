@@ -31,8 +31,8 @@ namespace ChineseChessAI.Training
         {
             try
             {
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
-                string filePath = Path.Combine(_dataDir, $"game_{timestamp}.json");
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string filePath = Path.Combine(_dataDir, $"game_{timestamp}_{Guid.NewGuid():N}.json");
                 string json = JsonSerializer.Serialize(examples);
                 File.WriteAllText(filePath, json);
             }

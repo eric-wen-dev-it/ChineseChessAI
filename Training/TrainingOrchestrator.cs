@@ -97,8 +97,14 @@ namespace ChineseChessAI.Training
                         try
                         {
                             Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
-                            var (masterSamples, masterGames) = await MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
-                            var (leagueSamples, leagueGames) = await LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            
+                            await Task.WhenAll(masterTask, leagueTask);
+                            
+                            var (masterSamples, masterGames) = await masterTask;
+                            var (leagueSamples, leagueGames) = await leagueTask;
+                            
                             Log($"[后台装载完成] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
                         }
                         catch (Exception ex) { Log($"[后台装载异常] {ex.Message}"); }
@@ -106,6 +112,7 @@ namespace ChineseChessAI.Training
 
                     const int maxParallelGames = 4;
                     int gameCounter = 0;
+                    int completedGameCounter = 0;
                     int nextLogAt = 10;
                     int nextTrainAt = 20;
 
@@ -183,6 +190,7 @@ namespace ChineseChessAI.Training
                                             Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
 
                                             OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
+                                            Interlocked.Increment(ref completedGameCounter);
                                         }
                                         else if (result.EndReason != "训练被强制终止")
                                         {
@@ -203,14 +211,14 @@ namespace ChineseChessAI.Training
                             gameTasks.TryDequeue(out _);
                         }
 
-                        if (gameCounter >= nextTrainAt)
+                        if (completedGameCounter >= nextTrainAt)
                         {
                             nextTrainAt += 20;
                             var trainTask = PerformDiverseTrainingAsync(_cts.Token);
                             gameTasks.Enqueue(trainTask);
                         }
 
-                        if (gameCounter >= nextLogAt)
+                        if (completedGameCounter >= nextLogAt)
                         {
                             nextLogAt += 10;
                             _leagueManager.SaveMetadata();
