@@ -52,8 +52,6 @@ namespace ChineseChessAI.Training
         private static readonly ConcurrentDictionary<string, object> _fileLocks = new();
         
         private readonly ConcurrentDictionary<int, Lazy<PersistentAgent>> _agentPool = new();
-        private readonly ConcurrentQueue<int> _activeAgentQueue = new();
-        private const int MaxActiveAgents = 100;
 
         private readonly ConcurrentDictionary<int, SemaphoreSlim> _agentActiveLocks = new();
         private SemaphoreSlim GetAgentActiveLock(int id) => _agentActiveLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
@@ -70,15 +68,24 @@ namespace ChineseChessAI.Training
 
         public async Task StartLeagueTrainingAsync(int populationSize = 50, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.1f)
         {
+            if (populationSize > 100) throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
+            if (populationSize <= 0) throw new ArgumentException("联赛人口数量必须为正整数。", nameof(populationSize));
+
             if (IsTraining) return;
+            if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
+            {
+                try { await _currentTrainingTask; } catch { }
+            }
+
             IsTraining = true;
             _cts = new CancellationTokenSource();
 
             _leagueManager = new LeagueManager(populationSize);
             foreach (var lazyAgent in _agentPool.Values) if (lazyAgent.IsValueCreated) lazyAgent.Value.Dispose();
             _agentPool.Clear();
+            _agentActiveLocks.Clear();
 
-            await Task.Run(async () =>
+            _currentTrainingTask = Task.Run(async () =>
             {
                 try
                 {
@@ -104,6 +111,12 @@ namespace ChineseChessAI.Training
                         }
                         catch (OperationCanceledException)
                         {
+                            break;
+                        }
+
+                        if (!IsTraining || _cts.Token.IsCancellationRequested)
+                        {
+                            semaphore.Release();
                             break;
                         }
 
@@ -212,22 +225,9 @@ namespace ChineseChessAI.Training
             {
                 var pa = new PersistentAgent();
                 lock (GetFileLock(meta.ModelPath)) if (File.Exists(meta.ModelPath)) pa.Model.load(meta.ModelPath);
-                
-                _activeAgentQueue.Enqueue(id);
-                while (_activeAgentQueue.Count > MaxActiveAgents)
-                {
-                    if (_activeAgentQueue.TryDequeue(out int oldId) && _agentPool.TryRemove(oldId, out var oldLazy))
-                    {
-                        if (oldLazy.IsValueCreated) oldLazy.Value.Dispose();
-                        // 【修复 P2】：显式释放信号量句柄，防止句柄泄漏
-                        if (_agentActiveLocks.TryRemove(oldId, out var removedSem))
-                            removedSem.Dispose();
-                    }
-                }
                 return pa;
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         }
-
         private async Task PerformDiverseTrainingAsync(CancellationToken token)
         {
             await Task.Run(() =>

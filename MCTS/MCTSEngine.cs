@@ -54,15 +54,7 @@ namespace ChineseChessAI.MCTS
                 for (int i = 0; i < taskSims; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[MCTS Simulation Error] {ex.Message}");
-                    }
+                    await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
                 }
             }));
 
@@ -76,10 +68,7 @@ namespace ChineseChessAI.MCTS
                 if (legalMoves.Count == 0)
                     throw new Exception("无合法走法");
 
-                // Fallback: Pick a random legal move if search failed to produce children
-                var fallbackMove = legalMoves[Random.Shared.Next(legalMoves.Count)];
-                piData[fallbackMove.ToNetworkIndex()] = 1.0f;
-                return (fallbackMove, piData);
+                throw new Exception("MCTS 搜索未能展开任何节点，可能是内部异常导致");
             }
 
             double totalVisits = root.Children.Values.Sum(x => x.N);
@@ -165,9 +154,9 @@ namespace ChineseChessAI.MCTS
                     Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
                 }
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                Console.WriteLine($"[MCTS Search Error] {ex.Message}");
+                throw;
             }
         }
 

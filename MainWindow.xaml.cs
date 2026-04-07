@@ -266,7 +266,17 @@ namespace ChineseChessAI
             {
                 if (_orchestrator.IsTraining) return;
                 var config = (TrainingConfig)DataContext;
-                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0) return;
+                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0)
+                {
+                    MessageBox.Show("联赛人口数量必须为正整数。", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                
+                if (populationSize > 100)
+                {
+                    MessageBox.Show("出于内存限制与并发安全考量，当前版本联赛人口数量不能超过 100。", "输入限制", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
 
                 StartLeagueBtn.IsEnabled = false;
                 // 使用推荐默认值，AI DNA 将在对局中起主导作用
