@@ -97,6 +97,9 @@ namespace ChineseChessAI.Core
         public Board Clone()
         {
             var newBoard = new Board();
+            // 【BUG C 修复】：new Board() 已经写入了初始哈希计数，必须清空后再复制
+            newBoard._hashCounts.Clear(); 
+
             Array.Copy(this._cells, newBoard._cells, 90);
             newBoard.IsRedTurn = this.IsRedTurn;
             newBoard.CurrentHash = this.CurrentHash;
@@ -143,14 +146,10 @@ namespace ChineseChessAI.Core
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
 
-            // 【BUG 3 修复】：检测不可逆招法
-            bool isPawnAdvance = false;
-            if (piece == 7) // 红兵
-                isPawnAdvance = (to / 9) < (from / 9);
-            else if (piece == -7) // 黑卒
-                isPawnAdvance = (to / 9) > (from / 9);
+            // 【BUG E 修复】：任何兵卒走动（包括横移）均视为不可逆
+            bool isPawnMove = Math.Abs(piece) == 7;
 
-            LastMoveWasIrreversible = (captured != 0) || isPawnAdvance;
+            LastMoveWasIrreversible = (captured != 0) || isPawnMove;
 
             _history.Push(new GameState(from, to, captured, CurrentHash, LastMove));
             LastMove = new Move(from, to);
@@ -330,16 +329,5 @@ namespace ChineseChessAI.Core
             LastMove = null;
         }
 
-        public void RecordHistory(GameState state)
-        {
-            _history.Push(state);
-            // 手动推入历史时，也要同步维护哈希表
-            if (!_hashCounts.TryGetValue(state.Hash, out int c))
-                c = 0;
-            _hashCounts[state.Hash] = c + 1;
-
-            CurrentHash = state.Hash;
-            LastMove = new Move(state.From, state.To);
-        }
     }
 }

@@ -87,7 +87,7 @@ namespace ChineseChessAI.Training
                     int nextTrainAt = 20;
 
                     var semaphore = new SemaphoreSlim(maxParallelGames);
-                    var gameTasks = new ConcurrentBag<Task>();
+                    var gameTasks = new System.Collections.Concurrent.ConcurrentQueue<Task>();
 
                     while (IsTraining)
                     {
@@ -157,11 +157,10 @@ namespace ChineseChessAI.Training
                             finally { semaphore.Release(); }
                         });
 
-                        gameTasks.Add(gameTask);
-                        if (gameTasks.Count > 20)
+                        gameTasks.Enqueue(gameTask);
+                        while (gameTasks.Count > 20 && gameTasks.TryPeek(out var first) && first.IsCompleted)
                         {
-                            var completed = gameTasks.Where(t => t.IsCompleted).ToList();
-                            foreach (var c in completed) gameTasks.TryTake(out _);
+                            gameTasks.TryDequeue(out _);
                         }
 
                         if (gameCounter >= nextTrainAt)
@@ -250,7 +249,8 @@ namespace ChineseChessAI.Training
         public static float GetBoardAdvantage(Board board)
         {
             float diff = board.RedMaterial - board.BlackMaterial;
-            return diff > 1.0f ? 1.0f : (diff < -1.0f ? -1.0f : 0.0f);
+            // 【BUG 10 优化】：降低阈值至 0.5 (约半个兵)，提高 PGN 数据标注灵敏度
+            return diff > 0.5f ? 1.0f : (diff < -0.5f ? -1.0f : 0.0f);
         }
 
         public async Task ProcessDatasetAsync(string filePath)

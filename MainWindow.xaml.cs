@@ -406,9 +406,26 @@ namespace ChineseChessAI
         private Dictionary<int, int> GetPieceMap(float[] state)
         {
             var map = new Dictionary<int, int>();
+            // 【BUG 5 修复】：检查第 14 层（索引 13）判定是否为黑方视角，若是，则需将坐标翻转回红方视角再对比
+            bool isBlackView = state[13 * 90] > 0.5f;
+
             for (int layer = 0; layer < 14; layer++)
+            {
                 for (int pos = 0; pos < 90; pos++)
-                    if (state[layer * 90 + pos] > 0.5f) map[pos] = layer;
+                {
+                    if (state[layer * 90 + pos] > 0.5f)
+                    {
+                        int actualPos = pos;
+                        if (isBlackView)
+                        {
+                            int r = pos / 9;
+                            int c = pos % 9;
+                            actualPos = (9 - r) * 9 + (8 - c);
+                        }
+                        map[actualPos] = layer;
+                    }
+                }
+            }
             return map;
         }
     }

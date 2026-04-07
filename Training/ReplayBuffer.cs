@@ -64,18 +64,17 @@ namespace ChineseChessAI.Training
                     List<TrainingExample>? examples = null;
                     
                     // --- 1. 探测 JSON 格式 ---
+                    bool auditPassed = true;
                     if (json.StartsWith("{")) // 对象格式，可能是 MasterGameData
                     {
-                        MasterGameData? masterData = null;
-                        try { masterData = JsonSerializer.Deserialize<MasterGameData>(json); } catch { }
-
-                        if (masterData != null && masterData.Examples != null && masterData.Examples.Count > 0)
+                        var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
+                        if (masterData != null && masterData.Examples != null)
                         {
                             examples = masterData.Examples;
-                            // 执行审计
+                            // 【BUG D 修复】：单次反序列化，单次审计
                             if (masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
                             {
-                                AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
+                                auditPassed = AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
                             }
                         }
                     }
@@ -85,33 +84,18 @@ namespace ChineseChessAI.Training
                     }
 
                     // --- 2. 最终装载数据 ---
-                    if (examples != null && examples.Count > 0)
+                    if (examples != null && examples.Count > 0 && auditPassed)
                     {
                         if (examples[0].State != null && examples[0].State.Length == 14 * 90)
                         {
-                            // 【核心修复】：完整的审计过滤。如果审计失败，则跳过装载。
-                            // 审计逻辑仅对包含 UCCI 历史的大师数据生效。
-                            bool auditPassed = true;
-                            if (json.StartsWith("{")) 
-                            {
-                                var masterData = JsonSerializer.Deserialize<MasterGameData>(json);
-                                if (masterData != null && masterData.MoveHistoryUcci != null && masterData.MoveHistoryUcci.Count > 0)
-                                {
-                                    auditPassed = AuditGame(masterData.MoveHistoryUcci, fileName, logAction, onAuditFailure);
-                                }
-                            }
-
-                            if (auditPassed)
-                            {
-                                this.AddRange(examples, saveToDisk: false);
-                                totalLoaded += examples.Count;
-                                totalGames++;
-                            }
-                            else
-                            {
-                                logAction?.Invoke($"[审计拒绝] {fileName}: 存在非法走法，已从训练集中剔除。");
-                            }
+                            this.AddRange(examples, saveToDisk: false);
+                            totalLoaded += examples.Count;
+                            totalGames++;
                         }
+                    }
+                    else if (!auditPassed)
+                    {
+                        logAction?.Invoke($"[审计拒绝] {fileName}: 存在非法走法，已从训练集中剔除。");
                     }
                 }
                 catch (Exception ex)

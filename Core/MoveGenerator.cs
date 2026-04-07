@@ -40,7 +40,7 @@ namespace ChineseChessAI.Core
         /// <summary>
         /// 生成当前局面的所有合法走法（已过滤送将、飞将及违反长将/长捉规则的走法）
         /// </summary>
-        public List<Move> GenerateLegalMoves(Board board)
+        public List<Move> GenerateLegalMoves(Board board, bool skipPerpetualCheck = false)
         {
             var pseudoMoves = new List<Move>(64);
             bool isRed = board.IsRedTurn;
@@ -66,7 +66,7 @@ namespace ChineseChessAI.Core
                 if (!safe)
                     continue;
 
-                if (board.GetRepetitionCount() >= 2)
+                if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
                 {
                     if (IsForbiddenPerpetualMove(board, move))
                         continue;
@@ -148,32 +148,47 @@ namespace ChineseChessAI.Core
 
         /// <summary>
         /// 判断是否产生“捉”的威胁。
-        /// 完善版：包含抽吃检测，区分“捉”与“兑”。
+        /// 优化版：仅针对刚移动的那枚棋子及其产生的抽吃威胁进行判定。
         /// </summary>
         private bool IsChasing(Board board, Move move)
         {
             // 在执行 move 之后的局面判断
             bool isRedAttacker = !board.IsRedTurn;
             
-            // 1. 获取移动前被攻击的敌方棋子集合（需要回溯一步，或者在调用前计算）
-            // 为了简化，我们直接判断当前局面下，是否有任何敌方重要棋子正受到我方攻击，且这种攻击是有效的。
-            
-            // 遍历所有我方棋子，看是否在攻击敌方棋子
+            // 【BUG 8 优化】：标准常捉规则通常判定“主动走动并产生攻击”的子。
+            // 遍历所有我方棋子，检测是否对敌方重要棋子产生新的或持续的“捉”。
+            // 注意：move.To 是当前落子点。
+            int attackerPos = move.To;
+            sbyte attacker = board.GetPiece(attackerPos);
+            if (attacker == 0 || (isRedAttacker ? attacker < 0 : attacker > 0)) return false;
+
+            // 1. 检查刚走动的这枚棋子是否在“捉”
+            var attacks = new List<Move>();
+            GeneratePieceMoves(board, attackerPos, attacker, attacks);
+            foreach (var m in attacks)
+            {
+                sbyte target = board.GetPiece(m.To);
+                if (target != 0 && (isRedAttacker ? target < 0 : target > 0))
+                {
+                    if (IsRealChase(board, attackerPos, m.To))
+                        return true;
+                }
+            }
+
+            // 2. 检查因为这枚棋子的走动导致的“抽吃”威胁（由于其移开或作为炮架产生的其他子威胁）
+            // 这种情况下通常遍历全场受攻击点是安全的，且能捕捉复杂的“捉”。
             for (int i = 0; i < 90; i++)
             {
-                sbyte attacker = board.GetPiece(i);
-                if (attacker == 0 || (isRedAttacker ? attacker < 0 : attacker > 0)) continue;
+                if (i == attackerPos) continue;
+                sbyte otherAttacker = board.GetPiece(i);
+                if (otherAttacker == 0 || (isRedAttacker ? otherAttacker < 0 : otherAttacker > 0)) continue;
 
-                var attacks = new List<Move>();
-                GeneratePieceMoves(board, i, attacker, attacks);
-
-                foreach (var m in attacks)
+                var otherAttacks = new List<Move>();
+                GeneratePieceMoves(board, i, otherAttacker, otherAttacks);
+                foreach (var m in otherAttacks)
                 {
                     sbyte target = board.GetPiece(m.To);
-                    if (target == 0) continue;
-                    
-                    // 敌方棋子
-                    if (isRedAttacker ? target < 0 : target > 0)
+                    if (target != 0 && (isRedAttacker ? target < 0 : target > 0))
                     {
                         if (IsRealChase(board, i, m.To))
                             return true;
@@ -227,12 +242,6 @@ namespace ChineseChessAI.Core
             if (target == 0) return false;
             bool isRed = target > 0;
             
-            // 模拟移除该棋子，看自方是否仍能走到该位置
-            sbyte original = target;
-            board.PerformMoveInternal(pos, pos); // 临时置空或用特殊标记
-            // 实际上 PerformMoveInternal(pos, pos) 不太对，我们手动修改
-            // 这里的逻辑应该是：如果一个自方棋子可以走到这个位置（即使现在有棋子），那就是保护。
-            
             // 遍历所有自方棋子
             for (int i = 0; i < 90; i++)
             {
@@ -241,11 +250,13 @@ namespace ChineseChessAI.Core
                 if (p == 0 || (isRed ? p < 0 : p > 0)) continue;
 
                 var moves = new List<Move>();
-                // 注意：炮的保护逻辑特殊，需要单独处理或确保 GeneratePieceMoves 正确处理了同色棋子作为“炮架”
-                // 在象棋规则中，如果炮的攻击线上目标是自方棋子，那个自方棋子是被保护的。
+                // 注意：炮的保护逻辑特殊，需要单独处理。
+                // 我们使用专门的 GeneratePieceMovesForProtection，它会包含友方棋子所在的位置。
                 GeneratePieceMovesForProtection(board, i, p, moves);
                 if (moves.Any(m => m.To == pos))
+                {
                     return true;
+                }
             }
             return false;
         }
@@ -368,13 +379,26 @@ namespace ChineseChessAI.Core
 
         public bool IsThreateningToMate(Board board, bool isRedAttacker)
         {
-            // 在 IsForbiddenPerpetualMove 中，我们是在 board.Push(move) 之后调用的。
-            // 所以 board.IsRedTurn 已经是对方了。
-            // 简单的“杀”判定：对方已经没有合法走法（困毙）。
-            var legalMoves = GenerateLegalMoves(board);
-            if (legalMoves.Count == 0) return true;
-            
-            return false;
+            // 【BUG B 修复】：直接通过伪合法走法 + IsKingSafe 判定是否还有合法走法，绕过 GenerateLegalMoves 避免无限递归。
+            bool isRed = board.IsRedTurn;
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte piece = board.GetPiece(i);
+                if (piece == 0 || (isRed ? piece < 0 : piece > 0)) continue;
+
+                var pseudoMoves = new List<Move>();
+                GeneratePieceMoves(board, i, piece, pseudoMoves);
+
+                foreach (var move in pseudoMoves)
+                {
+                    sbyte captured = board.PerformMoveInternal(move.From, move.To);
+                    bool safe = IsKingSafe(board, isRed);
+                    board.UndoMoveInternal(move.From, move.To, captured);
+
+                    if (safe) return false; // 只要有一个合法走法，就不是杀（困毙）
+                }
+            }
+            return true;
         }
 
         private int GetPieceValue(sbyte piece)
