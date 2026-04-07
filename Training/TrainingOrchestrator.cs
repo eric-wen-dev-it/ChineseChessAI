@@ -69,7 +69,7 @@ namespace ChineseChessAI.Training
         public async Task StartLeagueTrainingAsync(int populationSize = 50, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.1f)
         {
             if (populationSize > 100) throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
-            if (populationSize <= 0) throw new ArgumentException("联赛人口数量必须为正整数。", nameof(populationSize));
+            if (populationSize < 2) throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
 
             if (IsTraining) return;
             if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
@@ -174,6 +174,10 @@ namespace ChineseChessAI.Training
                                             Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
 
                                             OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
+                                        }
+                                        else if (result.EndReason != "训练被强制终止")
+                                        {
+                                            throw new Exception($"对弈失败 - {result.EndReason}");
                                         }
                                     }
                                     finally { lockSecond.Release(); }

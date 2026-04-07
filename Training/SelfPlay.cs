@@ -187,12 +187,11 @@ namespace ChineseChessAI.Training
                     endReason = "训练被强制终止";
                     break;
                 }
-                catch (Exception ex) 
-                { 
-                    Console.WriteLine($"[SelfPlay Error] {ex.Message}"); 
+                catch (Exception ex)
+                {
                     isSuccess = false;
-                    endReason = $"异常中断: {ex.Message}";
-                    break; 
+                    endReason = $"内部错误: {ex.Message}";
+                    break;
                 }
             }
 

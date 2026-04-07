@@ -74,6 +74,10 @@ namespace ChineseChessAI.Training
                     }
                     SaveMetadata();
                 }
+                else if (_agents.Count > populationSize)
+                {
+                    _agents = _agents.OrderBy(a => a.Id).Take(populationSize).ToList();
+                }
 
                 // 初始化待赛队列：包含所有智能体 ID
                 _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();

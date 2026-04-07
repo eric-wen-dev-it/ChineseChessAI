@@ -266,9 +266,9 @@ namespace ChineseChessAI
             {
                 if (_orchestrator.IsTraining) return;
                 var config = (TrainingConfig)DataContext;
-                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize <= 0)
+                if (!int.TryParse(config.PopulationSize, out int populationSize) || populationSize < 2)
                 {
-                    MessageBox.Show("联赛人口数量必须为正整数。", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show("联赛人口数量必须大于等于 2。", "输入错误", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 
