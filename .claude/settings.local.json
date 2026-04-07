@@ -25,7 +25,8 @@
       "Bash(/dev/null find:*)",
       "Bash(powershell -Command \"& 'C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\MSBuild\\\\Current\\\\Bin\\\\MSBuild.exe' /noautoresponse 'D:\\\\Documents\\\\Visual Studio 2017\\\\Athena\\\\AthenaClient\\\\AthenaClient.csproj' /p:Configuration=Debug /t:Rebuild /v:minimal 2>&1 | Out-File -Encoding UTF8 C:\\\\Temp\\\\build_client4.txt\")",
       "Bash(wc:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(dotnet build:*)"
     ]
   }
 }

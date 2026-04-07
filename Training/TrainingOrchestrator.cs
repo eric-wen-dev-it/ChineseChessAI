@@ -44,8 +44,8 @@ namespace ChineseChessAI.Training
         public event Action<string>? OnError;
 
         public bool IsTraining { get; private set; } = false;
-        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(5000000, "data/master_data"); // 提升至 500 万条
-        public ReplayBuffer LeagueBuffer { get; private set; } = new ReplayBuffer(1000000, "data/league_data"); // 提升至 100 万条
+        public ReplayBuffer MasterBuffer { get; private set; }
+        public ReplayBuffer LeagueBuffer { get; private set; }
 
         private LeagueManager _leagueManager;
         private static readonly object _gpuTrainingLock = new object();
@@ -60,6 +60,15 @@ namespace ChineseChessAI.Training
         private CancellationTokenSource? _cts;
         private Task? _currentTrainingTask;
         private Task? _backgroundLoadTask;
+
+        public TrainingOrchestrator()
+        {
+            MasterBuffer = new ReplayBuffer(5000000, "data/master_data");
+            LeagueBuffer = new ReplayBuffer(1000000, "data/league_data");
+
+            MasterBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
+            LeagueBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
+        }
 
         public void StopTraining()
         {
@@ -447,17 +456,35 @@ namespace ChineseChessAI.Training
             var board = new Board();
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
+            bool isComplete = true;
 
             foreach (var rawMove in moveStrings)
             {
                 string? ucci = NotationConverter.ConvertToUcci(board, rawMove, generator);
-                if (string.IsNullOrEmpty(ucci)) break;
+                if (string.IsNullOrEmpty(ucci)) 
+                {
+                    isComplete = false;
+                    break; 
+                }
                 if (ProcessSingleMoveWithUcci(board, ucci, generator, gameHistory)) standardizedMoves.Add(ucci);
-                else break;
+                else 
+                {
+                    isComplete = false;
+                    break;
+                }
             }
 
-            if (!hasExplicitResult) resultValue = GetBoardAdvantage(board); 
-            if (gameHistory.Count > 10)
+            // 【数据质量修复】：如果对局截断，则不再信任整局结果，改用当前的材料差估分
+            if (!isComplete)
+            {
+                resultValue = GetBoardAdvantage(board);
+            }
+            else if (!hasExplicitResult) 
+            {
+                resultValue = GetBoardAdvantage(board); 
+            }
+
+            if (isComplete && gameHistory.Count > 10)
             {
                 var examples = gameHistory.Select(step =>
                 {
@@ -517,16 +544,27 @@ namespace ChineseChessAI.Training
             var board = new Board();
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
+            bool isComplete = true;
             foreach (var rawMove in rawOrderedMoves)
             {
                 string? ucci = NotationConverter.ConvertToUcci(board, rawMove, generator);
-                if (string.IsNullOrEmpty(ucci)) break;
+                if (string.IsNullOrEmpty(ucci)) 
+                {
+                    isComplete = false;
+                    break;
+                }
                 if (ProcessSingleMoveWithUcci(board, ucci, generator, gameHistory)) standardizedMoves.Add(ucci);
-                else break;
+                else 
+                {
+                    isComplete = false;
+                    break;
+                }
             }
-            if (gameHistory.Count > 10)
+            if (isComplete && gameHistory.Count > 10)
             {
                 float resultValue = GetBoardAdvantage(board);
+                // 注意：对于 CSV，我们本身就没有 Header Result，所以始终使用 GetBoardAdvantage 是安全的。
+                // 但为了逻辑一致性，我们在这里显式体现。
                 var examples = gameHistory.Select(step =>
                 {
                     var sparse = step.policy.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();

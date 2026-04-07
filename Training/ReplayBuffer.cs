@@ -16,6 +16,8 @@ namespace ChineseChessAI.Training
         private readonly Random _random = new Random();
         private readonly string _dataDir;
 
+        public event Action<string>? OnSaveError;
+
         public string DataDir => _dataDir;
 
         public ReplayBuffer(int capacity = 100000, string dataDir = null)
@@ -36,7 +38,12 @@ namespace ChineseChessAI.Training
                 string json = JsonSerializer.Serialize(examples);
                 File.WriteAllText(filePath, json);
             }
-            catch (Exception ex) { Console.WriteLine($"[ReplayBuffer] 保存失败: {ex.Message}"); }
+            catch (Exception ex) 
+            {
+                string msg = $"[ReplayBuffer] 磁盘写入失败: {ex.Message}";
+                Console.WriteLine(msg);
+                OnSaveError?.Invoke(msg);
+            }
         }
 
         public async Task<(int samples, int games)> LoadOldSamplesAsync(int maxFiles = 200, bool randomize = false, Action<string>? logAction = null, Action<List<Move>, Move, string>? onAuditFailure = null, CancellationToken cancellationToken = default, DateTime? cutoffTime = null)

@@ -379,23 +379,10 @@ namespace ChineseChessAI.Core
 
         public bool IsThreateningToMate(Board board, bool isRedAttacker)
         {
-            // 真正的“杀（Mate Threat）”定义：
-            // 如果轮到攻击方走棋，攻击方是否存在一步合法着法，能直接将死防守方（即防守方被将且无法解将）。
-            // 由于我们在判断重复局面禁手，此时的局面是防守方刚走完一步，轮到攻击方走。
-            // wait, IsForbiddenPerpetualMove是在 GenerateLegalMoves 中验证攻击方要走的 move 是否合法，
-            // 此时 move 已经被 board.Push，也就是说当前局面是攻击方刚走完。
-            // Wait, If board.Push was already called, then it is the DEFENDER's turn!
-            // Let's check IsForbiddenPerpetualMove:
-            // board.Push(move.From, move.To); count = GetRepetitionCount(); 
-            // if count >= 3: isKillThreat = IsThreateningToMate(board, !board.IsRedTurn);
-            // After Push, board.IsRedTurn has flipped! So !board.IsRedTurn is the ATTACKER.
-            // Wait, does Push flip IsRedTurn? Yes, Board.Push flips it.
-            // So isRedAttacker is correctly passed as the one who just moved.
-            // Therefore, to check if the attacker is threatening mate, we need to see if the attacker
-            // COULD have checkmated if it was their turn NOW. But it's not their turn.
-            // Wait, a "mate threat" (杀) means the move they JUST made creates a situation where, 
-            // if the defender passes, the attacker can checkmate on the NEXT turn.
-            
+            // 长杀禁手判定：
+            // 第一层（即时绝杀）：攻击方存在一步着法，使防守方完全无合法应手。
+            // 第二层（强制杀势）：攻击方存在一步着法，使得防守方的”所有”合法应手之后，
+            //   攻击方仍能再次即时绝杀——即防守方无论如何应对都难逃被杀，属于连续杀势。
             bool isDefenderRed = !isRedAttacker;
 
             for (int i = 0; i < 90; i++)
@@ -408,49 +395,94 @@ namespace ChineseChessAI.Core
 
                 foreach (var attackerMove in pseudoMoves)
                 {
-                    sbyte captured = board.PerformMoveInternal(attackerMove.From, attackerMove.To);
-                    
-                    // 攻击方这步棋必须是合法的（不导致自己被将）
-                    if (IsKingSafe(board, isRedAttacker))
+                    sbyte cap1 = board.PerformMoveInternal(attackerMove.From, attackerMove.To);
+                    if (!IsKingSafe(board, isRedAttacker))
                     {
-                        // 走完这步后，防守方是否被将？
-                        if (!IsKingSafe(board, isDefenderRed))
-                        {
-                            // 如果防守方被将，他是否有任何解将的方法？
-                            bool canEscape = false;
-                            for (int j = 0; j < 90; j++)
-                            {
-                                sbyte defenderPiece = board.GetPiece(j);
-                                if (defenderPiece == 0 || (isDefenderRed ? defenderPiece < 0 : defenderPiece > 0)) continue;
+                        board.UndoMoveInternal(attackerMove.From, attackerMove.To, cap1);
+                        continue;
+                    }
 
-                                var defenderMoves = new List<Move>();
-                                GeneratePieceMoves(board, j, defenderPiece, defenderMoves);
-                                foreach (var defMove in defenderMoves)
-                                {
-                                    sbyte defCaptured = board.PerformMoveInternal(defMove.From, defMove.To);
-                                    bool isSafeNow = IsKingSafe(board, isDefenderRed);
-                                    board.UndoMoveInternal(defMove.From, defMove.To, defCaptured);
-                                    if (isSafeNow)
-                                    {
-                                        canEscape = true;
-                                        break;
-                                    }
-                                }
-                                if (canEscape) break;
+                    // 枚举防守方的所有合法应手
+                    bool defenderHasEscape = false;
+
+                    for (int j = 0; j < 90 && !defenderHasEscape; j++)
+                    {
+                        sbyte defenderPiece = board.GetPiece(j);
+                        if (defenderPiece == 0 || (isDefenderRed ? defenderPiece < 0 : defenderPiece > 0)) continue;
+
+                        var defenderMoves = new List<Move>();
+                        GeneratePieceMoves(board, j, defenderPiece, defenderMoves);
+
+                        foreach (var defMove in defenderMoves)
+                        {
+                            sbyte cap2 = board.PerformMoveInternal(defMove.From, defMove.To);
+                            if (!IsKingSafe(board, isDefenderRed))
+                            {
+                                board.UndoMoveInternal(defMove.From, defMove.To, cap2);
+                                continue;
                             }
 
-                            // 如果没有任何合法应法能解将，说明这就是一步绝杀（将死）的威胁！
-                            if (!canEscape)
+                            // 防守方应手之后，攻击方是否还能即时绝杀？
+                            bool attackerCanStillMateInOne = CanMateInOne(board, isRedAttacker, isDefenderRed);
+                            board.UndoMoveInternal(defMove.From, defMove.To, cap2);
+
+                            if (!attackerCanStillMateInOne)
                             {
-                                board.UndoMoveInternal(attackerMove.From, attackerMove.To, captured);
-                                return true;
+                                // 防守方找到了能暂时解除杀势的应手，此路攻击方着法不构成强制杀势
+                                defenderHasEscape = true;
+                                break;
                             }
                         }
                     }
-                    board.UndoMoveInternal(attackerMove.From, attackerMove.To, captured);
+
+                    board.UndoMoveInternal(attackerMove.From, attackerMove.To, cap1);
+
+                    // 两种情况均判定为”杀势威胁”：
+                    // 1. 防守方无任何合法应手（即时将死/困毙）
+                    // 2. 防守方虽有应手，但所有应手均无法解除后续即时绝杀（强制杀势）
+                    if (!defenderHasEscape)
+                        return true;
                 }
             }
 
+            return false;
+        }
+
+        // 检查攻击方是否存在一步合法着法能直接将死/困毙防守方（即时绝杀）
+        private bool CanMateInOne(Board board, bool isRedAttacker, bool isDefenderRed)
+        {
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte ap = board.GetPiece(i);
+                if (ap == 0 || (isRedAttacker ? ap < 0 : ap > 0)) continue;
+
+                var mvs = new List<Move>();
+                GeneratePieceMoves(board, i, ap, mvs);
+
+                foreach (var m in mvs)
+                {
+                    sbyte c = board.PerformMoveInternal(m.From, m.To);
+                    if (!IsKingSafe(board, isRedAttacker)) { board.UndoMoveInternal(m.From, m.To, c); continue; }
+
+                    bool defHasLegal = false;
+                    for (int j = 0; j < 90 && !defHasLegal; j++)
+                    {
+                        sbyte dp = board.GetPiece(j);
+                        if (dp == 0 || (isDefenderRed ? dp < 0 : dp > 0)) continue;
+                        var dm = new List<Move>();
+                        GeneratePieceMoves(board, j, dp, dm);
+                        foreach (var d in dm)
+                        {
+                            sbyte dc = board.PerformMoveInternal(d.From, d.To);
+                            bool safe = IsKingSafe(board, isDefenderRed);
+                            board.UndoMoveInternal(d.From, d.To, dc);
+                            if (safe) { defHasLegal = true; break; }
+                        }
+                    }
+                    board.UndoMoveInternal(m.From, m.To, c);
+                    if (!defHasLegal) return true;
+                }
+            }
             return false;
         }
 
