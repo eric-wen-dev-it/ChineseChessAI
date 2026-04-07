@@ -10,7 +10,7 @@ namespace ChineseChessAI.Utils
         /// <summary>
         /// 万能转换器：将任意记谱法（WXF代数/UCCI）统一转换为标准 UCCI 格式 (如 "h2e2")
         /// </summary>
-        public static string? ConvertToUcci(Board board, string rawMove, MoveGenerator generator)
+        public static string? ConvertToUcci(Board board, string rawMove, MoveGenerator generator, bool skipPerpetualCheck = false)
         {
             rawMove = rawMove.Trim().Replace("=", "."); // 兼容某些用 = 代替 . 的平移记法
 
@@ -25,7 +25,7 @@ namespace ChineseChessAI.Utils
             }
 
             // 2. 否则按 WXF 代数谱进行物理推导
-            Move? move = ParseWxfMove(board, rawMove, generator);
+            Move? move = ParseWxfMove(board, rawMove, generator, skipPerpetualCheck);
             if (move == null)
                 return null;
 
@@ -69,9 +69,9 @@ namespace ChineseChessAI.Utils
         /// <summary>
         /// WXF 智能代数谱推导引擎
         /// </summary>
-        private static Move? ParseWxfMove(Board board, string wxf, MoveGenerator generator)
+        private static Move? ParseWxfMove(Board board, string wxf, MoveGenerator generator, bool skipPerpetualCheck = false)
         {
-            var legalMoves = generator.GenerateLegalMoves(board);
+            var legalMoves = generator.GenerateLegalMoves(board, skipPerpetualCheck);
             bool isRed = board.IsRedTurn;
             var candidates = new List<Move>();
 

@@ -49,6 +49,8 @@ namespace ChineseChessAI.MCTS
             {
                 // 等待信号，如果没有任务则进入休眠，不消耗 CPU
                 _signal.Wait(100); 
+                
+                if (_isDisposed) break;
                 _signal.Reset();
 
                 if (_taskQueue.IsEmpty) continue;

@@ -43,9 +43,11 @@ namespace ChineseChessAI.Training
         public event Action? OnTrainingStopped;
         public event Action<string>? OnError;
 
-        public bool IsTraining { get; private set; } = false;
-        public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(5000000, "data/master_data"); // 提升至 500 万条
-        public ReplayBuffer LeagueBuffer { get; private set; } = new ReplayBuffer(1000000, "data/league_data"); // 提升至 100 万条
+        private volatile bool _isTraining = false;
+        public bool IsTraining => _isTraining;
+
+        public ReplayBuffer MasterBuffer { get; private set; }
+        public ReplayBuffer LeagueBuffer { get; private set; }
 
         private LeagueManager _leagueManager;
         private static readonly object _gpuTrainingLock = new object();
@@ -61,9 +63,18 @@ namespace ChineseChessAI.Training
         private Task? _currentTrainingTask;
         private Task? _backgroundLoadTask;
 
+        public TrainingOrchestrator()
+        {
+            MasterBuffer = new ReplayBuffer(5000000, "data/master_data");
+            LeagueBuffer = new ReplayBuffer(1000000, "data/league_data");
+
+            MasterBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
+            LeagueBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
+        }
+
         public void StopTraining()
         {
-            IsTraining = false;
+            _isTraining = false;
             _cts?.Cancel();
         }
 
@@ -82,7 +93,7 @@ namespace ChineseChessAI.Training
                 try { await _backgroundLoadTask; } catch { }
             }
 
-            IsTraining = true;
+            _isTraining = true;
             _cts = new CancellationTokenSource();
 
             _leagueManager = new LeagueManager(populationSize);
@@ -200,14 +211,17 @@ namespace ChineseChessAI.Training
                                             Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
 
                                             OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
-                                            Interlocked.Increment(ref completedGameCounter);
                                         }
                                         else if (result.EndReason != "训练被强制终止")
                                         {
                                             throw new Exception($"对弈失败 - {result.EndReason}");
                                         }
                                     }
-                                    finally { lockSecond.Release(); }
+                                    finally 
+                                    { 
+                                        Interlocked.Increment(ref completedGameCounter);
+                                        lockSecond.Release(); 
+                                    }
                                 }
                                 finally { lockFirst.Release(); }
                             }
@@ -235,7 +249,7 @@ namespace ChineseChessAI.Training
                             var top = _leagueManager.GetTopAgents(5);
                             Log("--- [当前排名 Top 5] ---");
                             foreach (var t in top) Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins*100.0/Math.Max(1, t.GamesPlayed)):F1}%");
-                            GC.Collect();
+                            // 【优化 P3 #8】：移除阻塞式 GC.Collect()，交给 .NET 自动管理
                         }
                     }
 
@@ -252,7 +266,7 @@ namespace ChineseChessAI.Training
                     {
                         try { await _backgroundLoadTask; } catch { }
                     }
-                    IsTraining = false; 
+                    _isTraining = false; 
                     _leagueManager?.SaveMetadata(); 
                     OnTrainingStopped?.Invoke(); 
                 }
@@ -333,7 +347,7 @@ namespace ChineseChessAI.Training
             {
                 try { await _currentTrainingTask; } catch { }
             }
-            IsTraining = true;
+            _isTraining = true;
             _cts = new CancellationTokenSource();
             _currentTrainingTask = Task.Run(async () =>
             {
@@ -350,7 +364,7 @@ namespace ChineseChessAI.Training
                     {
                         try { await _backgroundLoadTask; } catch { }
                     }
-                    IsTraining = false; 
+                    _isTraining = false; 
                     OnTrainingStopped?.Invoke(); 
                 }
             });
@@ -442,22 +456,39 @@ namespace ChineseChessAI.Training
             string moveText = System.Text.RegularExpressions.Regex.Replace(reconstructedBlock, @"\[[^\]]*\]", "");
             moveText = System.Text.RegularExpressions.Regex.Replace(moveText, @"\{[^}]*\}", "");
             moveText = System.Text.RegularExpressions.Regex.Replace(moveText, @"\b\d+\.", "");
+            // 去掉标准 PGN movetext 末尾的结果标记，防止被误判为非法着法导致 isComplete=false
+            moveText = System.Text.RegularExpressions.Regex.Replace(moveText, @"(1-0|0-1|1/2-1/2|\*)\s*$", "");
             var moveStrings = moveText.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries);
 
-            var board = new Board();
+            var session = new GameRuleSession(generator);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
+            bool isComplete = true;
 
             foreach (var rawMove in moveStrings)
             {
-                string? ucci = NotationConverter.ConvertToUcci(board, rawMove, generator);
-                if (string.IsNullOrEmpty(ucci)) break;
-                if (ProcessSingleMoveWithUcci(board, ucci, generator, gameHistory)) standardizedMoves.Add(ucci);
-                else break;
+                if (ProcessSingleNotationMove(session, rawMove, gameHistory, out string normalizedUcci))
+                {
+                    standardizedMoves.Add(normalizedUcci);
+                }
+                else
+                {
+                    isComplete = false;
+                    break;
+                }
             }
 
-            if (!hasExplicitResult) resultValue = GetBoardAdvantage(board); 
-            if (gameHistory.Count > 10)
+            // 【数据质量修复】：如果对局截断，则不再信任整局结果，改用当前的材料差估分
+            if (!isComplete)
+            {
+                resultValue = GetBoardAdvantage(session.Board);
+            }
+            else if (!hasExplicitResult) 
+            {
+                resultValue = GetBoardAdvantage(session.Board); 
+            }
+
+            if (isComplete && gameHistory.Count > 10)
             {
                 var examples = gameHistory.Select(step =>
                 {
@@ -470,12 +501,10 @@ namespace ChineseChessAI.Training
                 string guid = Guid.NewGuid().ToString("N");
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}_{guid}.json"), JsonSerializer.Serialize(masterData));
 
-                // 【核心修复 P0】：大师数据镜像增广 (修正审计第17轮发现的数学错误)
+                // 【核心修复 P0】：大师数据镜像增广 (使用 P3 #9 优化后的稀疏翻转)
                 var flippedExamples = examples.Select(ex => {
                     // 1. 策略坐标翻转
-                    float[] densePi = new float[8100]; foreach (var p in ex.SparsePolicy) densePi[p.Index] = p.Prob;
-                    float[] flippedPi = StateEncoder.FlipPolicy(densePi);
-                    var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
+                    var sparseFlipped = StateEncoder.FlipPolicySparse(ex.SparsePolicy);
                     
                     // 2. State翻转：180度旋转 + 敌我身份交换
                     float[] flippedState = new float[1260];
@@ -514,31 +543,37 @@ namespace ChineseChessAI.Training
             int maxTurn = Math.Max(redMoves.Count, blackMoves.Count);
             for (int i = 0; i < maxTurn; i++) { if (i < redMoves.Count) rawOrderedMoves.Add(redMoves[i].move); if (i < blackMoves.Count) rawOrderedMoves.Add(blackMoves[i].move); }
 
-            var board = new Board();
+            var session = new GameRuleSession(generator);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
+            bool isComplete = true;
             foreach (var rawMove in rawOrderedMoves)
             {
-                string? ucci = NotationConverter.ConvertToUcci(board, rawMove, generator);
-                if (string.IsNullOrEmpty(ucci)) break;
-                if (ProcessSingleMoveWithUcci(board, ucci, generator, gameHistory)) standardizedMoves.Add(ucci);
-                else break;
+                if (ProcessSingleNotationMove(session, rawMove, gameHistory, out string normalizedUcci))
+                {
+                    standardizedMoves.Add(normalizedUcci);
+                }
+                else
+                {
+                    isComplete = false;
+                    break;
+                }
             }
-            if (gameHistory.Count > 10)
+            if (isComplete && gameHistory.Count > 10)
             {
-                float resultValue = GetBoardAdvantage(board);
+                float resultValue = GetBoardAdvantage(session.Board);
+                // 注意：对于 CSV，我们本身就没有 Header Result，所以始终使用 GetBoardAdvantage 是安全的。
+                // 但为了逻辑一致性，我们在这里显式体现。
                 var examples = gameHistory.Select(step =>
                 {
                     var sparse = step.policy.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
                     return new TrainingExample(step.state, sparse, step.isRedTurn ? resultValue : -resultValue);
                 }).ToList();
                 
-                // 【同步 P0 修复】：对 CSV 数据也进行镜像增广
+                // 【同步 P0 修复】：对 CSV 数据也进行镜像增广 (使用稀疏翻转优化)
                 var flippedExamples = examples.Select(ex => {
                     // 1. 策略坐标翻转
-                    float[] densePi = new float[8100]; foreach (var p in ex.SparsePolicy) densePi[p.Index] = p.Prob;
-                    float[] flippedPi = StateEncoder.FlipPolicy(densePi);
-                    var sparseFlipped = flippedPi.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
+                    var sparseFlipped = StateEncoder.FlipPolicySparse(ex.SparsePolicy);
                     
                     // 2. State翻转：180度旋转 + 敌我身份交换
                     float[] flippedState = new float[1260];
@@ -572,25 +607,27 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private bool ProcessSingleMoveWithUcci(Board board, string ucciMove, MoveGenerator generator, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory)
+        private bool ProcessSingleNotationMove(GameRuleSession session, string rawMove, List<(float[] state, float[] policy, bool isRedTurn)> gameHistory, out string normalizedUcci)
         {
-            Move? parsedMove = NotationConverter.UcciToMove(ucciMove);
-            if (parsedMove == null) return false;
-            var legalMoves = generator.GenerateLegalMoves(board);
-            if (!legalMoves.Any(m => m.From == parsedMove.Value.From && m.To == parsedMove.Value.To)) return false;
+            normalizedUcci = string.Empty;
+            if (!session.TryResolveNotation(rawMove, out var parsedMove, out normalizedUcci, out _))
+                return false;
+
+            var board = session.Board;
+            var legalMoves = session.GetLegalMoves();
 
             bool isRed = board.IsRedTurn;
             float[] stateData;
             using (torch.NewDisposeScope()) { var stateTensor = StateEncoder.Encode(board); stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray(); }
 
             float[] piData = new float[8100];
-            int netIdx = parsedMove.Value.ToNetworkIndex();
+            int netIdx = parsedMove.ToNetworkIndex();
             float epsilon = 0.05f; float backgroundProb = epsilon / legalMoves.Count;
             foreach (var m in legalMoves) { int idx = m.ToNetworkIndex(); if (idx >= 0 && idx < 8100) piData[idx] = backgroundProb; }
             if (netIdx >= 0 && netIdx < 8100) piData[netIdx] = (1.0f - epsilon) + backgroundProb;
 
             gameHistory.Add((stateData, isRed ? piData : StateEncoder.FlipPolicy(piData), isRed));
-            board.Push(parsedMove.Value.From, parsedMove.Value.To);
+            session.ApplyMove(parsedMove, normalizedUcci);
             return true;
         }
 

@@ -35,11 +35,7 @@ namespace ChineseChessAI.MCTS
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999, System.Threading.CancellationToken cancellationToken = default)
         {
             var root = new MCTSNode(null, 1.0);
-            try
-            {
-                await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
-            }
-            catch (OperationCanceledException) { return (default, new float[8100]); }
+            await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0, cancellationToken);
             
             ApplyDirichletNoise(root);
 
@@ -54,7 +50,7 @@ namespace ChineseChessAI.MCTS
                 for (int i = 0; i < taskSims; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
+                    await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0, cancellationToken);
                 }
             }));
 
@@ -86,10 +82,12 @@ namespace ChineseChessAI.MCTS
             return (bestMove, piData);
         }
 
-        private async Task SearchAsync(MCTSNode node, Board board, int currentMoves, int maxMoves, int depth)
+        private async Task SearchAsync(MCTSNode node, Board board, int currentMoves, int maxMoves, int depth, CancellationToken cancellationToken)
         {
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 // 【核心修复 BUG-2】：感知步数上限 (Horizon Awareness)
                 // 如果模拟搜索达到该局的步数上限，直接根据子力优势评估
                 if (currentMoves + depth >= maxMoves)
@@ -146,7 +144,7 @@ namespace ChineseChessAI.MCTS
                 
                 try
                 {
-                    await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1);
+                    await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1, cancellationToken);
                 }
                 finally
                 {

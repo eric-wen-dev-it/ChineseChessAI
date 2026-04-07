@@ -377,81 +377,98 @@ namespace ChineseChessAI.Core
             }
         }
 
+        // 长杀禁手入口：检查攻击方是否已形成强制杀势（最多向前搜索 MateSearchDepth 步攻击）
+        private const int MateSearchDepth = 5;
+
         public bool IsThreateningToMate(Board board, bool isRedAttacker)
         {
-            // 真正的“杀（Mate Threat）”定义：
-            // 如果轮到攻击方走棋，攻击方是否存在一步合法着法，能直接将死防守方（即防守方被将且无法解将）。
-            // 由于我们在判断重复局面禁手，此时的局面是防守方刚走完一步，轮到攻击方走。
-            // wait, IsForbiddenPerpetualMove是在 GenerateLegalMoves 中验证攻击方要走的 move 是否合法，
-            // 此时 move 已经被 board.Push，也就是说当前局面是攻击方刚走完。
-            // Wait, If board.Push was already called, then it is the DEFENDER's turn!
-            // Let's check IsForbiddenPerpetualMove:
-            // board.Push(move.From, move.To); count = GetRepetitionCount(); 
-            // if count >= 3: isKillThreat = IsThreateningToMate(board, !board.IsRedTurn);
-            // After Push, board.IsRedTurn has flipped! So !board.IsRedTurn is the ATTACKER.
-            // Wait, does Push flip IsRedTurn? Yes, Board.Push flips it.
-            // So isRedAttacker is correctly passed as the one who just moved.
-            // Therefore, to check if the attacker is threatening mate, we need to see if the attacker
-            // COULD have checkmated if it was their turn NOW. But it's not their turn.
-            // Wait, a "mate threat" (杀) means the move they JUST made creates a situation where, 
-            // if the defender passes, the attacker can checkmate on the NEXT turn.
+            // 调用时机：IsForbiddenPerpetualMove 已 Push(攻击方着法)，board.IsRedTurn = 防守方。
+            // 正确语义：对 "防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
+            //   攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
+            // 若防守方无任何合法应手，攻击方已即时将死/困毙，直接判定为杀势。
             
-            bool isDefenderRed = !isRedAttacker;
+            // 【审计修复 P2 #4】：使用 GenerateLegalMoves(skipPerpetualCheck: true) 
+            // 确保防御方应手不送将且物理合法，同时避免无限递归。
+            var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
 
-            for (int i = 0; i < 90; i++)
+            if (defenderMoves.Count == 0) return true; // 防守方已无路可走
+
+            foreach (var dm in defenderMoves)
             {
-                sbyte attackerPiece = board.GetPiece(i);
-                if (attackerPiece == 0 || (isRedAttacker ? attackerPiece < 0 : attackerPiece > 0)) continue;
-
-                var pseudoMoves = new List<Move>();
-                GeneratePieceMoves(board, i, attackerPiece, pseudoMoves);
-
-                foreach (var attackerMove in pseudoMoves)
+                board.Push(dm.From, dm.To);
+                try
                 {
-                    sbyte captured = board.PerformMoveInternal(attackerMove.From, attackerMove.To);
-                    
-                    // 攻击方这步棋必须是合法的（不导致自己被将）
-                    if (IsKingSafe(board, isRedAttacker))
+                    bool canForce = HasForcedKill(board, isRedAttacker, MateSearchDepth);
+                    if (!canForce) return false; // 防守方找到一步脱险手，此着非强制杀
+                }
+                finally { board.Pop(); }
+            }
+            return true; // 所有防守方应手均无法化解
+        }
+
+        // 递归强制杀势搜索（AND-OR 树）
+        private bool HasForcedKill(Board board, bool isRedAttacker, int depth)
+        {
+            if (depth <= 0) return false;
+
+            // 【审计修复 P2 #4】：使用 GenerateLegalMoves(skipPerpetualCheck: true)
+            // 确保搜索在真实的合法着法子树上进行，不再重入 IsForbiddenPerpetualMove。
+            // 此时 board.IsRedTurn 应当对应当前执行方的颜色。
+            foreach (var am in GenerateLegalMoves(board, skipPerpetualCheck: true))
+            {
+                board.Push(am.From, am.To);
+                try
+                {
+                    var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
+
+                    // 防守方无合法应手 → 即时将死/困毙，攻击方已具备杀势
+                    if (defenderMoves.Count == 0) return true;
+
+                    // AND 节点：每一条防守方应手都必须仍处于强制杀势中
+                    bool defenderHasEscape = false;
+                    foreach (var dm in defenderMoves)
                     {
-                        // 走完这步后，防守方是否被将？
-                        if (!IsKingSafe(board, isDefenderRed))
+                        board.Push(dm.From, dm.To);
+                        try
                         {
-                            // 如果防守方被将，他是否有任何解将的方法？
-                            bool canEscape = false;
-                            for (int j = 0; j < 90; j++)
+                            bool stillForced = HasForcedKill(board, isRedAttacker, depth - 1);
+                            if (!stillForced)
                             {
-                                sbyte defenderPiece = board.GetPiece(j);
-                                if (defenderPiece == 0 || (isDefenderRed ? defenderPiece < 0 : defenderPiece > 0)) continue;
-
-                                var defenderMoves = new List<Move>();
-                                GeneratePieceMoves(board, j, defenderPiece, defenderMoves);
-                                foreach (var defMove in defenderMoves)
-                                {
-                                    sbyte defCaptured = board.PerformMoveInternal(defMove.From, defMove.To);
-                                    bool isSafeNow = IsKingSafe(board, isDefenderRed);
-                                    board.UndoMoveInternal(defMove.From, defMove.To, defCaptured);
-                                    if (isSafeNow)
-                                    {
-                                        canEscape = true;
-                                        break;
-                                    }
-                                }
-                                if (canEscape) break;
-                            }
-
-                            // 如果没有任何合法应法能解将，说明这就是一步绝杀（将死）的威胁！
-                            if (!canEscape)
-                            {
-                                board.UndoMoveInternal(attackerMove.From, attackerMove.To, captured);
-                                return true;
+                                defenderHasEscape = true; // 防守方找到脱险手
+                                break;
                             }
                         }
+                        finally { board.Pop(); }
                     }
-                    board.UndoMoveInternal(attackerMove.From, attackerMove.To, captured);
+
+                    if (!defenderHasEscape) return true;
                 }
+                finally { board.Pop(); }
             }
 
             return false;
+        }
+
+        // 为指定颜色生成合法着法（物理走法 + 不送将），不依赖 board.IsRedTurn，不检查禁手
+        private List<Move> GenerateLegalMovesForColor(Board board, bool isRed)
+        {
+            var pseudo = new List<Move>(64);
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte piece = board.GetPiece(i);
+                if (piece == 0 || (isRed ? piece < 0 : piece > 0)) continue;
+                GeneratePieceMoves(board, i, piece, pseudo);
+            }
+
+            var legal = new List<Move>(pseudo.Count);
+            foreach (var m in pseudo)
+            {
+                sbyte cap = board.PerformMoveInternal(m.From, m.To);
+                bool safe = IsKingSafe(board, isRed);
+                board.UndoMoveInternal(m.From, m.To, cap);
+                if (safe) legal.Add(m);
+            }
+            return legal;
         }
 
         private int GetPieceValue(sbyte piece)

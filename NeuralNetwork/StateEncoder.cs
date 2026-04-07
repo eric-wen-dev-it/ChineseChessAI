@@ -1,4 +1,5 @@
 ﻿using ChineseChessAI.Core;
+using ChineseChessAI.Training;
 using System;
 using System.Buffers; // 必须引用：用于 ArrayPool
 using TorchSharp;
@@ -15,11 +16,32 @@ namespace ChineseChessAI.NeuralNetwork
         private static readonly long[] FlipDims = new long[] { 1, 2 };
 
         /// <summary>
+        /// 【优化 P3 #9】：直接对稀疏策略进行翻转，效率比全量遍历 8100 提高数百倍。
+        /// </summary>
+        public static ActionProb[] FlipPolicySparse(ActionProb[] sparsePi)
+        {
+            if (sparsePi == null) return Array.Empty<ActionProb>();
+            var flipped = new ActionProb[sparsePi.Length];
+            for (int i = 0; i < sparsePi.Length; i++)
+            {
+                int originalIdx = sparsePi[i].Index;
+                int from = originalIdx / 90, to = originalIdx % 90;
+                int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
+                
+                // 180 度中心对称翻转：(r, c) -> (9-r, 8-c)
+                int nf = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
+                flipped[i] = new ActionProb(nf, sparsePi[i].Prob);
+            }
+            return flipped;
+        }
+
+        /// <summary>
         /// 将策略数组做 180 度翻转，用于黑方视角与红方视角之间的互相转换。
         /// </summary>
         public static float[] FlipPolicy(float[] originalPi)
         {
             float[] flippedPi = new float[8100];
+            // 依然保留稠密版以兼容旧接口，但逻辑相同
             for (int i = 0; i < 8100; i++)
             {
                 if (originalPi[i] <= 0)

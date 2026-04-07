@@ -87,6 +87,19 @@ namespace ChineseChessAI.Training
                         Move? instantKillMove = _generator.GetCaptureKingMove(board);
                         if (instantKillMove != null)
                         {
+                            // 【修复 P2 #5】：执行绝杀前，必须先记录当前状态，否则模型学不到绝杀动作
+                            var instantStateTensor = StateEncoder.Encode(board);
+                            float[] instantStateData = instantStateTensor.squeeze(0).cpu().data<float>().ToArray();
+                            
+                            float[] instantPiData = new float[8100];
+                            instantPiData[instantKillMove.Value.ToNetworkIndex()] = 1.0f; // 绝杀步概率设为 1.0
+                            float[] instantTrainingPi = isRed ? instantPiData : StateEncoder.FlipPolicy(instantPiData);
+
+                            if (isEngineA)
+                                gameHistoryA.Add((instantStateData, instantTrainingPi, isRed));
+                            else
+                                gameHistoryB.Add((instantStateData, instantTrainingPi, isRed));
+
                             Console.WriteLine($"[规则裁判] 发现对方送将/未应将！执行绝杀: {instantKillMove.Value}");
                             moveHistory.Add(instantKillMove.Value);
                             board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
@@ -95,6 +108,7 @@ namespace ChineseChessAI.Training
                                 await onMovePerformed.Invoke(board);
                                 await Task.Delay(1000);
                             }
+                            moveCount++;
                             endReason = "对方送将/未应将，老将被击杀";
                             finalResult = isRed ? 1.0f : -1.0f;
                             break;
