@@ -91,9 +91,18 @@ namespace ChineseChessAI.Training
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
 
-                    var (masterSamples, masterGames) = await MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
-                    var (leagueSamples, leagueGames) = await LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
-                    Log($"[装载] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
+                    // 将数据装载放入独立的后台任务，不阻塞联赛和对局的立即启动
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
+                            var (masterSamples, masterGames) = await MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            var (leagueSamples, leagueGames) = await LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token);
+                            Log($"[后台装载完成] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
+                        }
+                        catch (Exception ex) { Log($"[后台装载异常] {ex.Message}"); }
+                    }, _cts.Token);
 
                     const int maxParallelGames = 4;
                     int gameCounter = 0;
