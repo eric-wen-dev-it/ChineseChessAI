@@ -124,7 +124,7 @@ namespace ChineseChessAI.Training
                         float[] stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray();
 
                         // 【核心修复 BUG-5】：使用基因传入的 activeSims，而非硬编码的 800
-                        (Move mctsBestMove, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, activeSims, moveCount, _maxMoves, cancellationToken);
+                        (_, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(board, activeSims, moveCount, _maxMoves, cancellationToken);
 
                         float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                         
@@ -180,6 +180,12 @@ namespace ChineseChessAI.Training
                             break;
                         }
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    isSuccess = false;
+                    endReason = "训练被强制终止";
+                    break;
                 }
                 catch (Exception ex) 
                 { 

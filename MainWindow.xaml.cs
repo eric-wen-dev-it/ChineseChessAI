@@ -35,8 +35,6 @@ namespace ChineseChessAI
 
             _orchestrator = new TrainingOrchestrator();
             _orchestrator.OnLog += msg => AppendLog(msg);
-            _orchestrator.OnLossUpdated += loss => Dispatcher.Invoke(() => LossLabel.Text = loss.ToString("F4"));
-
             _orchestrator.OnReplayRequested += (moves, limit, gameId, result) =>
             {
                 if (!_isManualReplayActive)
@@ -375,43 +373,6 @@ namespace ChineseChessAI
                 MessageBox.Show($"导入异常: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 StartLeagueBtn.IsEnabled = true;
             }
-        }
-
-        private Move? ReconstructMove(float[] stateBefore, float[] stateAfter)
-        {
-            var piecesBefore = GetPieceMap(stateBefore);
-            var piecesAfter = GetPieceMap(stateAfter);
-            int from = -1, to = -1;
-            foreach (var pos in piecesBefore.Keys) if (!piecesAfter.ContainsKey(pos)) from = pos;
-            foreach (var pos in piecesAfter.Keys) if (!piecesBefore.ContainsKey(pos) || piecesBefore[pos] != piecesAfter[pos]) to = pos;
-            if (from != -1 && to != -1) return new Move(from, to);
-            return null;
-        }
-
-        private Dictionary<int, int> GetPieceMap(float[] state)
-        {
-            var map = new Dictionary<int, int>();
-            // 【BUG 5 修复】：检查第 14 层（索引 13）判定是否为黑方视角，若是，则需将坐标翻转回红方视角再对比
-            bool isBlackView = state[13 * 90] > 0.5f;
-
-            for (int layer = 0; layer < 14; layer++)
-            {
-                for (int pos = 0; pos < 90; pos++)
-                {
-                    if (state[layer * 90 + pos] > 0.5f)
-                    {
-                        int actualPos = pos;
-                        if (isBlackView)
-                        {
-                            int r = pos / 9;
-                            int c = pos % 9;
-                            actualPos = (9 - r) * 9 + (8 - c);
-                        }
-                        map[actualPos] = layer;
-                    }
-                }
-            }
-            return map;
         }
     }
 }

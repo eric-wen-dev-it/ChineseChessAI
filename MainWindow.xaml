@@ -83,9 +83,6 @@
             </StackPanel>
 
             <StackPanel Grid.Row="2" Margin="0,0,0,10">
-                <TextBlock Text="平均 Loss:" Foreground="White" FontSize="12"/>
-                <TextBlock x:Name="LossLabel" Text="0.0000" Foreground="Yellow" FontSize="16" FontWeight="Bold" Margin="0,0,0,5"/>
-                
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                     <TextBlock Text="正在观战: #" Foreground="SkyBlue" FontSize="14" FontWeight="Bold"/>
                     <TextBlock x:Name="GameIdLabel" Text="---" Foreground="SkyBlue" FontSize="16" FontWeight="Bold"/>

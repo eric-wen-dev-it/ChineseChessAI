@@ -53,12 +53,12 @@ namespace ChineseChessAI.MCTS
                 int taskSims = (t == 0) ? baseSims + extraSims : baseSims;
                 for (int i = 0; i < taskSims; i++)
                 {
-                    if (cancellationToken.IsCancellationRequested) break;
+                    cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
                         await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0);
                     }
-                    catch (OperationCanceledException) { break; }
+                    catch (OperationCanceledException) { throw; }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[MCTS Simulation Error] {ex.Message}");

@@ -37,12 +37,11 @@ namespace ChineseChessAI.Training
 
     public class TrainingOrchestrator
     {
-        public event Action<string> OnLog;
-        public event Action<float> OnLossUpdated;
-        public event Action<List<Move>, int, int, string> OnReplayRequested; // 增加结果参数
-        public event Action<List<Move>, Move, string> OnAuditFailureRequested; // 审计失败演示事件
-        public event Action OnTrainingStopped;
-        public event Action<string> OnError;
+        public event Action<string>? OnLog;
+        public event Action<List<Move>, int, int, string>? OnReplayRequested; // 增加结果参数
+        public event Action<List<Move>, Move, string>? OnAuditFailureRequested; // 审计失败演示事件
+        public event Action? OnTrainingStopped;
+        public event Action<string>? OnError;
 
         public bool IsTraining { get; private set; } = false;
         public ReplayBuffer MasterBuffer { get; private set; } = new ReplayBuffer(5000000, "data/master_data"); // 提升至 500 万条
@@ -60,7 +59,8 @@ namespace ChineseChessAI.Training
         private SemaphoreSlim GetAgentActiveLock(int id) => _agentActiveLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
         private object GetFileLock(string path) => _fileLocks.GetOrAdd(path, _ => new object());
 
-        private CancellationTokenSource _cts;
+        private CancellationTokenSource? _cts;
+        private Task? _currentTrainingTask;
 
         public void StopTraining()
         {
@@ -98,7 +98,14 @@ namespace ChineseChessAI.Training
 
                     while (IsTraining)
                     {
-                        await semaphore.WaitAsync();
+                        try
+                        {
+                            await semaphore.WaitAsync(_cts.Token);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            break;
+                        }
 
                         var gameTask = Task.Run(async () =>
                         {
@@ -187,6 +194,12 @@ namespace ChineseChessAI.Training
                             GC.Collect();
                         }
                     }
+
+                    try
+                    {
+                        await Task.WhenAll(gameTasks.Where(t => t != null && !t.IsCompleted).ToArray());
+                    }
+                    catch { }
                 }
                 catch (Exception ex) { OnError?.Invoke($"[系统故障] {ex.Message}"); }
                 finally { IsTraining = false; _leagueManager?.SaveMetadata(); OnTrainingStopped?.Invoke(); }
@@ -269,9 +282,13 @@ namespace ChineseChessAI.Training
         public async Task ProcessDatasetAsync(string filePath)
         {
             if (IsTraining) return;
+            if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
+            {
+                try { await _currentTrainingTask; } catch { }
+            }
             IsTraining = true;
             _cts = new CancellationTokenSource();
-            await Task.Run(() =>
+            _currentTrainingTask = Task.Run(() =>
             {
                 try
                 {
@@ -288,9 +305,7 @@ namespace ChineseChessAI.Training
         {
             Log("[PGN 吞噬者] 正在以流式方式解析文件...");
             var generator = new MoveGenerator();
-            int maxBufferSize = 200000;
-            var currentBuffer = new ReplayBuffer(maxBufferSize + 10000);
-            int totalProcessedGames = 0, currentBatchGames = 0;
+            int totalProcessedGames = 0;
 
             using (var reader = new StreamReader(filePath, Encoding.UTF8))
             {
@@ -301,13 +316,13 @@ namespace ChineseChessAI.Training
                     if (token.IsCancellationRequested) break;
                     if (line.StartsWith("[Event ") && blockBuilder.Length > 0)
                     {
-                        ParseSinglePgnBlock(blockBuilder.ToString(), generator, currentBuffer, ref totalProcessedGames, ref currentBatchGames);
+                        ParseSinglePgnBlock(blockBuilder.ToString(), generator, ref totalProcessedGames);
                         blockBuilder.Clear();
                     }
                     blockBuilder.AppendLine(line);
                 }
                 if (!token.IsCancellationRequested && blockBuilder.Length > 0)
-                    ParseSinglePgnBlock(blockBuilder.ToString(), generator, currentBuffer, ref totalProcessedGames, ref currentBatchGames);
+                    ParseSinglePgnBlock(blockBuilder.ToString(), generator, ref totalProcessedGames);
             }
             Log($"[PGN 吞噬者] 解析完毕！总吞噬 {totalProcessedGames} 局。");
         }
@@ -316,11 +331,10 @@ namespace ChineseChessAI.Training
         {
             Log("[CSV 解析] 开始读取文件...");
             var generator = new MoveGenerator();
-            int totalGames = 0, batchGames = 0;
+            int totalGames = 0;
             string currentGameId = null;
             var redMoves = new List<(int turn, string move)>();
             var blackMoves = new List<(int turn, string move)>();
-            var currentBuffer = new ReplayBuffer(200000);
 
             using (var reader = new StreamReader(filePath, Encoding.UTF8))
             {
@@ -338,23 +352,23 @@ namespace ChineseChessAI.Training
 
                     if (currentGameId != null && gameId != currentGameId)
                     {
-                        ProcessCsvGame(redMoves, blackMoves, generator, currentBuffer, ref totalGames, ref batchGames);
+                        ProcessCsvGame(redMoves, blackMoves, generator, ref totalGames);
                         redMoves.Clear(); blackMoves.Clear();
                     }
                     currentGameId = gameId;
                     if (side == "red") redMoves.Add((turn, move)); else blackMoves.Add((turn, move));
                 }
 
-                if (currentGameId != null && (redMoves.Count > 0 || blackMoves.Count > 0))
+                if (!token.IsCancellationRequested && currentGameId != null && (redMoves.Count > 0 || blackMoves.Count > 0))
                 {
-                    ProcessCsvGame(redMoves, blackMoves, generator, currentBuffer, ref totalGames, ref batchGames);
+                    ProcessCsvGame(redMoves, blackMoves, generator, ref totalGames);
                     redMoves.Clear(); blackMoves.Clear();
                 }
             }
             Log($"[CSV 解析] 完成！总解析 {totalGames} 局。");
         }
 
-        private void ParseSinglePgnBlock(string block, MoveGenerator generator, ReplayBuffer currentBuffer, ref int totalGames, ref int batchGames)
+        private void ParseSinglePgnBlock(string block, MoveGenerator generator, ref int totalGames)
         {
             string reconstructedBlock = block.Trim();
             if (!reconstructedBlock.StartsWith("[Event ")) reconstructedBlock = "[Event " + reconstructedBlock;
@@ -433,11 +447,11 @@ namespace ChineseChessAI.Training
 
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
                 
-                totalGames++; batchGames++;
+                totalGames++;
             }
         }
 
-        private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves, MoveGenerator generator, ReplayBuffer currentBuffer, ref int totalGames, ref int batchGames)
+        private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves, MoveGenerator generator, ref int totalGames)
         {
             redMoves.Sort((a, b) => a.turn.CompareTo(b.turn)); blackMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
             var rawOrderedMoves = new List<string>();
@@ -497,7 +511,7 @@ namespace ChineseChessAI.Training
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
                 File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
-                totalGames++; batchGames++;
+                totalGames++;
             }
         }
 
