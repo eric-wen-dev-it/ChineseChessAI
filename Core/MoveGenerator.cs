@@ -383,92 +383,71 @@ namespace ChineseChessAI.Core
         public bool IsThreateningToMate(Board board, bool isRedAttacker)
         {
             // 调用时机：IsForbiddenPerpetualMove 已 Push(攻击方着法)，board.IsRedTurn = 防守方。
-            // 正确语义：对 "防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
-            //   攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
-            // 若防守方无任何合法应手，攻击方已即时将死/困毙，直接判定为杀势。
-            
-            // 【审计修复 P2 #4】：使用 GenerateLegalMoves(skipPerpetualCheck: true) 
-            // 确保防御方应手不送将且物理合法，同时避免无限递归。
+            // 正确语义：对"防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
+            // 攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
             var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
+            if (defenderMoves.Count == 0)
+                return true;
 
-            if (defenderMoves.Count == 0) return true; // 防守方已无路可走
-
-            foreach (var dm in defenderMoves)
+            foreach (var defenderMove in defenderMoves)
             {
-                board.Push(dm.From, dm.To);
+                board.Push(defenderMove.From, defenderMove.To);
                 try
                 {
-                    bool canForce = HasForcedKill(board, isRedAttacker, MateSearchDepth);
-                    if (!canForce) return false; // 防守方找到一步脱险手，此着非强制杀
+                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth))
+                        return false;
                 }
-                finally { board.Pop(); }
+                finally
+                {
+                    board.Pop();
+                }
             }
-            return true; // 所有防守方应手均无法化解
+
+            return true;
         }
 
-        // 递归强制杀势搜索（AND-OR 树）
         private bool HasForcedKill(Board board, bool isRedAttacker, int depth)
         {
-            if (depth <= 0) return false;
+            if (depth <= 0)
+                return false;
 
-            // 【审计修复 P2 #4】：使用 GenerateLegalMoves(skipPerpetualCheck: true)
-            // 确保搜索在真实的合法着法子树上进行，不再重入 IsForbiddenPerpetualMove。
-            // 此时 board.IsRedTurn 应当对应当前执行方的颜色。
-            foreach (var am in GenerateLegalMoves(board, skipPerpetualCheck: true))
+            foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true))
             {
-                board.Push(am.From, am.To);
+                board.Push(attackerMove.From, attackerMove.To);
                 try
                 {
                     var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
+                    if (defenderMoves.Count == 0)
+                        return true;
 
-                    // 防守方无合法应手 → 即时将死/困毙，攻击方已具备杀势
-                    if (defenderMoves.Count == 0) return true;
-
-                    // AND 节点：每一条防守方应手都必须仍处于强制杀势中
                     bool defenderHasEscape = false;
-                    foreach (var dm in defenderMoves)
+                    foreach (var defenderMove in defenderMoves)
                     {
-                        board.Push(dm.From, dm.To);
+                        board.Push(defenderMove.From, defenderMove.To);
                         try
                         {
-                            bool stillForced = HasForcedKill(board, isRedAttacker, depth - 1);
-                            if (!stillForced)
+                            if (!HasForcedKill(board, isRedAttacker, depth - 1))
                             {
-                                defenderHasEscape = true; // 防守方找到脱险手
+                                defenderHasEscape = true;
                                 break;
                             }
                         }
-                        finally { board.Pop(); }
+                        finally
+                        {
+                            board.Pop();
+                        }
                     }
 
-                    if (!defenderHasEscape) return true;
+                    if (!defenderHasEscape)
+                        return true;
                 }
-                finally { board.Pop(); }
+                finally
+                {
+                    board.Pop();
+                }
             }
 
             return false;
-        }
-
-        // 为指定颜色生成合法着法（物理走法 + 不送将），不依赖 board.IsRedTurn，不检查禁手
-        private List<Move> GenerateLegalMovesForColor(Board board, bool isRed)
-        {
-            var pseudo = new List<Move>(64);
-            for (int i = 0; i < 90; i++)
-            {
-                sbyte piece = board.GetPiece(i);
-                if (piece == 0 || (isRed ? piece < 0 : piece > 0)) continue;
-                GeneratePieceMoves(board, i, piece, pseudo);
-            }
-
-            var legal = new List<Move>(pseudo.Count);
-            foreach (var m in pseudo)
-            {
-                sbyte cap = board.PerformMoveInternal(m.From, m.To);
-                bool safe = IsKingSafe(board, isRed);
-                board.UndoMoveInternal(m.From, m.To, cap);
-                if (safe) legal.Add(m);
-            }
-            return legal;
         }
 
         private int GetPieceValue(sbyte piece)

@@ -45,7 +45,6 @@ namespace ChineseChessAI.Training
 
         private volatile bool _isTraining = false;
         public bool IsTraining => _isTraining;
-
         public ReplayBuffer MasterBuffer { get; private set; }
         public ReplayBuffer LeagueBuffer { get; private set; }
 
@@ -373,7 +372,7 @@ namespace ChineseChessAI.Training
         private void ProcessPgnDatasetStreaming(string filePath, CancellationToken token)
         {
             Log("[PGN 吞噬者] 正在以流式方式解析文件...");
-            var generator = new MoveGenerator();
+            var rules = new ChineseChessRuleEngine();
             int totalProcessedGames = 0;
 
             using (var reader = new StreamReader(filePath, Encoding.UTF8))
@@ -385,13 +384,13 @@ namespace ChineseChessAI.Training
                     if (token.IsCancellationRequested) break;
                     if (line.StartsWith("[Event ") && blockBuilder.Length > 0)
                     {
-                        ParseSinglePgnBlock(blockBuilder.ToString(), generator, ref totalProcessedGames);
+                        ParseSinglePgnBlock(blockBuilder.ToString(), rules, ref totalProcessedGames);
                         blockBuilder.Clear();
                     }
                     blockBuilder.AppendLine(line);
                 }
                 if (!token.IsCancellationRequested && blockBuilder.Length > 0)
-                    ParseSinglePgnBlock(blockBuilder.ToString(), generator, ref totalProcessedGames);
+                    ParseSinglePgnBlock(blockBuilder.ToString(), rules, ref totalProcessedGames);
             }
             Log($"[PGN 吞噬者] 解析完毕！总吞噬 {totalProcessedGames} 局。");
         }
@@ -399,7 +398,7 @@ namespace ChineseChessAI.Training
         private void ProcessCsvDataset(string filePath, CancellationToken token)
         {
             Log("[CSV 解析] 开始读取文件...");
-            var generator = new MoveGenerator();
+            var rules = new ChineseChessRuleEngine();
             int totalGames = 0;
             string currentGameId = null;
             var redMoves = new List<(int turn, string move)>();
@@ -421,7 +420,7 @@ namespace ChineseChessAI.Training
 
                     if (currentGameId != null && gameId != currentGameId)
                     {
-                        ProcessCsvGame(redMoves, blackMoves, generator, ref totalGames);
+                        ProcessCsvGame(redMoves, blackMoves, rules, ref totalGames);
                         redMoves.Clear(); blackMoves.Clear();
                     }
                     currentGameId = gameId;
@@ -430,14 +429,14 @@ namespace ChineseChessAI.Training
 
                 if (!token.IsCancellationRequested && currentGameId != null && (redMoves.Count > 0 || blackMoves.Count > 0))
                 {
-                    ProcessCsvGame(redMoves, blackMoves, generator, ref totalGames);
+                    ProcessCsvGame(redMoves, blackMoves, rules, ref totalGames);
                     redMoves.Clear(); blackMoves.Clear();
                 }
             }
             Log($"[CSV 解析] 完成！总解析 {totalGames} 局。");
         }
 
-        private void ParseSinglePgnBlock(string block, MoveGenerator generator, ref int totalGames)
+        private void ParseSinglePgnBlock(string block, ChineseChessRuleEngine rules, ref int totalGames)
         {
             string reconstructedBlock = block.Trim();
             if (!reconstructedBlock.StartsWith("[Event ")) reconstructedBlock = "[Event " + reconstructedBlock;
@@ -460,7 +459,7 @@ namespace ChineseChessAI.Training
             moveText = System.Text.RegularExpressions.Regex.Replace(moveText, @"(1-0|0-1|1/2-1/2|\*)\s*$", "");
             var moveStrings = moveText.Split(new[] { ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries);
 
-            var session = new GameRuleSession(generator);
+            var session = new GameRuleSession(rules);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
             bool isComplete = true;
@@ -536,14 +535,14 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves, MoveGenerator generator, ref int totalGames)
+        private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves, ChineseChessRuleEngine rules, ref int totalGames)
         {
             redMoves.Sort((a, b) => a.turn.CompareTo(b.turn)); blackMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
             var rawOrderedMoves = new List<string>();
             int maxTurn = Math.Max(redMoves.Count, blackMoves.Count);
             for (int i = 0; i < maxTurn; i++) { if (i < redMoves.Count) rawOrderedMoves.Add(redMoves[i].move); if (i < blackMoves.Count) rawOrderedMoves.Add(blackMoves[i].move); }
 
-            var session = new GameRuleSession(generator);
+            var session = new GameRuleSession(rules);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
             bool isComplete = true;

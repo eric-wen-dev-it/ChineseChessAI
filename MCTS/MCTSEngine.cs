@@ -15,7 +15,7 @@ namespace ChineseChessAI.MCTS
     public class MCTSEngine : IDisposable
     {
         private readonly CChessNet _model;
-        private readonly MoveGenerator _generator;
+        private readonly ChineseChessRuleEngine _rules;
         private readonly BatchInference _batchInference;
         private readonly double _cPuct;
 
@@ -23,7 +23,7 @@ namespace ChineseChessAI.MCTS
         {
             _model = model;
             _cPuct = cPuct;
-            _generator = new MoveGenerator();
+            _rules = new ChineseChessRuleEngine();
 
             if (torch.cuda.is_available())
                 _model.to(DeviceType.CUDA);
@@ -57,7 +57,7 @@ namespace ChineseChessAI.MCTS
             await Task.WhenAll(tasks);
 
             float[] piData = new float[8100];
-            var legalMoves = _generator.GenerateLegalMoves(board);
+            var legalMoves = _rules.GetLegalMoves(board);
 
             if (root.Children.IsEmpty)
             {
@@ -105,7 +105,7 @@ namespace ChineseChessAI.MCTS
 
                     try
                     {
-                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        var legalMoves = _rules.GetLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
                             node.Update(-1.0);

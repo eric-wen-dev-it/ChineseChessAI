@@ -15,7 +15,7 @@ namespace ChineseChessAI.Training
     {
         private readonly MCTSEngine _engineA;
         private readonly MCTSEngine _engineB;
-        private readonly MoveGenerator _generator;
+        private readonly ChineseChessRuleEngine _rules;
 
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
@@ -35,7 +35,7 @@ namespace ChineseChessAI.Training
         {
             _engineA = engineA;
             _engineB = engineB;
-            _generator = new MoveGenerator();
+            _rules = new ChineseChessRuleEngine();
             _maxMoves = maxMoves;
             _exploreMoves = exploreMoves;
             _materialBias = materialBias;
@@ -84,7 +84,7 @@ namespace ChineseChessAI.Training
                         int activeSims = isEngineA ? _simsA : _simsB;
                         double activeLowTemp = isEngineA ? _lowTempA : _lowTempB;
 
-                        Move? instantKillMove = _generator.GetCaptureKingMove(board);
+                        Move? instantKillMove = _rules.GetCaptureKingMove(board);
                         if (instantKillMove != null)
                         {
                             // 【修复 P2 #5】：执行绝杀前，必须先记录当前状态，否则模型学不到绝杀动作
@@ -114,12 +114,12 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        var legalMoves = _generator.GenerateLegalMoves(board);
+                        var legalMoves = _rules.GetLegalMoves(board);
                         if (legalMoves.Count == 0)
                         {
                             if (onMovePerformed != null)
                                 await Task.Delay(1000);
-                            bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
+                            bool inCheck = !_rules.IsKingSafe(board, board.IsRedTurn);
                             endReason = inCheck ? "绝杀" : "困毙";
                             finalResult = board.IsRedTurn ? -1.0f : 1.0f; // 纠正：无路可走即输 (BUG 1)
                             break;

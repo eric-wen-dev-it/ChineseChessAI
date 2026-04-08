@@ -4,23 +4,23 @@ using ChineseChessAI.Utils;
 namespace ChineseChessAI.Core
 {
     /// <summary>
-    /// 状态化规则会话：持有当前棋盘，并提供统一的棋谱解析、合法性校验与落子入口。
+    /// Stateful rule session that tracks a single board and its applied move history.
     /// </summary>
     public sealed class GameRuleSession
     {
-        private readonly MoveGenerator _generator;
+        private readonly ChineseChessRuleEngine _rules;
         private readonly List<Move> _moveHistory = new();
         private readonly List<string> _ucciHistory = new();
 
         public Board Board { get; }
-        public MoveGenerator Generator => _generator;
+        public ChineseChessRuleEngine Rules => _rules;
         public IReadOnlyList<Move> MoveHistory => _moveHistory;
         public IReadOnlyList<string> UcciHistory => _ucciHistory;
 
-        public GameRuleSession(MoveGenerator? generator = null)
+        public GameRuleSession(ChineseChessRuleEngine? rules = null)
         {
             Board = new Board();
-            _generator = generator ?? new MoveGenerator();
+            _rules = rules ?? new ChineseChessRuleEngine();
         }
 
         public void Reset()
@@ -32,49 +32,22 @@ namespace ChineseChessAI.Core
 
         public List<Move> GetLegalMoves(bool skipPerpetualCheck = false)
         {
-            return _generator.GenerateLegalMoves(Board, skipPerpetualCheck);
+            return _rules.GetLegalMoves(Board, skipPerpetualCheck);
         }
 
         public string ValidateMove(Move move, bool skipPerpetualCheck = false)
         {
-            return _generator.GetMoveValidationResult(Board, move, skipPerpetualCheck);
+            return _rules.ValidateMove(Board, move, skipPerpetualCheck);
         }
 
         public bool TryResolveNotation(string rawMove, out Move move, out string normalizedUcci, out string reason, bool skipPerpetualCheck = false)
         {
-            move = default;
-            normalizedUcci = string.Empty;
-
-            if (string.IsNullOrWhiteSpace(rawMove))
-            {
-                reason = "空着法";
-                return false;
-            }
-
-            string? ucci = NotationConverter.ConvertToUcci(Board, rawMove, _generator, skipPerpetualCheck);
-            if (string.IsNullOrEmpty(ucci))
-            {
-                reason = "无法解析棋谱";
-                return false;
-            }
-
-            normalizedUcci = ucci;
-            return TryResolveUcci(ucci, out move, out reason, skipPerpetualCheck);
+            return _rules.TryResolveNotation(Board, rawMove, out move, out normalizedUcci, out reason, skipPerpetualCheck);
         }
 
         public bool TryResolveUcci(string ucciMove, out Move move, out string reason, bool skipPerpetualCheck = false)
         {
-            move = default;
-            var parsedMove = NotationConverter.UcciToMove(ucciMove);
-            if (!parsedMove.HasValue)
-            {
-                reason = "无效UCCI";
-                return false;
-            }
-
-            move = parsedMove.Value;
-            reason = ValidateMove(move, skipPerpetualCheck);
-            return reason == "合法";
+            return _rules.TryResolveUcci(Board, ucciMove, out move, out reason, skipPerpetualCheck);
         }
 
         public bool TryApplyNotation(string rawMove, out Move move, out string normalizedUcci, out string reason, bool skipPerpetualCheck = false)
