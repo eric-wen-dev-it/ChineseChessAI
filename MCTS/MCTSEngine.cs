@@ -1,6 +1,5 @@
 using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
-using ChineseChessAI.Training;
 using TorchSharp;
 using System;
 using System.Collections.Generic;
@@ -95,7 +94,7 @@ namespace ChineseChessAI.MCTS
                 // 如果模拟搜索达到该局的步数上限，直接根据子力优势评估
                 if (currentMoves + depth >= maxMoves)
                 {
-                    float advantage = TrainingOrchestrator.GetBoardAdvantage(board);
+                    float advantage = BoardEvaluation.GetBoardAdvantage(board);
                     // MCTS 要求 Update 的值必须是相对于当前走棋方的视角
                     node.Update(board.IsRedTurn ? advantage * 0.5 : -advantage * 0.5);
                     return;

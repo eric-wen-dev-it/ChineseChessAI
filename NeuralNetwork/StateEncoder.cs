@@ -1,5 +1,4 @@
 ﻿using ChineseChessAI.Core;
-using ChineseChessAI.Training;
 using System;
 using System.Buffers; // 必须引用：用于 ArrayPool
 using TorchSharp;

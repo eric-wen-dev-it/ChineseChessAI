@@ -1,0 +1,138 @@
+<Window x:Class="ChineseChessAI.Play.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Chinese Chess Play"
+        Width="1180"
+        Height="760"
+        MinWidth="960"
+        MinHeight="680"
+        Background="#F4EFE2">
+    <Grid Margin="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="20" />
+            <ColumnDefinition Width="360" />
+        </Grid.ColumnDefinitions>
+
+        <Border Grid.Column="0"
+                Padding="12"
+                Background="#C89B5F"
+                CornerRadius="14"
+                BorderBrush="#6B4A24"
+                BorderThickness="2">
+            <UniformGrid x:Name="BoardGrid"
+                         Rows="10"
+                         Columns="9" />
+        </Border>
+
+        <StackPanel Grid.Column="2">
+            <TextBlock Text="Chinese Chess Play"
+                       FontSize="26"
+                       FontWeight="Bold"
+                       Foreground="#3A2613" />
+            <TextBlock Margin="0,6,0,0"
+                       Foreground="#5E4A36"
+                       Text="Separate play app backed by the shared engine project." />
+
+            <TextBlock Margin="0,18,0,6"
+                       FontWeight="SemiBold"
+                       Text="Model file" />
+            <DockPanel LastChildFill="False">
+                <TextBox x:Name="ModelPathTextBox"
+                         Width="270"
+                         Height="30"
+                         VerticalContentAlignment="Center" />
+                <Button Width="74"
+                        Height="30"
+                        Margin="8,0,0,0"
+                        Click="OnBrowseModelClick"
+                        Content="Browse" />
+            </DockPanel>
+
+            <Grid Margin="0,14,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <TextBlock Margin="0,0,0,6"
+                               FontWeight="SemiBold"
+                               Text="Human side" />
+                    <ComboBox x:Name="HumanSideComboBox"
+                              Height="30"
+                              SelectedIndex="0">
+                        <ComboBoxItem Content="Play Red" />
+                        <ComboBoxItem Content="Play Black" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2">
+                    <TextBlock Margin="0,0,0,6"
+                               FontWeight="SemiBold"
+                               Text="Simulations" />
+                    <TextBox x:Name="SimulationsTextBox"
+                             Height="30"
+                             VerticalContentAlignment="Center"
+                             Text="400" />
+                </StackPanel>
+            </Grid>
+
+            <WrapPanel Margin="0,16,0,0">
+                <Button x:Name="NewGameButton"
+                        Width="110"
+                        Height="34"
+                        Margin="0,0,8,0"
+                        Click="OnNewGameClick"
+                        Content="New Game" />
+                <Button x:Name="AiMoveButton"
+                        Width="110"
+                        Height="34"
+                        Click="OnAiMoveClick"
+                        Content="AI Move" />
+            </WrapPanel>
+
+            <Border Margin="0,18,0,0"
+                    Padding="12"
+                    Background="#FFF8EC"
+                    BorderBrush="#D5C2A1"
+                    BorderThickness="1"
+                    CornerRadius="10">
+                <StackPanel>
+                    <TextBlock FontWeight="SemiBold"
+                               Text="Status" />
+                    <TextBlock x:Name="StatusTextBlock"
+                               Margin="0,6,0,0"
+                               Foreground="#543A1F"
+                               Text="Choose a model and start a game." />
+                    <TextBlock x:Name="TurnTextBlock"
+                               Margin="0,8,0,0"
+                               Foreground="#543A1F" />
+                    <TextBlock x:Name="SideTextBlock"
+                               Margin="0,4,0,0"
+                               Foreground="#543A1F" />
+                </StackPanel>
+            </Border>
+
+            <TextBlock Margin="0,18,0,6"
+                       FontWeight="SemiBold"
+                       Text="Move history" />
+            <TextBox x:Name="MoveHistoryTextBox"
+                     Height="90"
+                     IsReadOnly="True"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" />
+
+            <TextBlock Margin="0,18,0,6"
+                       FontWeight="SemiBold"
+                       Text="Log" />
+            <TextBox x:Name="LogBox"
+                     Height="240"
+                     IsReadOnly="True"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     AcceptsReturn="True" />
+        </StackPanel>
+    </Grid>
+</Window>

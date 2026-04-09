@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="TorchSharp" Version="0.105.2" />
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.105.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Core\*.cs" Link="Core\%(Filename)%(Extension)" />
+    <Compile Include="..\MCTS\*.cs" Link="MCTS\%(Filename)%(Extension)" />
+    <Compile Include="..\NeuralNetwork\*.cs" Link="NeuralNetwork\%(Filename)%(Extension)" />
+    <Compile Include="..\Utils\*.cs" Link="Utils\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

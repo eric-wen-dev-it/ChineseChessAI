@@ -1,4 +1,5 @@
 ﻿using ChineseChessAI.NeuralNetwork;
+using ChineseChessAI.Core;
 using TorchSharp;
 using System;
 using System.Collections.Generic;
@@ -8,15 +9,6 @@ using static TorchSharp.torch.optim.lr_scheduler;
 
 namespace ChineseChessAI.Training
 {
-    // 【终极防御】：显式定义 struct，确保 System.Text.Json 能 100% 完美保存到硬盘
-    public record struct ActionProb(int Index, float Prob);
-
-    // 将 (int Index, float Prob)[] 替换为 ActionProb[]
-    public record TrainingExample(float[] State, ActionProb[] SparsePolicy, float Value);
-
-    // 【新增】：大师对局完整数据结构
-    public record MasterGameData(List<TrainingExample> Examples, List<string> MoveHistoryUcci);
-
     public class Trainer : IDisposable
     {
         private readonly CChessNet _model;
