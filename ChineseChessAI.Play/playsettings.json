@@ -1,0 +1,6 @@
+{
+  "defaultSimulations": 2400,
+  "batchSize": 64,
+  "cPuct": 1.6,
+  "addRootNoise": false
+}

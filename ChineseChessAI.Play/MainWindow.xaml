@@ -7,6 +7,51 @@
         MinWidth="960"
         MinHeight="680"
         Background="#F4EFE2">
+    <Window.Resources>
+        <Style x:Key="ChessPieceStyle" TargetType="Button">
+            <Setter Property="Background" Value="#F5F5DC" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid Background="Transparent">
+                            <Ellipse x:Name="OuterCircle"
+                                     Fill="{TemplateBinding Background}"
+                                     Stroke="#5D4037"
+                                     StrokeThickness="2" />
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                            <Rectangle x:Name="HighlightBox"
+                                       Margin="-2"
+                                       StrokeThickness="3"
+                                       Visibility="Collapsed" />
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Content" Value="">
+                                <Setter TargetName="OuterCircle" Property="Visibility" Value="Collapsed" />
+                            </Trigger>
+                            <Trigger Property="Tag" Value="Selected">
+                                <Setter TargetName="HighlightBox" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="HighlightBox" Property="Stroke" Value="#FF9800" />
+                            </Trigger>
+                            <Trigger Property="Tag" Value="Legal">
+                                <Setter TargetName="HighlightBox" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="HighlightBox" Property="Stroke" Value="#D4AF37" />
+                            </Trigger>
+                            <Trigger Property="Tag" Value="From">
+                                <Setter TargetName="HighlightBox" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="HighlightBox" Property="Stroke" Value="#FF4500" />
+                            </Trigger>
+                            <Trigger Property="Tag" Value="To">
+                                <Setter TargetName="HighlightBox" Property="Visibility" Value="Visible" />
+                                <Setter TargetName="HighlightBox" Property="Stroke" Value="#00C853" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
     <Grid Margin="16">
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto" />
@@ -14,16 +59,41 @@
             <ColumnDefinition Width="360" />
         </Grid.ColumnDefinitions>
 
-        <Border Grid.Column="0"
-                Padding="12"
-                Background="#C89B5F"
-                CornerRadius="14"
-                BorderBrush="#6B4A24"
-                BorderThickness="2">
-            <UniformGrid x:Name="BoardGrid"
-                         Rows="10"
-                         Columns="9" />
-        </Border>
+        <Viewbox Grid.Column="0"
+                 Margin="4"
+                 Stretch="Uniform">
+            <Border Width="600"
+                    Height="660"
+                    Background="#D2B48C"
+                    BorderBrush="#5D4037"
+                    BorderThickness="4"
+                    CornerRadius="2">
+                <Grid Margin="10">
+                    <Canvas x:Name="ChessLinesCanvas"
+                            IsHitTestVisible="False" />
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                IsHitTestVisible="False">
+                        <TextBlock Margin="0,0,120,0"
+                                   FontSize="32"
+                                   FontWeight="Bold"
+                                   Foreground="#5D4037"
+                                   Opacity="0.4"
+                                   Text="Chu He" />
+                        <TextBlock FontSize="32"
+                                   FontWeight="Bold"
+                                   Foreground="#5D4037"
+                                   Opacity="0.4"
+                                   Text="Han Jie" />
+                    </StackPanel>
+                    <UniformGrid x:Name="BoardGrid"
+                                 Rows="10"
+                                 Columns="9"
+                                 Background="Transparent" />
+                </Grid>
+            </Border>
+        </Viewbox>
 
         <StackPanel Grid.Column="2">
             <TextBlock Text="Chinese Chess Play"
@@ -75,7 +145,7 @@
                     <TextBox x:Name="SimulationsTextBox"
                              Height="30"
                              VerticalContentAlignment="Center"
-                             Text="400" />
+                             Text="2400" />
                 </StackPanel>
             </Grid>
 
@@ -89,8 +159,14 @@
                 <Button x:Name="AiMoveButton"
                         Width="110"
                         Height="34"
+                        Margin="0,0,8,0"
                         Click="OnAiMoveClick"
                         Content="AI Move" />
+                <Button x:Name="ResignButton"
+                        Width="110"
+                        Height="34"
+                        Click="OnResignClick"
+                        Content="认输" />
             </WrapPanel>
 
             <Border Margin="0,18,0,0"

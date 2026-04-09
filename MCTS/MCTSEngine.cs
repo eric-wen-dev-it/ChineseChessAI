@@ -34,12 +34,13 @@ namespace ChineseChessAI.MCTS
             _batchInference = new BatchInference(_model, batchSize);
         }
 
-        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999, System.Threading.CancellationToken cancellationToken = default)
+        public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999, System.Threading.CancellationToken cancellationToken = default, bool addRootNoise = true)
         {
             var root = new MCTSNode(null, 1.0);
             await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0, cancellationToken);
-            
-            ApplyDirichletNoise(root);
+
+            if (addRootNoise)
+                ApplyDirichletNoise(root);
 
             // 【优化】：降低线程数，8个线程平衡了搜索效率和系统稳定性
             int numThreads = 8;

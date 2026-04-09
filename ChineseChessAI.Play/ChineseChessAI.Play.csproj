@@ -13,4 +13,10 @@
     <ProjectReference Include="..\ChineseChessAI.Engine\ChineseChessAI.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="playsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

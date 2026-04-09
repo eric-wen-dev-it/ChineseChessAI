@@ -142,6 +142,7 @@ namespace ChineseChessAI.Training
                     int completedGameCounter = 0;
                     int nextLogAt = 10;
                     int nextTrainAt = 20;
+                    int nextEvolutionAt = 100;
 
                     var semaphore = new SemaphoreSlim(maxParallelGames);
                     var gameTasks = new System.Collections.Concurrent.ConcurrentQueue<Task>();
@@ -257,6 +258,12 @@ namespace ChineseChessAI.Training
                             foreach (var t in top) Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins*100.0/Math.Max(1, t.GamesPlayed)):F1}%");
                             // 【优化 P3 #8】：移除阻塞式 GC.Collect()，交给 .NET 自动管理
                         }
+
+                        if (completedGameCounter >= nextEvolutionAt)
+                        {
+                            nextEvolutionAt += 100;
+                            await PerformPopulationRefreshAsync(semaphore, maxParallelGames, _cts.Token);
+                        }
                     }
 
                     try
@@ -292,6 +299,121 @@ namespace ChineseChessAI.Training
                 return pa;
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         }
+
+        private async Task PerformPopulationRefreshAsync(SemaphoreSlim gameSemaphore, int maxParallelGames, CancellationToken token)
+        {
+            int acquiredGamePermits = 0;
+            var heldLocks = new List<SemaphoreSlim>();
+
+            try
+            {
+                Log("[种群重组] 开始：等待当前对局与训练批次安全收束...");
+
+                for (int i = 0; i < maxParallelGames; i++)
+                {
+                    await gameSemaphore.WaitAsync(token);
+                    acquiredGamePermits++;
+                }
+
+                foreach (int agentId in _leagueManager.GetAllAgentIds())
+                {
+                    var agentLock = GetAgentActiveLock(agentId);
+                    await agentLock.WaitAsync(token);
+                    heldLocks.Add(agentLock);
+                }
+
+                lock (_gpuTrainingLock)
+                {
+                    FlushLoadedModelsToDisk();
+
+                    int populationSize = _leagueManager.GetPopulationSize();
+                    int eliteCount = Math.Clamp(populationSize / 10, 1, Math.Max(1, populationSize - 3));
+                    int contenderKeepCount = Math.Clamp(populationSize * 3 / 10, 1, Math.Max(1, populationSize - eliteCount - 2));
+                    int diverseKeepCount = Math.Clamp(populationSize / 5, 1, Math.Max(1, populationSize - eliteCount - contenderKeepCount - 1));
+                    int parentPoolSize = Math.Clamp(Math.Min(10, Math.Max(4, populationSize / 5)), 1, populationSize);
+
+                    int replacementCount = Math.Max(0, populationSize - eliteCount - contenderKeepCount - diverseKeepCount);
+                    int immigrantCount = replacementCount > 0 ? Math.Clamp(Math.Max(1, replacementCount / 5), 1, replacementCount) : 0;
+
+                    var refresh = _leagueManager.RefreshPopulation(
+                        eliteCount,
+                        contenderKeepCount,
+                        diverseKeepCount,
+                        parentPoolSize,
+                        immigrantCount);
+
+                    RefreshAgentPool(refresh.ReplacedAgentIds);
+
+                    if (refresh.Replaced > 0)
+                    {
+                        Log($"[种群重组] 完成：精英保留 {refresh.EliteKept}，竞争者保留 {refresh.ContenderKept}，多样性保留 {refresh.DiverseKept}，重建 {refresh.Replaced}（后代 {refresh.OffspringCreated}，移民 {refresh.ImmigrantsCreated}）。");
+                        foreach (string line in refresh.PreviewLines)
+                        {
+                            Log($"[种群重组] {line}");
+                        }
+                    }
+                    else
+                    {
+                        Log("[种群重组] 跳过：当前种群规模不足以执行安全重组。");
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                Log($"[种群重组异常] {ex.Message}");
+                Log($"[种群重组异常-堆栈] {ex}");
+                OnError?.Invoke($"[种群重组异常] {ex.Message}");
+            }
+            finally
+            {
+                for (int i = heldLocks.Count - 1; i >= 0; i--)
+                {
+                    heldLocks[i].Release();
+                }
+
+                for (int i = 0; i < acquiredGamePermits; i++)
+                {
+                    gameSemaphore.Release();
+                }
+            }
+        }
+
+        private void FlushLoadedModelsToDisk()
+        {
+            foreach (var agentEntry in _agentPool)
+            {
+                if (!agentEntry.Value.IsValueCreated)
+                {
+                    continue;
+                }
+
+                var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
+                if (meta == null)
+                {
+                    continue;
+                }
+
+                lock (GetFileLock(meta.ModelPath))
+                {
+                    ModelManager.SaveModel(agentEntry.Value.Value.Model, meta.ModelPath);
+                }
+            }
+        }
+
+        private void RefreshAgentPool(IEnumerable<int> replacedIds)
+        {
+            foreach (int agentId in replacedIds)
+            {
+                if (_agentPool.TryRemove(agentId, out var lazyAgent) && lazyAgent.IsValueCreated)
+                {
+                    lazyAgent.Value.Dispose();
+                }
+            }
+        }
+
         private async Task PerformDiverseTrainingAsync(CancellationToken token)
         {
             await Task.Run(() =>

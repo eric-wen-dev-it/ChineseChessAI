@@ -16,6 +16,8 @@ namespace ChineseChessAI.Training
         public int Draws { get; set; } = 0;
         public string ModelPath { get; set; } = "";
         public DateTime LastActive { get; set; } = DateTime.Now;
+        public int Generation { get; set; } = 0;
+        public int ParentId { get; set; } = -1;
 
         public double Temperature { get; set; } = 1.0;
         public double Cpuct { get; set; } = 2.5;
@@ -28,6 +30,42 @@ namespace ChineseChessAI.Training
             Cpuct = 1.0 + rnd.NextDouble() * 4.0;
             MctsSimulations = 100 + rnd.Next(701);
         }
+
+        public void MutateFromParent(AgentMetadata parent, Random? customRnd = null, bool wideMutation = false)
+        {
+            var rnd = customRnd ?? Random.Shared;
+            double tempSpan = wideMutation ? 0.55 : 0.25;
+            double cpuctSpan = wideMutation ? 0.9 : 0.45;
+            int simSpan = wideMutation ? 180 : 90;
+
+            Temperature = Math.Clamp(parent.Temperature + ((rnd.NextDouble() * 2.0) - 1.0) * tempSpan, 0.1, 2.0);
+            Cpuct = Math.Clamp(parent.Cpuct + ((rnd.NextDouble() * 2.0) - 1.0) * cpuctSpan, 1.0, 5.0);
+            MctsSimulations = Math.Clamp(parent.MctsSimulations + rnd.Next(-simSpan, simSpan + 1), 100, 800);
+        }
+
+        public void ResetCompetitiveState(double startingElo = 1500, int generation = 0, int parentId = -1)
+        {
+            Elo = startingElo;
+            GamesPlayed = 0;
+            Wins = 0;
+            Losses = 0;
+            Draws = 0;
+            LastActive = DateTime.Now;
+            Generation = generation;
+            ParentId = parentId;
+        }
+    }
+
+    public sealed class PopulationRefreshResult
+    {
+        public int EliteKept { get; init; }
+        public int ContenderKept { get; init; }
+        public int DiverseKept { get; init; }
+        public int Replaced { get; init; }
+        public int OffspringCreated { get; init; }
+        public int ImmigrantsCreated { get; init; }
+        public List<int> ReplacedAgentIds { get; init; } = new List<int>();
+        public List<string> PreviewLines { get; init; } = new List<string>();
     }
 
     public class LeagueManager
@@ -98,6 +136,16 @@ namespace ChineseChessAI.Training
             lock (_lock) return _agents.FirstOrDefault(a => a.Id == id);
         }
 
+        public int GetPopulationSize()
+        {
+            lock (_lock) return _agents.Count;
+        }
+
+        public List<int> GetAllAgentIds()
+        {
+            lock (_lock) return _agents.Select(a => a.Id).OrderBy(id => id).ToList();
+        }
+
         public (AgentMetadata, AgentMetadata) PickMatch()
         {
             lock (_lock)
@@ -137,6 +185,113 @@ namespace ChineseChessAI.Training
             lock (_lock) return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
         }
 
+        public PopulationRefreshResult RefreshPopulation(
+            int eliteCount,
+            int contenderKeepCount,
+            int diverseKeepCount,
+            int parentPoolSize,
+            int immigrantCount)
+        {
+            lock (_lock)
+            {
+                int populationSize = _agents.Count;
+                if (populationSize < 6)
+                {
+                    return new PopulationRefreshResult();
+                }
+
+                eliteCount = Math.Clamp(eliteCount, 1, Math.Max(1, populationSize - 1));
+                contenderKeepCount = Math.Clamp(contenderKeepCount, 0, Math.Max(0, populationSize - eliteCount - 1));
+                diverseKeepCount = Math.Clamp(diverseKeepCount, 0, Math.Max(0, populationSize - eliteCount - contenderKeepCount - 1));
+
+                int survivorTarget = eliteCount + contenderKeepCount + diverseKeepCount;
+                if (survivorTarget >= populationSize)
+                {
+                    diverseKeepCount = Math.Max(0, populationSize - eliteCount - contenderKeepCount - 1);
+                    survivorTarget = eliteCount + contenderKeepCount + diverseKeepCount;
+                }
+
+                var rnd = Random.Shared;
+                var ranked = _agents
+                    .OrderByDescending(a => a.Elo)
+                    .ThenByDescending(a => a.Wins)
+                    .ThenBy(a => a.Id)
+                    .ToList();
+
+                var elites = ranked.Take(eliteCount).ToList();
+                var contenders = ranked.Skip(eliteCount).Take(contenderKeepCount).ToList();
+                var diversePool = ranked.Skip(eliteCount + contenderKeepCount).ToList();
+                var diverseKeepers = diversePool
+                    .OrderBy(_ => rnd.Next())
+                    .Take(diverseKeepCount)
+                    .ToList();
+
+                var survivorIds = new HashSet<int>(elites.Select(a => a.Id));
+                foreach (var contender in contenders) survivorIds.Add(contender.Id);
+                foreach (var keeper in diverseKeepers) survivorIds.Add(keeper.Id);
+
+                var replacements = ranked.Where(a => !survivorIds.Contains(a.Id)).ToList();
+                if (replacements.Count == 0)
+                {
+                    return new PopulationRefreshResult
+                    {
+                        EliteKept = elites.Count,
+                        ContenderKept = contenders.Count,
+                        DiverseKept = diverseKeepers.Count
+                    };
+                }
+
+                parentPoolSize = Math.Clamp(parentPoolSize, 1, Math.Min(10, ranked.Count));
+                var parentPool = ranked.Take(parentPoolSize).ToList();
+
+                int actualImmigrantCount = Math.Clamp(immigrantCount, 0, replacements.Count);
+                int actualOffspringCount = replacements.Count - actualImmigrantCount;
+
+                var previewLines = new List<string>();
+                for (int i = 0; i < replacements.Count; i++)
+                {
+                    var replacement = replacements[i];
+                    var parent = PickWeightedParent(parentPool, rnd);
+                    bool isImmigrant = i >= actualOffspringCount;
+
+                    CopyModelFromParent(parent.ModelPath, replacement.ModelPath);
+
+                    if (isImmigrant)
+                    {
+                        replacement.RandomizePersonality(rnd);
+                    }
+                    else
+                    {
+                        replacement.MutateFromParent(parent, rnd);
+                    }
+
+                    replacement.ResetCompetitiveState(
+                        startingElo: 1500,
+                        generation: parent.Generation + 1,
+                        parentId: parent.Id);
+
+                    previewLines.Add(
+                        $"{replacement.Id}<-{parent.Id} {(isImmigrant ? "immigrant" : "offspring")} " +
+                        $"DNA:S{replacement.MctsSimulations}/C{replacement.Cpuct:F1}/T{replacement.Temperature:F1}");
+                }
+
+                _waitList = _agents.Select(a => a.Id).OrderBy(_ => rnd.Next()).ToList();
+                SaveMetadata();
+
+                return new PopulationRefreshResult
+                {
+                    EliteKept = elites.Count,
+                    ContenderKept = contenders.Count,
+                    DiverseKept = diverseKeepers.Count,
+                    Replaced = replacements.Count,
+                    OffspringCreated = actualOffspringCount,
+                    ImmigrantsCreated = actualImmigrantCount,
+                    ReplacedAgentIds = replacements.Select(a => a.Id).ToList(),
+                    PreviewLines = previewLines.Take(8).ToList()
+                };
+            }
+        }
+
         public void UpdateResult(int agentId, float result, double opponentElo)
         {
             lock (_lock)
@@ -149,8 +304,45 @@ namespace ChineseChessAI.Training
                 else agent.Draws++;
                 double expectedScore = 1.0 / (1.0 + Math.Pow(10, (opponentElo - agent.Elo) / 400.0));
                 double actualScore = (result + 1.0) / 2.0;
-                agent.Elo += 32 * (actualScore - expectedScore);
+                double kFactor = agent.GamesPlayed <= 20 ? 48.0 : 32.0;
+                agent.Elo += kFactor * (actualScore - expectedScore);
                 agent.LastActive = DateTime.Now;
+            }
+        }
+
+        private static AgentMetadata PickWeightedParent(List<AgentMetadata> parentPool, Random rnd)
+        {
+            int totalWeight = 0;
+            for (int i = 0; i < parentPool.Count; i++)
+            {
+                totalWeight += parentPool.Count - i;
+            }
+
+            int roll = rnd.Next(totalWeight);
+            int cumulative = 0;
+            for (int i = 0; i < parentPool.Count; i++)
+            {
+                cumulative += parentPool.Count - i;
+                if (roll < cumulative)
+                {
+                    return parentPool[i];
+                }
+            }
+
+            return parentPool[0];
+        }
+
+        private static void CopyModelFromParent(string parentPath, string childPath)
+        {
+            if (File.Exists(parentPath))
+            {
+                File.Copy(parentPath, childPath, overwrite: true);
+                return;
+            }
+
+            if (File.Exists(childPath))
+            {
+                File.Delete(childPath);
             }
         }
     }
