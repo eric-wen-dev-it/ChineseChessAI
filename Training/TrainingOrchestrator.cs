@@ -363,6 +363,7 @@ namespace ChineseChessAI.Training
                 catch (Exception ex)
                 {
                     Log($"[周期训练异常] {ex.Message}");
+                    Log($"[周期训练异常-堆栈] {ex}");
                     OnError?.Invoke($"[周期训练异常] {ex.Message}");
                 }
             });

@@ -25,8 +25,11 @@ namespace ChineseChessAI.MCTS
             _cPuct = cPuct;
             _rules = new ChineseChessRuleEngine();
 
-            if (torch.cuda.is_available())
-                _model.to(DeviceType.CUDA);
+            // 【关键修复】：不再调用 _model.to(DeviceType.CUDA)。
+            // CChessNet 构造函数和 PersistentAgent 已经确保模型在 CUDA 上。
+            // TorchSharp 0.105.x 的 Module._to() 对每个参数调用 param.to(device)，
+            // 若返回新 Tensor 对象则 Dispose 旧对象，导致 Trainer.Adam 持有的参数引用
+            // handle = IntPtr.Zero，下一次 zero_grad() 即抛 "Tensor invalid -- empty handle"。
             _model.eval();
 
             _batchInference = new BatchInference(_model, batchSize);
