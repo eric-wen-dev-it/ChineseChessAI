@@ -19,11 +19,18 @@ namespace ChineseChessAI.Training
     public class PersistentAgent : IDisposable
     {
         public CChessNet Model { get; }
-        public Trainer Trainer { get; }
+        public Trainer Trainer { get; private set; } = null!;
 
         public PersistentAgent()
         {
             Model = new CChessNet();
+            // 【关键】：Trainer 不在构造函数中创建；调用方必须先完成 model.load()，
+            // 然后调用 CompleteInit()，确保 Adam 优化器捕获的参数引用始终有效。
+        }
+
+        // 在 model.load() 和所有 .to() 调用完成后调用此方法
+        internal void CompleteInit()
+        {
             if (torch.cuda.is_available()) Model.to(DeviceType.CUDA);
             Trainer = new Trainer(Model);
         }
@@ -277,7 +284,11 @@ namespace ChineseChessAI.Training
             return _agentPool.GetOrAdd(meta.Id, id => new Lazy<PersistentAgent>(() =>
             {
                 var pa = new PersistentAgent();
+                // 【关键修复】：load() 必须在 CompleteInit()（即 Trainer/Adam 创建）之前完成。
+                // TorchSharp 的 load() 会替换参数张量包装器对象；若 Adam 已创建，
+                // 其持有的旧引用 handle 变为 IntPtr.Zero，下次 zero_grad() 即崩溃。
                 lock (GetFileLock(meta.ModelPath)) if (File.Exists(meta.ModelPath)) pa.Model.load(meta.ModelPath);
+                pa.CompleteInit(); // to(CUDA) + new Trainer(Model)，必须在 load() 之后
                 return pa;
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         }
