@@ -118,10 +118,10 @@ namespace ChineseChessAI.MCTS
                         float[] inputData;
                         bool isRed = board.IsRedTurn;
 
-                        using (var scope = torch.NewDisposeScope())
+                        using (var tensor = StateEncoder.Encode(board))
+                        using (var inputFloat = tensor.to_type(ScalarType.Float32))
                         {
-                            var tensor = StateEncoder.Encode(board);
-                            inputData = tensor.to_type(ScalarType.Float32).data<float>().ToArray();
+                            inputData = inputFloat.data<float>().ToArray();
                         }
 
                         var (policyLogits, value) = await _batchInference.PredictAsync(inputData);

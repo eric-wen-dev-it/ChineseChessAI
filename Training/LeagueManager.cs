@@ -241,8 +241,16 @@ namespace ChineseChessAI.Training
                     };
                 }
 
-                parentPoolSize = Math.Clamp(parentPoolSize, 1, Math.Min(10, ranked.Count));
-                var parentPool = ranked.Take(parentPoolSize).ToList();
+                var survivors = elites
+                    .Concat(contenders)
+                    .Concat(diverseKeepers)
+                    .OrderByDescending(a => a.Elo)
+                    .ThenByDescending(a => a.Wins)
+                    .ThenBy(a => a.Id)
+                    .ToList();
+
+                parentPoolSize = Math.Clamp(parentPoolSize, 1, Math.Min(10, survivors.Count));
+                var parentPool = survivors.Take(parentPoolSize).ToList();
 
                 int actualImmigrantCount = Math.Clamp(immigrantCount, 0, replacements.Count);
                 int actualOffspringCount = replacements.Count - actualImmigrantCount;

@@ -57,7 +57,16 @@ namespace ChineseChessAI.Training
 
         private LeagueManager _leagueManager;
         private static readonly object _gpuTrainingLock = new object();
+        private readonly SemaphoreSlim _maintenanceLock = new SemaphoreSlim(1, 1);
         private static readonly ConcurrentDictionary<string, object> _fileLocks = new();
+        private static readonly object _runtimeLogLock = new object();
+        private readonly object _inFlightGamesLock = new object();
+        private static readonly string _runtimeLogPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "data",
+            "runtime.log");
+        private int _inFlightGameCount = 0;
+        private TaskCompletionSource<bool> _gamesDrainedTcs = CreateCompletedTcs();
         
         private readonly ConcurrentDictionary<int, Lazy<PersistentAgent>> _agentPool = new();
 
@@ -68,6 +77,86 @@ namespace ChineseChessAI.Training
         private CancellationTokenSource? _cts;
         private Task? _currentTrainingTask;
         private Task? _backgroundLoadTask;
+
+        private static TaskCompletionSource<bool> CreateCompletedTcs()
+        {
+            var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            tcs.TrySetResult(true);
+            return tcs;
+        }
+
+        private static TaskCompletionSource<bool> CreatePendingTcs() =>
+            new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private void ResetInFlightGameTracking()
+        {
+            lock (_inFlightGamesLock)
+            {
+                _inFlightGameCount = 0;
+                _gamesDrainedTcs = CreateCompletedTcs();
+            }
+        }
+
+        private void MarkGameStarted()
+        {
+            lock (_inFlightGamesLock)
+            {
+                if (_inFlightGameCount == 0)
+                {
+                    _gamesDrainedTcs = CreatePendingTcs();
+                }
+
+                _inFlightGameCount++;
+            }
+        }
+
+        private void MarkGameFinished()
+        {
+            TaskCompletionSource<bool>? drained = null;
+
+            lock (_inFlightGamesLock)
+            {
+                if (_inFlightGameCount <= 0)
+                {
+                    return;
+                }
+
+                _inFlightGameCount--;
+                if (_inFlightGameCount == 0)
+                {
+                    drained = _gamesDrainedTcs;
+                }
+            }
+
+            drained?.TrySetResult(true);
+        }
+
+        private int GetInFlightGameCount()
+        {
+            lock (_inFlightGamesLock)
+            {
+                return _inFlightGameCount;
+            }
+        }
+
+        private Task WaitForInFlightGamesToDrainAsync(CancellationToken token)
+        {
+            Task waitTask;
+            int inFlightGames;
+
+            lock (_inFlightGamesLock)
+            {
+                inFlightGames = _inFlightGameCount;
+                waitTask = _gamesDrainedTcs.Task;
+            }
+
+            if (inFlightGames == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            return waitTask.WaitAsync(token);
+        }
 
         public TrainingOrchestrator()
         {
@@ -84,10 +173,19 @@ namespace ChineseChessAI.Training
             _cts?.Cancel();
         }
 
-        public async Task StartLeagueTrainingAsync(int populationSize = 50, int maxMoves = 150, int exploreMoves = 40, float materialBias = 0.1f)
+        public async Task StartLeagueTrainingAsync(
+            int populationSize = 50,
+            int maxMoves = 150,
+            int exploreMoves = 40,
+            float materialBias = 0.1f,
+            int populationRefreshInterval = 100,
+            int? maxPopulationRefreshCycles = null)
         {
             if (populationSize > 100) throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
             if (populationSize < 2) throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
+
+            if (populationRefreshInterval <= 0) throw new ArgumentOutOfRangeException(nameof(populationRefreshInterval));
+            if (maxPopulationRefreshCycles.HasValue && maxPopulationRefreshCycles.Value <= 0) throw new ArgumentOutOfRangeException(nameof(maxPopulationRefreshCycles));
 
             if (IsTraining) return;
             if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
@@ -106,6 +204,7 @@ namespace ChineseChessAI.Training
             foreach (var lazyAgent in _agentPool.Values) if (lazyAgent.IsValueCreated) lazyAgent.Value.Dispose();
             _agentPool.Clear();
             _agentActiveLocks.Clear();
+            ResetInFlightGameTracking();
 
             DateTime startTime = DateTime.Now;
             MasterBuffer.Clear();
@@ -142,7 +241,8 @@ namespace ChineseChessAI.Training
                     int completedGameCounter = 0;
                     int nextLogAt = 10;
                     int nextTrainAt = 20;
-                    int nextEvolutionAt = 100;
+                    int nextEvolutionAt = populationRefreshInterval;
+                    int completedRefreshCycles = 0;
 
                     var semaphore = new SemaphoreSlim(maxParallelGames);
                     var gameTasks = new System.Collections.Concurrent.ConcurrentQueue<Task>();
@@ -164,8 +264,12 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
-                        var gameTask = Task.Run(async () =>
+                        MarkGameStarted();
+                        Task gameTask;
+                        try
                         {
+                            gameTask = Task.Run(async () =>
+                            {
                             try
                             {
                                 var (agentMetaA, agentMetaB) = _leagueManager.PickMatch();
@@ -233,8 +337,19 @@ namespace ChineseChessAI.Training
                                 finally { lockFirst.Release(); }
                             }
                             catch (Exception ex) { Log($"[对局异常] {ex.Message}"); }
-                            finally { semaphore.Release(); }
+                            finally
+                            {
+                                MarkGameFinished();
+                                semaphore.Release();
+                            }
                         });
+                        }
+                        catch
+                        {
+                            MarkGameFinished();
+                            semaphore.Release();
+                            throw;
+                        }
 
                         gameTasks.Enqueue(gameTask);
                         while (gameTasks.Count > 20 && gameTasks.TryPeek(out var first) && first.IsCompleted)
@@ -261,8 +376,20 @@ namespace ChineseChessAI.Training
 
                         if (completedGameCounter >= nextEvolutionAt)
                         {
-                            nextEvolutionAt += 100;
-                            await PerformPopulationRefreshAsync(semaphore, maxParallelGames, _cts.Token);
+                            nextEvolutionAt += populationRefreshInterval;
+                            await PerformPopulationRefreshAsync(_cts.Token);
+                            if (_cts.Token.IsCancellationRequested || !IsTraining)
+                            {
+                                break;
+                            }
+
+                            completedRefreshCycles++;
+                            if (maxPopulationRefreshCycles.HasValue && completedRefreshCycles >= maxPopulationRefreshCycles.Value)
+                            {
+                                Log($"[PopulationRefresh] Completed {completedRefreshCycles}/{maxPopulationRefreshCycles.Value} cycle(s); stopping league run.");
+                                StopTraining();
+                                break;
+                            }
                         }
                     }
 
@@ -300,20 +427,26 @@ namespace ChineseChessAI.Training
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
         }
 
-        private async Task PerformPopulationRefreshAsync(SemaphoreSlim gameSemaphore, int maxParallelGames, CancellationToken token)
+        private async Task PerformPopulationRefreshAsync(CancellationToken token)
         {
-            int acquiredGamePermits = 0;
+            bool maintenanceLockHeld = false;
             var heldLocks = new List<SemaphoreSlim>();
 
             try
             {
                 Log("[种群重组] 开始：等待当前对局与训练批次安全收束...");
 
-                for (int i = 0; i < maxParallelGames; i++)
+                await _maintenanceLock.WaitAsync(token);
+                maintenanceLockHeld = true;
+                Log("[PopulationRefresh] Maintenance gate acquired; waiting for in-flight games to drain.");
+                int inFlightGames = GetInFlightGameCount();
+                if (inFlightGames > 0)
                 {
-                    await gameSemaphore.WaitAsync(token);
-                    acquiredGamePermits++;
+                    Log($"[PopulationRefresh] Still waiting on {inFlightGames} in-flight game(s).");
                 }
+                await WaitForInFlightGamesToDrainAsync(token);
+
+                Log("[PopulationRefresh] Games drained; waiting for agent activity locks.");
 
                 foreach (int agentId in _leagueManager.GetAllAgentIds())
                 {
@@ -374,9 +507,9 @@ namespace ChineseChessAI.Training
                     heldLocks[i].Release();
                 }
 
-                for (int i = 0; i < acquiredGamePermits; i++)
+                if (maintenanceLockHeld)
                 {
-                    gameSemaphore.Release();
+                    _maintenanceLock.Release();
                 }
             }
         }
@@ -418,8 +551,12 @@ namespace ChineseChessAI.Training
         {
             await Task.Run(() =>
             {
+                bool maintenanceLockHeld = false;
                 try
                 {
+                    _maintenanceLock.Wait(token);
+                    maintenanceLockHeld = true;
+
                     int trainedAgents = 0;
                     int skippedBusyAgents = 0;
                     int skippedUninitializedAgents = 0;
@@ -493,11 +630,21 @@ namespace ChineseChessAI.Training
                         }
                     }
                 }
+                catch (OperationCanceledException)
+                {
+                }
                 catch (Exception ex)
                 {
                     Log($"[周期训练异常] {ex.Message}");
                     Log($"[周期训练异常-堆栈] {ex}");
                     OnError?.Invoke($"[周期训练异常] {ex.Message}");
+                }
+                finally
+                {
+                    if (maintenanceLockHeld)
+                    {
+                        _maintenanceLock.Release();
+                    }
                 }
             });
         }
@@ -788,7 +935,12 @@ namespace ChineseChessAI.Training
 
             bool isRed = board.IsRedTurn;
             float[] stateData;
-            using (torch.NewDisposeScope()) { var stateTensor = StateEncoder.Encode(board); stateData = stateTensor.squeeze(0).cpu().data<float>().ToArray(); }
+            using (var stateTensor = StateEncoder.Encode(board))
+            using (var state3D = stateTensor.squeeze(0))
+            using (var stateCpu = state3D.cpu())
+            {
+                stateData = stateCpu.data<float>().ToArray();
+            }
 
             float[] piData = new float[8100];
             int netIdx = parsedMove.ToNetworkIndex();
@@ -801,6 +953,22 @@ namespace ChineseChessAI.Training
             return true;
         }
 
-        private void Log(string msg) => OnLog?.Invoke(msg);
+        private void Log(string msg)
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_runtimeLogPath)!);
+                string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {msg}{Environment.NewLine}";
+                lock (_runtimeLogLock)
+                {
+                    File.AppendAllText(_runtimeLogPath, line, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+            }
+
+            OnLog?.Invoke(msg);
+        }
     }
 }

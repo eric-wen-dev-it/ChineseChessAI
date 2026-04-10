@@ -56,7 +56,7 @@ namespace ChineseChessAI
             });
 
             DataContext = new TrainingConfig();
-            _ = Task.Run(StartReplayLoopAsync);
+            _ = StartReplayLoopAsync();
         }
 
         private void InitializeBoardUI()
@@ -171,6 +171,10 @@ namespace ChineseChessAI
                 }
             }
             catch (ChannelClosedException) { }
+            catch (Exception ex)
+            {
+                AppendLog($"[观战线程异常] {ex}");
+            }
         }
 
         private async Task ReplayGameInternalAsync(List<Move> historyMoves, int maxMovesLimit = 0, int gameId = 0, string result = "")
