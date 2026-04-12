@@ -69,7 +69,7 @@ namespace ChineseChessAI.Training
         private TaskCompletionSource<bool> _gamesDrainedTcs = CreateCompletedTcs();
         
         private readonly ConcurrentDictionary<int, Lazy<PersistentAgent>> _agentPool = new();
-
+        private readonly ConcurrentDictionary<int, byte> _reservedAgentIds = new();
         private readonly ConcurrentDictionary<int, SemaphoreSlim> _agentActiveLocks = new();
         private SemaphoreSlim GetAgentActiveLock(int id) => _agentActiveLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
         private object GetFileLock(string path) => _fileLocks.GetOrAdd(path, _ => new object());
@@ -139,6 +139,33 @@ namespace ChineseChessAI.Training
             }
         }
 
+        private HashSet<int> GetReservedAgentIdsSnapshot()
+        {
+            return _reservedAgentIds.Keys.ToHashSet();
+        }
+
+        private bool TryReserveAgents(int agentIdA, int agentIdB)
+        {
+            if (!_reservedAgentIds.TryAdd(agentIdA, 0))
+            {
+                return false;
+            }
+
+            if (_reservedAgentIds.TryAdd(agentIdB, 0))
+            {
+                return true;
+            }
+
+            _reservedAgentIds.TryRemove(agentIdA, out _);
+            return false;
+        }
+
+        private void ReleaseReservedAgents(int agentIdA, int agentIdB)
+        {
+            _reservedAgentIds.TryRemove(agentIdA, out _);
+            _reservedAgentIds.TryRemove(agentIdB, out _);
+        }
+
         private Task WaitForInFlightGamesToDrainAsync(CancellationToken token)
         {
             Task waitTask;
@@ -203,6 +230,7 @@ namespace ChineseChessAI.Training
             _leagueManager = new LeagueManager(populationSize);
             foreach (var lazyAgent in _agentPool.Values) if (lazyAgent.IsValueCreated) lazyAgent.Value.Dispose();
             _agentPool.Clear();
+            _reservedAgentIds.Clear();
             _agentActiveLocks.Clear();
             ResetInFlightGameTracking();
 
@@ -264,7 +292,37 @@ namespace ChineseChessAI.Training
                             break;
                         }
 
+                        var reservedAgentIds = GetReservedAgentIdsSnapshot();
+                        if (!_leagueManager.TryPickMatch(reservedAgentIds, out var agentMetaA, out var agentMetaB))
+                        {
+                            semaphore.Release();
+                            try
+                            {
+                                await Task.Delay(200, _cts.Token);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                            }
+
+                            continue;
+                        }
+
+                        if (!TryReserveAgents(agentMetaA.Id, agentMetaB.Id))
+                        {
+                            semaphore.Release();
+                            try
+                            {
+                                await Task.Delay(50, _cts.Token);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                            }
+
+                            continue;
+                        }
+
                         MarkGameStarted();
+                        int currentMaxMoves = (int)(maxMoves * (0.7 + Random.Shared.NextDouble() * 0.8));
                         Task gameTask;
                         try
                         {
@@ -272,17 +330,14 @@ namespace ChineseChessAI.Training
                             {
                             try
                             {
-                                var (agentMetaA, agentMetaB) = _leagueManager.PickMatch();
-                                int currentMaxMoves = (int)(maxMoves * (0.7 + Random.Shared.NextDouble() * 0.8));
-
                                 var (firstMeta, secondMeta) = agentMetaA.Id < agentMetaB.Id ? (agentMetaA, agentMetaB) : (agentMetaB, agentMetaA);
                                 var lockFirst = GetAgentActiveLock(firstMeta.Id);
                                 var lockSecond = GetAgentActiveLock(secondMeta.Id);
 
-                                await lockFirst.WaitAsync();
+                                await lockFirst.WaitAsync(_cts.Token);
                                 try
                                 {
-                                    await lockSecond.WaitAsync();
+                                    await lockSecond.WaitAsync(_cts.Token);
                                     try
                                     {
                                         var pAgentA = GetOrAddAgent(agentMetaA);
@@ -339,6 +394,7 @@ namespace ChineseChessAI.Training
                             catch (Exception ex) { Log($"[对局异常] {ex.Message}"); }
                             finally
                             {
+                                ReleaseReservedAgents(agentMetaA.Id, agentMetaB.Id);
                                 MarkGameFinished();
                                 semaphore.Release();
                             }
@@ -346,6 +402,7 @@ namespace ChineseChessAI.Training
                         }
                         catch
                         {
+                            ReleaseReservedAgents(agentMetaA.Id, agentMetaB.Id);
                             MarkGameFinished();
                             semaphore.Release();
                             throw;

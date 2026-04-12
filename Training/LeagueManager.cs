@@ -73,8 +73,6 @@ namespace ChineseChessAI.Training
         private readonly string _metadataPath;
         private readonly string _modelsDir;
         private List<AgentMetadata> _agents = new List<AgentMetadata>();
-        
-        // 【公平性核心】：全局参赛待办队列
         private List<int> _waitList = new List<int>();
         private readonly object _lock = new object();
 
@@ -98,7 +96,10 @@ namespace ChineseChessAI.Training
                         string json = File.ReadAllText(_metadataPath);
                         _agents = JsonSerializer.Deserialize<List<AgentMetadata>>(json) ?? new List<AgentMetadata>();
                     }
-                    catch { _agents = new List<AgentMetadata>(); }
+                    catch
+                    {
+                        _agents = new List<AgentMetadata>();
+                    }
                 }
 
                 if (_agents.Count < populationSize)
@@ -110,6 +111,7 @@ namespace ChineseChessAI.Training
                         agent.RandomizePersonality(seedRnd);
                         _agents.Add(agent);
                     }
+
                     SaveMetadata();
                 }
                 else if (_agents.Count > populationSize)
@@ -117,7 +119,6 @@ namespace ChineseChessAI.Training
                     _agents = _agents.OrderBy(a => a.Id).Take(populationSize).ToList();
                 }
 
-                // 初始化待赛队列：包含所有智能体 ID
                 _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();
             }
         }
@@ -148,35 +149,84 @@ namespace ChineseChessAI.Training
 
         public (AgentMetadata, AgentMetadata) PickMatch()
         {
+            if (TryPickMatch(Array.Empty<int>(), out var agentA, out var agentB))
+            {
+                return (agentA, agentB);
+            }
+
+            throw new InvalidOperationException("No eligible match is available.");
+        }
+
+        public bool TryPickMatch(IReadOnlyCollection<int> unavailableAgentIds, out AgentMetadata agentA, out AgentMetadata agentB)
+        {
             lock (_lock)
             {
-                // 1. 如果待赛队列空了，重置它，开始新的一轮大循环
+                agentA = null!;
+                agentB = null!;
+
                 if (_waitList.Count == 0)
                 {
                     _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();
                 }
 
-                // 2. 取出队列头部的智能体作为 Agent A (确保他这一轮一定参赛)
-                int idA = _waitList[0];
-                _waitList.RemoveAt(0);
-                var agentA = _agents.First(a => a.Id == idA);
+                HashSet<int>? unavailable = unavailableAgentIds.Count > 0
+                    ? new HashSet<int>(unavailableAgentIds)
+                    : null;
 
-                // 3. 在全量池中寻找一个 ELO 最接近的对手 Agent B
-                // 优先从还没打过这一轮的人（待赛队列）里找，如果待赛队列里没人了，则从全量池找
-                var searchPool = _waitList.Count > 0 ? _waitList : _agents.Select(a => a.Id).ToList();
-                
-                var agentBId = searchPool
-                    .Where(id => id != idA)
-                    .OrderBy(id => Math.Abs(_agents.First(a => a.Id == id).Elo - agentA.Elo))
-                    .Take(10) // 在最接近的 10 人中随机选一个，增加多样性
+                var availableAgents = _agents
+                    .Where(a => unavailable == null || !unavailable.Contains(a.Id))
+                    .ToList();
+
+                if (availableAgents.Count < 2)
+                {
+                    return false;
+                }
+
+                int waitListIndex = _waitList.FindIndex(id => unavailable == null || !unavailable.Contains(id));
+                int idA;
+                if (waitListIndex >= 0)
+                {
+                    idA = _waitList[waitListIndex];
+                    _waitList.RemoveAt(waitListIndex);
+                }
+                else
+                {
+                    idA = availableAgents
+                        .OrderBy(_ => Random.Shared.Next())
+                        .First()
+                        .Id;
+                }
+
+                agentA = _agents.First(a => a.Id == idA);
+                double agentAElo = agentA.Elo;
+
+                var searchPool = _waitList
+                    .Where(id => id != idA && (unavailable == null || !unavailable.Contains(id)))
+                    .Distinct()
+                    .ToList();
+
+                if (searchPool.Count == 0)
+                {
+                    searchPool = availableAgents
+                        .Select(a => a.Id)
+                        .Where(id => id != idA)
+                        .ToList();
+                }
+
+                if (searchPool.Count == 0)
+                {
+                    return false;
+                }
+
+                int agentBId = searchPool
+                    .OrderBy(id => Math.Abs(_agents.First(a => a.Id == id).Elo - agentAElo))
+                    .Take(10)
                     .OrderBy(_ => Random.Shared.Next())
                     .First();
 
-                // 如果 Agent B 也在待赛队列中，同步将其移除，防止他这一轮打两次
                 _waitList.Remove(agentBId);
-
-                var agentB = _agents.First(a => a.Id == agentBId);
-                return (agentA, agentB);
+                agentB = _agents.First(a => a.Id == agentBId);
+                return true;
             }
         }
 
