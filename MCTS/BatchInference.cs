@@ -33,11 +33,19 @@ namespace ChineseChessAI.MCTS
                 catch
                 {
                 }
+                finally
+                {
+                    // Worker exited (normally or via crash): drain any tasks that will never be processed.
+                    while (_taskQueue.TryDequeue(out var task))
+                        task.Tcs.TrySetCanceled();
+                }
             });
         }
 
-        public async Task<(float[] Policy, float Value)> PredictAsync(float[] inputData)
+        public async Task<(float[] Policy, float Value)> PredictAsync(float[] inputData, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             if (_isDisposed)
                 return (new float[8100], 0f);
 
@@ -45,6 +53,9 @@ namespace ChineseChessAI.MCTS
             _taskQueue.Enqueue(new InferenceTask(inputData, tcs));
             _signal.Set();
 
+            using var reg = cancellationToken.UnsafeRegister(
+                static (state, ct) => ((TaskCompletionSource<(float[], float)>)state!).TrySetCanceled(ct),
+                tcs);
             return await tcs.Task;
         }
 

@@ -61,10 +61,15 @@ namespace ChineseChessAI.Training
         private static readonly ConcurrentDictionary<string, object> _fileLocks = new();
         private static readonly object _runtimeLogLock = new object();
         private readonly object _inFlightGamesLock = new object();
+        private static readonly TimeSpan LeagueGameTimeout = TimeSpan.FromMinutes(15);
         private static readonly string _runtimeLogPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
             "data",
             "runtime.log");
+        private static readonly string _leagueTimeoutRecordsDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "data",
+            "league_timeout_records");
         private int _inFlightGameCount = 0;
         private TaskCompletionSource<bool> _gamesDrainedTcs = CreateCompletedTcs();
         
@@ -355,7 +360,10 @@ namespace ChineseChessAI.Training
                                             $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1})");
 
                                         bool aIsRed = Random.Shared.Next(2) == 0;
-                                        var result = await selfPlay.RunGameAsync(aIsRed, null, _cts.Token);
+                                        using var gameTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
+                                        gameTimeoutCts.CancelAfter(LeagueGameTimeout);
+                                        var result = await selfPlay.RunGameAsync(aIsRed, null, gameTimeoutCts.Token);
+                                        bool hitGameTimeout = gameTimeoutCts.IsCancellationRequested && !_cts.Token.IsCancellationRequested;
 
                                         if (result.IsSuccess)
                                         {
@@ -377,6 +385,17 @@ namespace ChineseChessAI.Training
                                             Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
 
                                             OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
+                                        }
+                                        else if (hitGameTimeout)
+                                        {
+                                            string? savedRecordPath = SaveTimedOutLeagueRecord(currentId, agentMetaA, agentMetaB, result);
+                                            string savedSuffix = savedRecordPath == null ? string.Empty : $" | 记录: {Path.GetFileName(savedRecordPath)}";
+                                            Log($"[对局 #{currentId} 超时] Agent_{agentMetaA.Id} VS Agent_{agentMetaB.Id} | 超过 {LeagueGameTimeout.TotalMinutes:F0} 分钟终止 | 已走 {result.MoveCount} 步{savedSuffix}");
+
+                                            if (result.MoveHistory.Count > 0)
+                                            {
+                                                OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, "超时终结");
+                                            }
                                         }
                                         else if (result.EndReason != "训练被强制终止")
                                         {
@@ -590,6 +609,64 @@ namespace ChineseChessAI.Training
                 {
                     ModelManager.SaveModel(agentEntry.Value.Value.Model, meta.ModelPath);
                 }
+            }
+        }
+
+        private string? SaveTimedOutLeagueRecord(int gameId, AgentMetadata agentMetaA, AgentMetadata agentMetaB, GameResult result)
+        {
+            if (result.MoveHistory.Count == 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(_leagueTimeoutRecordsDir);
+
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string filePath = Path.Combine(_leagueTimeoutRecordsDir, $"timeout_game_{timestamp}_{gameId}_{Guid.NewGuid():N}.json");
+                var moveHistoryUcci = result.MoveHistory.Select(NotationConverter.MoveToUcci).ToList();
+                var record = new
+                {
+                    Examples = Array.Empty<TrainingExample>(),
+                    MoveHistoryUcci = moveHistoryUcci,
+                    Result = "超时终结",
+                    result.EndReason,
+                    result.MoveCount,
+                    GameId = gameId,
+                    CreatedAt = DateTime.Now,
+                    AgentA = new
+                    {
+                        agentMetaA.Id,
+                        agentMetaA.Elo,
+                        agentMetaA.MctsSimulations,
+                        agentMetaA.Cpuct,
+                        agentMetaA.Temperature
+                    },
+                    AgentB = new
+                    {
+                        agentMetaB.Id,
+                        agentMetaB.Elo,
+                        agentMetaB.MctsSimulations,
+                        agentMetaB.Cpuct,
+                        agentMetaB.Temperature
+                    }
+                };
+
+                lock (GetFileLock(filePath))
+                {
+                    File.WriteAllText(filePath, JsonSerializer.Serialize(record, new JsonSerializerOptions
+                    {
+                        WriteIndented = true
+                    }));
+                }
+
+                return filePath;
+            }
+            catch (Exception ex)
+            {
+                Log($"[对局记录保存失败] #{gameId}: {ex.Message}");
+                return null;
             }
         }
 

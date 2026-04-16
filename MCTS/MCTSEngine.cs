@@ -124,7 +124,7 @@ namespace ChineseChessAI.MCTS
                             inputData = inputFloat.data<float>().ToArray();
                         }
 
-                        var (policyLogits, value) = await _batchInference.PredictAsync(inputData);
+                        var (policyLogits, value) = await _batchInference.PredictAsync(inputData, cancellationToken);
                         if (!isRed) policyLogits = StateEncoder.FlipPolicy(policyLogits);
 
                         var rawPolicy = GetFilteredPolicy(policyLogits, legalMoves).ToList();
