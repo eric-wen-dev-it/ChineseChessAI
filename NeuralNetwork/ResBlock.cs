@@ -30,7 +30,7 @@ namespace ChineseChessAI.NeuralNetwork
         public override Tensor forward(Tensor x)
         {
             using var scope = torch.NewDisposeScope();
-            
+
             var h1 = conv1.forward(x);
             var h2 = bn1.forward(h1);
             var h3 = torch.nn.functional.relu(h2);
@@ -41,7 +41,7 @@ namespace ChineseChessAI.NeuralNetwork
             // 残差连接
             var sum = h5.add(x);
             var res = torch.nn.functional.relu(sum);
-            
+
             return res.MoveToOuterDisposeScope();
         }
     }

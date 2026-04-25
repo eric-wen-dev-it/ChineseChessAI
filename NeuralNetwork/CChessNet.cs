@@ -1,5 +1,4 @@
-﻿using System.Collections.Generic;
-using TorchSharp;
+﻿using TorchSharp;
 using TorchSharp.Modules;
 using static TorchSharp.torch;
 using static TorchSharp.torch.nn;
@@ -15,7 +14,7 @@ namespace ChineseChessAI.NeuralNetwork
         private readonly Module<Tensor, Tensor> policyHead;
         private readonly Module<Tensor, Tensor> valueHead;
 
-        public CChessNet(int numResBlocks = 20, int numFilters = 192) : base("CChessNet")
+        public CChessNet(int numResBlocks = 20, int numFilters = 192, bool autoCuda = true) : base("CChessNet")
         {
             // 1. 输入层
             // 【修复核心】：不再使用命名参数(kernelSize等)，改用全位置参数，彻底杜绝参数名报错。
@@ -59,7 +58,7 @@ namespace ChineseChessAI.NeuralNetwork
 
             RegisterComponents();
 
-            if (cuda.is_available())
+            if (autoCuda && cuda.is_available())
             {
                 this.to(DeviceType.CUDA);
             }

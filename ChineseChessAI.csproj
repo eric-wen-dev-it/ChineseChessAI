@@ -23,7 +23,6 @@
 
   <ItemGroup>
     <Folder Include="data\models\" />
-    <Folder Include="data\self_play_data\" />
     <Folder Include="Protocols\" />
   </ItemGroup>
 

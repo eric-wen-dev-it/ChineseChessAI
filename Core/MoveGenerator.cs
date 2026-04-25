@@ -1,6 +1,3 @@
-using System;
-using System.Collections.Generic;
-
 namespace ChineseChessAI.Core
 {
     public class MoveGenerator
@@ -8,13 +5,16 @@ namespace ChineseChessAI.Core
         private const int ROWS = 10;
         private const int COLS = 9;
 
-        public string GetMoveValidationResult(Board board, Move move, bool skipPerpetualCheck = false)
+        public string GetMoveValidationResult(Board board, Move move, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var pseudoMoves = new List<Move>(64);
             sbyte piece = board.GetPiece(move.From);
-            if (piece == 0) return "起点无棋子";
+            if (piece == 0)
+                return "起点无棋子";
             bool isRed = piece > 0;
-            if (isRed != board.IsRedTurn) return "走子方错误";
+            if (isRed != board.IsRedTurn)
+                return "走子方错误";
 
             // 1. 检查基础物理走法
             GeneratePieceMoves(board, move.From, piece, pseudoMoves);
@@ -25,12 +25,13 @@ namespace ChineseChessAI.Core
             sbyte captured = board.PerformMoveInternal(move.From, move.To);
             bool safe = IsKingSafe(board, isRed);
             board.UndoMoveInternal(move.From, move.To, captured);
-            if (!safe) return "自方王受威胁 (送将)";
+            if (!safe)
+                return "自方王受威胁 (送将)";
 
             // 3. 检查禁手规则（长打/长捉）
             if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
             {
-                if (IsForbiddenPerpetualMove(board, move))
+                if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                     return "禁手 (违规长打/长捉)";
             }
 
@@ -40,13 +41,15 @@ namespace ChineseChessAI.Core
         /// <summary>
         /// 生成当前局面的所有合法走法（已过滤送将、飞将及违反长将/长捉规则的走法）
         /// </summary>
-        public List<Move> GenerateLegalMoves(Board board, bool skipPerpetualCheck = false)
+        public List<Move> GenerateLegalMoves(Board board, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var pseudoMoves = new List<Move>(64);
             bool isRed = board.IsRedTurn;
 
             for (int i = 0; i < 90; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 sbyte piece = board.GetPiece(i);
                 if (piece == 0)
                     continue;
@@ -59,6 +62,7 @@ namespace ChineseChessAI.Core
             var legalMoves = new List<Move>(pseudoMoves.Count);
             foreach (var move in pseudoMoves)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 sbyte captured = board.PerformMoveInternal(move.From, move.To);
                 bool safe = IsKingSafe(board, isRed);
                 board.UndoMoveInternal(move.From, move.To, captured);
@@ -68,7 +72,7 @@ namespace ChineseChessAI.Core
 
                 if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
                 {
-                    if (IsForbiddenPerpetualMove(board, move))
+                    if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                         continue;
                 }
                 legalMoves.Add(move);
@@ -122,8 +126,9 @@ namespace ChineseChessAI.Core
             return null;
         }
 
-        private bool IsForbiddenPerpetualMove(Board board, Move move)
+        private bool IsForbiddenPerpetualMove(Board board, Move move, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             board.Push(move.From, move.To);
             int count = board.GetRepetitionCount();
             bool isForbidden = false;
@@ -132,8 +137,8 @@ namespace ChineseChessAI.Core
                 // 长将、长捉、长杀均视为禁手
                 bool isChecking = IsChecking(board, !board.IsRedTurn);
                 bool isChasing = IsChasing(board, move);
-                bool isKillThreat = IsThreateningToMate(board, !board.IsRedTurn);
-                
+                bool isKillThreat = IsThreateningToMate(board, !board.IsRedTurn, cancellationToken);
+
                 if (isChecking || isChasing || isKillThreat)
                     isForbidden = true;
             }
@@ -154,13 +159,14 @@ namespace ChineseChessAI.Core
         {
             // 在执行 move 之后的局面判断
             bool isRedAttacker = !board.IsRedTurn;
-            
+
             // 【BUG 8 优化】：标准常捉规则通常判定“主动走动并产生攻击”的子。
             // 遍历所有我方棋子，检测是否对敌方重要棋子产生新的或持续的“捉”。
             // 注意：move.To 是当前落子点。
             int attackerPos = move.To;
             sbyte attacker = board.GetPiece(attackerPos);
-            if (attacker == 0 || (isRedAttacker ? attacker < 0 : attacker > 0)) return false;
+            if (attacker == 0 || (isRedAttacker ? attacker < 0 : attacker > 0))
+                return false;
 
             // 1. 检查刚走动的这枚棋子是否在“捉”
             var attacks = new List<Move>();
@@ -179,9 +185,11 @@ namespace ChineseChessAI.Core
             // 这种情况下通常遍历全场受攻击点是安全的，且能捕捉复杂的“捉”。
             for (int i = 0; i < 90; i++)
             {
-                if (i == attackerPos) continue;
+                if (i == attackerPos)
+                    continue;
                 sbyte otherAttacker = board.GetPiece(i);
-                if (otherAttacker == 0 || (isRedAttacker ? otherAttacker < 0 : otherAttacker > 0)) continue;
+                if (otherAttacker == 0 || (isRedAttacker ? otherAttacker < 0 : otherAttacker > 0))
+                    continue;
 
                 var otherAttacks = new List<Move>();
                 GeneratePieceMoves(board, i, otherAttacker, otherAttacks);
@@ -206,16 +214,18 @@ namespace ChineseChessAI.Core
             sbyte attacker = board.GetPiece(from);
             sbyte target = board.GetPiece(to);
             int targetType = Math.Abs(target);
-            
+
             // 将、士、象不计入常捉（通常判定为闲着或平局规则）
-            if (targetType <= 3) return false;
-            
+            if (targetType <= 3)
+                return false;
+
             // 未过河兵卒不计入常捉
             if (targetType == 7)
             {
                 bool isRedTarget = target > 0;
                 int row = to / 9;
-                if (isRedTarget ? (row >= 5) : (row <= 4)) return false;
+                if (isRedTarget ? (row >= 5) : (row <= 4))
+                    return false;
             }
 
             int attackerVal = GetPieceValue(attacker);
@@ -229,25 +239,30 @@ namespace ChineseChessAI.Core
             // 2. 攻击价值更高的受保护棋子 -> 捉
             // 3. 攻击价值相等的受保护棋子 -> 兑（非捉）
             // 4. 攻击价值更低的受保护棋子 -> 非捉
-            
-            if (!protectedTarget) return true;
-            if (attackerVal < targetVal) return true;
-            
+
+            if (!protectedTarget)
+                return true;
+            if (attackerVal < targetVal)
+                return true;
+
             return false;
         }
 
         private bool IsProtected(Board board, int pos)
         {
             sbyte target = board.GetPiece(pos);
-            if (target == 0) return false;
+            if (target == 0)
+                return false;
             bool isRed = target > 0;
-            
+
             // 遍历所有自方棋子
             for (int i = 0; i < 90; i++)
             {
-                if (i == pos) continue;
+                if (i == pos)
+                    continue;
                 sbyte p = board.GetPiece(i);
-                if (p == 0 || (isRed ? p < 0 : p > 0)) continue;
+                if (p == 0 || (isRed ? p < 0 : p > 0))
+                    continue;
 
                 var moves = new List<Move>();
                 // 注意：炮的保护逻辑特殊，需要单独处理。
@@ -295,8 +310,10 @@ namespace ChineseChessAI.Core
                     for (int i = 0; i < 4; i++)
                     {
                         int nr = r + drKA[i], nc = c + dcKA[i];
-                        if (nc < 3 || nc > 5 || (isRed ? (nr < 7 || nr > 9) : (nr < 0 || nr > 2))) continue;
-                        if (board.GetPiece(nr, nc) != 0) moves.Add(new Move(from, nr * 9 + nc));
+                        if (nc < 3 || nc > 5 || (isRed ? (nr < 7 || nr > 9) : (nr < 0 || nr > 2)))
+                            continue;
+                        if (board.GetPiece(nr, nc) != 0)
+                            moves.Add(new Move(from, nr * 9 + nc));
                     }
                     break;
                 case 3: // Bishop
@@ -305,10 +322,14 @@ namespace ChineseChessAI.Core
                     for (int i = 0; i < 4; i++)
                     {
                         int nr = r + drB[i], nc = c + dcB[i];
-                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-                        if ((isRed && nr < 5) || (!isRed && nr > 4)) continue;
-                        if (board.GetPiece(r + prB[i], c + pcB[i]) != 0) continue;
-                        if (board.GetPiece(nr, nc) != 0) moves.Add(new Move(from, nr * 9 + nc));
+                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
+                            continue;
+                        if ((isRed && nr < 5) || (!isRed && nr > 4))
+                            continue;
+                        if (board.GetPiece(r + prB[i], c + pcB[i]) != 0)
+                            continue;
+                        if (board.GetPiece(nr, nc) != 0)
+                            moves.Add(new Move(from, nr * 9 + nc));
                     }
                     break;
                 case 4: // Knight
@@ -317,9 +338,12 @@ namespace ChineseChessAI.Core
                     for (int i = 0; i < 8; i++)
                     {
                         int nr = r + drK[i], nc = c + dcK[i];
-                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-                        if (board.GetPiece(r + prK[i], c + pcK[i]) != 0) continue;
-                        if (board.GetPiece(nr, nc) != 0) moves.Add(new Move(from, nr * 9 + nc));
+                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
+                            continue;
+                        if (board.GetPiece(r + prK[i], c + pcK[i]) != 0)
+                            continue;
+                        if (board.GetPiece(nr, nc) != 0)
+                            moves.Add(new Move(from, nr * 9 + nc));
                     }
                     break;
                 case 5: // Rook
@@ -329,9 +353,14 @@ namespace ChineseChessAI.Core
                         for (int step = 1; step < 10; step++)
                         {
                             int nr = r + drR[i] * step, nc = c + dcR[i] * step;
-                            if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) break;
+                            if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
+                                break;
                             sbyte target = board.GetPiece(nr, nc);
-                            if (target != 0) { moves.Add(new Move(from, nr * 9 + nc)); break; }
+                            if (target != 0)
+                            {
+                                moves.Add(new Move(from, nr * 9 + nc));
+                                break;
+                            }
                         }
                     }
                     break;
@@ -341,8 +370,10 @@ namespace ChineseChessAI.Core
                         moves.Add(new Move(from, forwardR * 9 + c));
                     if (isRed ? (r <= 4) : (r >= 5))
                     {
-                        if (c - 1 >= 0 && board.GetPiece(r, c - 1) != 0) moves.Add(new Move(from, r * 9 + (c - 1)));
-                        if (c + 1 < 9 && board.GetPiece(r, c + 1) != 0) moves.Add(new Move(from, r * 9 + (c + 1)));
+                        if (c - 1 >= 0 && board.GetPiece(r, c - 1) != 0)
+                            moves.Add(new Move(from, r * 9 + (c - 1)));
+                        if (c + 1 < 9 && board.GetPiece(r, c + 1) != 0)
+                            moves.Add(new Move(from, r * 9 + (c + 1)));
                     }
                     break;
             }
@@ -358,11 +389,13 @@ namespace ChineseChessAI.Core
                 for (int step = 1; step < 10; step++)
                 {
                     int nr = r + dr[i] * step, nc = c + dc[i] * step;
-                    if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) break;
+                    if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
+                        break;
                     sbyte target = board.GetPiece(nr, nc);
                     if (!overPiece)
                     {
-                        if (target != 0) overPiece = true;
+                        if (target != 0)
+                            overPiece = true;
                     }
                     else
                     {
@@ -380,21 +413,23 @@ namespace ChineseChessAI.Core
         // 长杀禁手入口：检查攻击方是否已形成强制杀势（最多向前搜索 MateSearchDepth 步攻击）
         private const int MateSearchDepth = 5;
 
-        public bool IsThreateningToMate(Board board, bool isRedAttacker)
+        public bool IsThreateningToMate(Board board, bool isRedAttacker, CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // 调用时机：IsForbiddenPerpetualMove 已 Push(攻击方着法)，board.IsRedTurn = 防守方。
             // 正确语义：对"防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
             // 攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
-            var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
+            var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
             if (defenderMoves.Count == 0)
                 return true;
 
             foreach (var defenderMove in defenderMoves)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 board.Push(defenderMove.From, defenderMove.To);
                 try
                 {
-                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth))
+                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, cancellationToken))
                         return false;
                 }
                 finally
@@ -406,27 +441,30 @@ namespace ChineseChessAI.Core
             return true;
         }
 
-        private bool HasForcedKill(Board board, bool isRedAttacker, int depth)
+        private bool HasForcedKill(Board board, bool isRedAttacker, int depth, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (depth <= 0)
                 return false;
 
-            foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true))
+            foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 board.Push(attackerMove.From, attackerMove.To);
                 try
                 {
-                    var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true);
+                    var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
                     if (defenderMoves.Count == 0)
                         return true;
 
                     bool defenderHasEscape = false;
                     foreach (var defenderMove in defenderMoves)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         board.Push(defenderMove.From, defenderMove.To);
                         try
                         {
-                            if (!HasForcedKill(board, isRedAttacker, depth - 1))
+                            if (!HasForcedKill(board, isRedAttacker, depth - 1, cancellationToken))
                             {
                                 defenderHasEscape = true;
                                 break;
@@ -454,12 +492,18 @@ namespace ChineseChessAI.Core
         {
             switch (Math.Abs(piece))
             {
-                case 1: return 1000; // 帅
-                case 5: return 9;    // 俥
-                case 6: return 5;    // 炮
-                case 4: return 4;    // 傌
-                case 7: return 2;    // 卒 (过河)
-                default: return 2;   // 其他
+                case 1:
+                    return 1000; // 帅
+                case 5:
+                    return 9;    // 俥
+                case 6:
+                    return 5;    // 炮
+                case 4:
+                    return 4;    // 傌
+                case 7:
+                    return 2;    // 卒 (过河)
+                default:
+                    return 2;   // 其他
             }
         }
 

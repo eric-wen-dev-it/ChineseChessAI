@@ -1,24 +1,21 @@
-using ChineseChessAI.Core;
+﻿using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Utils;
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using TorchSharp;
-using static TorchSharp.torch;
 
 namespace ChineseChessAI.Training
 {
     public class PersistentAgent : IDisposable
     {
-        public CChessNet Model { get; }
+        public CChessNet Model
+        {
+            get;
+        }
         public Trainer Trainer { get; private set; } = null!;
 
         public PersistentAgent()
@@ -31,7 +28,8 @@ namespace ChineseChessAI.Training
         // 在 model.load() 和所有 .to() 调用完成后调用此方法
         internal void CompleteInit()
         {
-            if (torch.cuda.is_available()) Model.to(DeviceType.CUDA);
+            if (torch.cuda.is_available())
+                Model.to(DeviceType.CUDA);
             Trainer = new Trainer(Model);
         }
 
@@ -52,16 +50,28 @@ namespace ChineseChessAI.Training
 
         private volatile bool _isTraining = false;
         public bool IsTraining => _isTraining;
-        public ReplayBuffer MasterBuffer { get; private set; }
-        public ReplayBuffer LeagueBuffer { get; private set; }
+        public ReplayBuffer MasterBuffer
+        {
+            get; private set;
+        }
+        public ReplayBuffer LeagueBuffer
+        {
+            get; private set;
+        }
 
         private LeagueManager _leagueManager;
         private static readonly object _gpuTrainingLock = new object();
         private readonly SemaphoreSlim _maintenanceLock = new SemaphoreSlim(1, 1);
         private static readonly ConcurrentDictionary<string, object> _fileLocks = new();
         private static readonly object _runtimeLogLock = new object();
+        private const int LoadedAgentCacheLimit = 12;
         private readonly object _inFlightGamesLock = new object();
-        private static readonly TimeSpan LeagueGameTimeout = TimeSpan.FromMinutes(15);
+        private static readonly TimeSpan LeagueGameTimeout = TimeSpan.FromMinutes(30);
+        private static readonly TimeSpan LeagueDrainWaitTimeout = LeagueGameTimeout + TimeSpan.FromMinutes(3);
+        private static readonly TimeSpan DrainProgressLogInterval = TimeSpan.FromSeconds(30);
+        private static readonly TimeSpan WatchdogCheckInterval = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan WatchdogStaleLogThreshold = TimeSpan.FromMinutes(30);
+        private static readonly TimeSpan LeagueShutdownWaitTimeout = TimeSpan.FromMinutes(1);
         private static readonly string _runtimeLogPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
             "data",
@@ -70,10 +80,13 @@ namespace ChineseChessAI.Training
             AppDomain.CurrentDomain.BaseDirectory,
             "data",
             "league_timeout_records");
+        private const int MaxLeagueTrainingGames = 5000;
         private int _inFlightGameCount = 0;
         private TaskCompletionSource<bool> _gamesDrainedTcs = CreateCompletedTcs();
-        
+        private readonly ConcurrentDictionary<int, ActiveLeagueGame> _activeLeagueGames = new();
+
         private readonly ConcurrentDictionary<int, Lazy<PersistentAgent>> _agentPool = new();
+        private readonly ConcurrentDictionary<int, long> _agentLastTouchedUtcTicks = new();
         private readonly ConcurrentDictionary<int, byte> _reservedAgentIds = new();
         private readonly ConcurrentDictionary<int, SemaphoreSlim> _agentActiveLocks = new();
         private SemaphoreSlim GetAgentActiveLock(int id) => _agentActiveLocks.GetOrAdd(id, _ => new SemaphoreSlim(1, 1));
@@ -82,6 +95,25 @@ namespace ChineseChessAI.Training
         private CancellationTokenSource? _cts;
         private Task? _currentTrainingTask;
         private Task? _backgroundLoadTask;
+        private CancellationTokenSource? _watchdogCts;
+        private Task? _watchdogTask;
+        private long _lastLogUtcTicks = DateTimeOffset.UtcNow.UtcTicks;
+        private int _watchdogRestartRequested;
+        private volatile bool _skipAgentDisposeOnNextStart;
+
+        private sealed record LeagueRunOptions(
+            int PopulationSize,
+            int MaxMoves,
+            int ExploreMoves,
+            float MaterialBias,
+            int PopulationRefreshInterval,
+            int? MaxPopulationRefreshCycles);
+
+        private sealed record ActiveLeagueGame(
+            int GameId,
+            int AgentA,
+            int AgentB,
+            DateTimeOffset StartedAt);
 
         private static TaskCompletionSource<bool> CreateCompletedTcs()
         {
@@ -93,6 +125,50 @@ namespace ChineseChessAI.Training
         private static TaskCompletionSource<bool> CreatePendingTcs() =>
             new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        private void TouchAgent(int agentId)
+        {
+            _agentLastTouchedUtcTicks[agentId] = DateTime.UtcNow.Ticks;
+        }
+
+        private void TrimIdleAgentPool(int maxLoaded = LoadedAgentCacheLimit)
+        {
+            if (_agentPool.Count <= maxLoaded)
+                return;
+
+            var reserved = GetReservedAgentIdsSnapshot();
+            var candidates = _agentPool
+                .Where(e => e.Value.IsValueCreated && !reserved.Contains(e.Key))
+                .Select(e => (Id: e.Key, Tick: _agentLastTouchedUtcTicks.TryGetValue(e.Key, out long tick) ? tick : 0))
+                .OrderBy(e => e.Tick)
+                .ToList();
+
+            foreach (var candidate in candidates)
+            {
+                if (_agentPool.Count <= maxLoaded)
+                    break;
+
+                var agentLock = GetAgentActiveLock(candidate.Id);
+                if (!agentLock.Wait(0))
+                    continue;
+
+                try
+                {
+                    if (_reservedAgentIds.ContainsKey(candidate.Id))
+                        continue;
+
+                    if (_agentPool.TryRemove(candidate.Id, out var lazyAgent) && lazyAgent.IsValueCreated)
+                    {
+                        lazyAgent.Value.Dispose();
+                        _agentLastTouchedUtcTicks.TryRemove(candidate.Id, out _);
+                    }
+                }
+                finally
+                {
+                    agentLock.Release();
+                }
+            }
+        }
+
         private void ResetInFlightGameTracking()
         {
             lock (_inFlightGamesLock)
@@ -100,10 +176,14 @@ namespace ChineseChessAI.Training
                 _inFlightGameCount = 0;
                 _gamesDrainedTcs = CreateCompletedTcs();
             }
+
+            _activeLeagueGames.Clear();
         }
 
-        private void MarkGameStarted()
+        private void MarkGameStarted(int gameId, int agentIdA, int agentIdB)
         {
+            _activeLeagueGames[gameId] = new ActiveLeagueGame(gameId, agentIdA, agentIdB, DateTimeOffset.Now);
+
             lock (_inFlightGamesLock)
             {
                 if (_inFlightGameCount == 0)
@@ -115,9 +195,10 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private void MarkGameFinished()
+        private void MarkGameFinished(int gameId)
         {
             TaskCompletionSource<bool>? drained = null;
+            _activeLeagueGames.TryRemove(gameId, out _);
 
             lock (_inFlightGamesLock)
             {
@@ -142,6 +223,23 @@ namespace ChineseChessAI.Training
             {
                 return _inFlightGameCount;
             }
+        }
+
+        private string GetActiveLeagueGamesSummary()
+        {
+            var activeGames = _activeLeagueGames.Values
+                .OrderBy(g => g.StartedAt)
+                .ToList();
+
+            if (activeGames.Count == 0)
+            {
+                return "活跃对局明细: 无";
+            }
+
+            DateTimeOffset now = DateTimeOffset.Now;
+            var entries = activeGames.Select(g =>
+                $"#{g.GameId} Agent_{g.AgentA} vs Agent_{g.AgentB}, 已运行 {(now - g.StartedAt).TotalMinutes:F1} 分钟, 开始 {g.StartedAt:HH:mm:ss}");
+            return "活跃对局明细: " + string.Join(" | ", entries);
         }
 
         private HashSet<int> GetReservedAgentIdsSnapshot()
@@ -190,6 +288,169 @@ namespace ChineseChessAI.Training
             return waitTask.WaitAsync(token);
         }
 
+        private async Task WaitForInFlightGamesToDrainWithProgressAsync(string context, CancellationToken token)
+        {
+            DateTimeOffset startedAt = DateTimeOffset.Now;
+
+            while (true)
+            {
+                int inFlightGames = GetInFlightGameCount();
+                if (inFlightGames == 0)
+                {
+                    return;
+                }
+
+                TimeSpan elapsed = DateTimeOffset.Now - startedAt;
+                if (elapsed > LeagueDrainWaitTimeout)
+                {
+                    string message = $"[{context}] 等待对局收束超时：仍有 {inFlightGames} 个对局未结束，已等待 {elapsed.TotalMinutes:F1} 分钟。{GetActiveLeagueGamesSummary()}";
+                    Log(message);
+                    throw new TimeoutException(message);
+                }
+
+                Log($"[{context}] 等待中：当前仍有 {inFlightGames} 个对局在进行，已等待 {elapsed.TotalMinutes:F1} 分钟。{GetActiveLeagueGamesSummary()}");
+
+                Task drainTask = WaitForInFlightGamesToDrainAsync(token);
+                Task delayTask = Task.Delay(DrainProgressLogInterval, token);
+                Task completedTask = await Task.WhenAny(drainTask, delayTask).ConfigureAwait(false);
+
+                if (completedTask == drainTask)
+                {
+                    await drainTask.ConfigureAwait(false);
+                    return;
+                }
+
+                await delayTask.ConfigureAwait(false);
+            }
+        }
+
+        private async Task WaitForGameTasksToSettleAsync(IEnumerable<Task> gameTasks, CancellationToken token)
+        {
+            Task[] activeTasks = gameTasks.Where(t => t != null && !t.IsCompleted).ToArray();
+            if (activeTasks.Length == 0)
+            {
+                return;
+            }
+
+            Task allGamesTask = Task.WhenAll(activeTasks);
+            Task timeoutTask = Task.Delay(LeagueShutdownWaitTimeout, CancellationToken.None);
+            Task completedTask = await Task.WhenAny(allGamesTask, timeoutTask).ConfigureAwait(false);
+            if (completedTask == allGamesTask)
+            {
+                await allGamesTask.ConfigureAwait(false);
+                return;
+            }
+
+            Log($"[联赛关闭] 等待对局任务结束超过 {LeagueShutdownWaitTimeout.TotalMinutes:F0} 分钟，仍有 {activeTasks.Count(t => !t.IsCompleted)} 个任务未退出。");
+        }
+
+        private DateTimeOffset GetLastObservedLogUtc()
+        {
+            long inMemoryTicks = Volatile.Read(ref _lastLogUtcTicks);
+            DateTimeOffset last = new DateTimeOffset(inMemoryTicks, TimeSpan.Zero);
+
+            try
+            {
+                if (File.Exists(_runtimeLogPath))
+                {
+                    DateTime fileWriteTimeUtc = File.GetLastWriteTimeUtc(_runtimeLogPath);
+                    if (fileWriteTimeUtc.Ticks > last.UtcTicks)
+                    {
+                        last = new DateTimeOffset(fileWriteTimeUtc, TimeSpan.Zero);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return last;
+        }
+
+        private void StartLeagueWatchdog(LeagueRunOptions options, CancellationToken runToken)
+        {
+            _watchdogCts?.Cancel();
+            _watchdogCts?.Dispose();
+            _watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(runToken);
+            _watchdogRestartRequested = 0;
+            Volatile.Write(ref _lastLogUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+
+            var watchdogToken = _watchdogCts.Token;
+            _watchdogTask = Task.Run(async () =>
+            {
+                while (!watchdogToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(WatchdogCheckInterval, watchdogToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+
+                    DateTimeOffset lastLogUtc = GetLastObservedLogUtc();
+                    TimeSpan quietFor = DateTimeOffset.UtcNow - lastLogUtc;
+                    if (quietFor < WatchdogStaleLogThreshold)
+                    {
+                        continue;
+                    }
+
+                    await RestartLeagueFromWatchdogAsync(options, quietFor, lastLogUtc).ConfigureAwait(false);
+                    break;
+                }
+            });
+        }
+
+        private async Task RestartLeagueFromWatchdogAsync(LeagueRunOptions options, TimeSpan quietFor, DateTimeOffset lastLogUtc)
+        {
+            if (Interlocked.CompareExchange(ref _watchdogRestartRequested, 1, 0) != 0)
+            {
+                return;
+            }
+
+            Log("[Watchdog] 检测到日志长时间无输出，准备写入状态并重启联赛。");
+            Log($"[Watchdog] 最后日志时间 UTC: {lastLogUtc:yyyy-MM-dd HH:mm:ss}，静默 {quietFor.TotalMinutes:F1} 分钟。");
+            LogLeagueStateSnapshot("[Watchdog]");
+
+            Task? previousTrainingTask = _currentTrainingTask;
+            StopTraining();
+
+            if (previousTrainingTask != null)
+            {
+                Task completedTask = await Task.WhenAny(previousTrainingTask, Task.Delay(LeagueShutdownWaitTimeout)).ConfigureAwait(false);
+                if (completedTask != previousTrainingTask)
+                {
+                    Log($"[Watchdog] 旧联赛在 {LeagueShutdownWaitTimeout.TotalMinutes:F0} 分钟内未完全退出；将保留旧 agent 对象引用并启动新联赛，避免释放仍可能被旧任务使用的模型。");
+                    _skipAgentDisposeOnNextStart = true;
+                    _currentTrainingTask = null;
+                    _backgroundLoadTask = null;
+                }
+            }
+
+            Log("[Watchdog] 正在按原参数重启联赛。");
+            await StartLeagueTrainingAsync(
+                options.PopulationSize,
+                options.MaxMoves,
+                options.ExploreMoves,
+                options.MaterialBias,
+                options.PopulationRefreshInterval,
+                options.MaxPopulationRefreshCycles).ConfigureAwait(false);
+        }
+
+        private void LogLeagueStateSnapshot(string prefix)
+        {
+            Log($"{prefix} 状态快照：IsTraining={IsTraining}, InFlight={GetInFlightGameCount()}, ReservedAgents={_reservedAgentIds.Count}, LoadedAgents={_agentPool.Count}");
+            Log($"{prefix} 任务状态：TrainingTask={_currentTrainingTask?.Status.ToString() ?? "null"}, BackgroundLoad={_backgroundLoadTask?.Status.ToString() ?? "null"}, Canceled={_cts?.IsCancellationRequested ?? false}");
+            Log($"{prefix} {GetActiveLeagueGamesSummary()}");
+
+            var reserved = GetReservedAgentIdsSnapshot();
+            if (reserved.Count > 0)
+            {
+                Log($"{prefix} 保留中的 Agent: {string.Join(",", reserved.OrderBy(x => x))}");
+            }
+        }
+
         public TrainingOrchestrator()
         {
             MasterBuffer = new ReplayBuffer(5000000, "data/master_data");
@@ -210,31 +471,67 @@ namespace ChineseChessAI.Training
             int maxMoves = 150,
             int exploreMoves = 40,
             float materialBias = 0.1f,
-            int populationRefreshInterval = 100,
+            int populationRefreshInterval = 0,
             int? maxPopulationRefreshCycles = null)
         {
-            if (populationSize > 100) throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
-            if (populationSize < 2) throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
+            if (populationSize > 100)
+                throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
+            if (populationSize < 2)
+                throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
 
-            if (populationRefreshInterval <= 0) throw new ArgumentOutOfRangeException(nameof(populationRefreshInterval));
-            if (maxPopulationRefreshCycles.HasValue && maxPopulationRefreshCycles.Value <= 0) throw new ArgumentOutOfRangeException(nameof(maxPopulationRefreshCycles));
+            if (populationRefreshInterval <= 0)
+                populationRefreshInterval = populationSize * 8;
+            populationRefreshInterval = Math.Max(populationRefreshInterval, populationSize * 4);
+            if (maxPopulationRefreshCycles.HasValue && maxPopulationRefreshCycles.Value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxPopulationRefreshCycles));
+            var runOptions = new LeagueRunOptions(
+                populationSize,
+                maxMoves,
+                exploreMoves,
+                materialBias,
+                populationRefreshInterval,
+                maxPopulationRefreshCycles);
 
-            if (IsTraining) return;
+            if (IsTraining)
+                return;
             if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
             {
-                try { await _currentTrainingTask; } catch { }
+                try
+                {
+                    await _currentTrainingTask;
+                }
+                catch { }
             }
             if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
             {
-                try { await _backgroundLoadTask; } catch { }
+                try
+                {
+                    await _backgroundLoadTask;
+                }
+                catch { }
             }
 
             _isTraining = true;
             _cts = new CancellationTokenSource();
+            var runCts = _cts;
+            StartLeagueWatchdog(runOptions, runCts.Token);
+            var runWatchdogCts = _watchdogCts;
 
             _leagueManager = new LeagueManager(populationSize);
-            foreach (var lazyAgent in _agentPool.Values) if (lazyAgent.IsValueCreated) lazyAgent.Value.Dispose();
+            if (_skipAgentDisposeOnNextStart)
+            {
+                Log("[Watchdog] 跳过本次启动前的旧 agent dispose；旧联赛任务可能仍在退出。");
+                _skipAgentDisposeOnNextStart = false;
+            }
+            else
+            {
+                foreach (var lazyAgent in _agentPool.Values)
+                    if (lazyAgent.IsValueCreated)
+                        lazyAgent.Value.Dispose();
+            }
+
             _agentPool.Clear();
+            _agentLastTouchedUtcTicks.Clear();
             _reservedAgentIds.Clear();
             _agentActiveLocks.Clear();
             ResetInFlightGameTracking();
@@ -255,19 +552,19 @@ namespace ChineseChessAI.Training
                         try
                         {
                             Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
-                            
-                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token, cutoffTime: startTime);
-                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: _cts.Token, cutoffTime: startTime);
-                            
+
+                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime);
+                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime);
+
                             await Task.WhenAll(masterTask, leagueTask);
-                            
+
                             var (masterSamples, masterGames) = await masterTask;
                             var (leagueSamples, leagueGames) = await leagueTask;
-                            
+
                             Log($"[后台装载完成] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
                         }
                         catch (Exception ex) { Log($"[后台装载异常] {ex.Message}"); }
-                    }, _cts.Token);
+                    }, runCts.Token);
 
                     const int maxParallelGames = 4;
                     int gameCounter = 0;
@@ -284,17 +581,51 @@ namespace ChineseChessAI.Training
                     {
                         try
                         {
-                            await semaphore.WaitAsync(_cts.Token);
+                            await semaphore.WaitAsync(runCts.Token);
                         }
                         catch (OperationCanceledException)
                         {
                             break;
                         }
 
-                        if (!IsTraining || _cts.Token.IsCancellationRequested)
+                        if (!IsTraining || runCts.Token.IsCancellationRequested)
                         {
                             semaphore.Release();
                             break;
+                        }
+
+                        if (completedGameCounter >= nextTrainAt)
+                        {
+                            nextTrainAt += 20;
+                            semaphore.Release();
+                            await PerformDiverseTrainingAsync(runCts.Token);
+                            if (runCts.Token.IsCancellationRequested || !IsTraining)
+                            {
+                                break;
+                            }
+
+                            continue;
+                        }
+
+                        if (completedGameCounter >= nextEvolutionAt)
+                        {
+                            nextEvolutionAt += populationRefreshInterval;
+                            semaphore.Release();
+                            await PerformPopulationRefreshAsync(runCts.Token);
+                            if (runCts.Token.IsCancellationRequested || !IsTraining)
+                            {
+                                break;
+                            }
+
+                            completedRefreshCycles++;
+                            if (maxPopulationRefreshCycles.HasValue && completedRefreshCycles >= maxPopulationRefreshCycles.Value)
+                            {
+                                Log($"[PopulationRefresh] Completed {completedRefreshCycles}/{maxPopulationRefreshCycles.Value} cycle(s); stopping league run.");
+                                StopTraining();
+                                break;
+                            }
+
+                            continue;
                         }
 
                         var reservedAgentIds = GetReservedAgentIdsSnapshot();
@@ -303,7 +634,7 @@ namespace ChineseChessAI.Training
                             semaphore.Release();
                             try
                             {
-                                await Task.Delay(200, _cts.Token);
+                                await Task.Delay(200, runCts.Token);
                             }
                             catch (OperationCanceledException)
                             {
@@ -317,7 +648,7 @@ namespace ChineseChessAI.Training
                             semaphore.Release();
                             try
                             {
-                                await Task.Delay(50, _cts.Token);
+                                await Task.Delay(50, runCts.Token);
                             }
                             catch (OperationCanceledException)
                             {
@@ -326,103 +657,133 @@ namespace ChineseChessAI.Training
                             continue;
                         }
 
-                        MarkGameStarted();
+                        int currentId = Interlocked.Increment(ref gameCounter);
+                        MarkGameStarted(currentId, agentMetaA.Id, agentMetaB.Id);
                         int currentMaxMoves = (int)(maxMoves * (0.7 + Random.Shared.NextDouble() * 0.8));
                         Task gameTask;
                         try
                         {
                             gameTask = Task.Run(async () =>
                             {
-                            try
-                            {
-                                var (firstMeta, secondMeta) = agentMetaA.Id < agentMetaB.Id ? (agentMetaA, agentMetaB) : (agentMetaB, agentMetaA);
-                                var lockFirst = GetAgentActiveLock(firstMeta.Id);
-                                var lockSecond = GetAgentActiveLock(secondMeta.Id);
-
-                                await lockFirst.WaitAsync(_cts.Token);
                                 try
                                 {
-                                    await lockSecond.WaitAsync(_cts.Token);
+                                    var (firstMeta, secondMeta) = agentMetaA.Id < agentMetaB.Id ? (agentMetaA, agentMetaB) : (agentMetaB, agentMetaA);
+                                    var lockFirst = GetAgentActiveLock(firstMeta.Id);
+                                    var lockSecond = GetAgentActiveLock(secondMeta.Id);
+
+                                    await lockFirst.WaitAsync(runCts.Token);
                                     try
                                     {
-                                        var pAgentA = GetOrAddAgent(agentMetaA);
-                                        var pAgentB = GetOrAddAgent(agentMetaB);
-
-                                        using var engineA = new MCTSEngine(pAgentA.Model, batchSize: 16, cPuct: agentMetaA.Cpuct);
-                                        using var engineB = new MCTSEngine(pAgentB.Model, batchSize: 16, cPuct: agentMetaB.Cpuct);
-
-                                        var selfPlay = new SelfPlay(engineA, engineB, currentMaxMoves, exploreMoves, materialBias, 
-                                                                    lowTempA: agentMetaA.Temperature, lowTempB: agentMetaB.Temperature, 
-                                                                    simsA: agentMetaA.MctsSimulations, simsB: agentMetaB.MctsSimulations);
-                                        
-                                        int currentId = Interlocked.Increment(ref gameCounter);
-                                        Log($"[对局 #{currentId} 开始] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0} DNA:S{agentMetaA.MctsSimulations}/C{agentMetaA.Cpuct:F1}/T{agentMetaA.Temperature:F1}) " +
-                                            $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1})");
-
-                                        bool aIsRed = Random.Shared.Next(2) == 0;
-                                        using var gameTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token);
-                                        gameTimeoutCts.CancelAfter(LeagueGameTimeout);
-                                        var result = await selfPlay.RunGameAsync(aIsRed, null, gameTimeoutCts.Token);
-                                        bool hitGameTimeout = gameTimeoutCts.IsCancellationRequested && !_cts.Token.IsCancellationRequested;
-
-                                        if (result.IsSuccess)
+                                        await lockSecond.WaitAsync(runCts.Token);
+                                        try
                                         {
-                                            float resA = result.ResultStr == "平局" ? 0 : (result.ResultStr == (aIsRed ? "红胜" : "黑胜") ? 1.0f : -1.0f);
-                                            
-                                            // 【修复 P1】：捕获赛前 ELO 以确保更新公平
-                                            double eloABefore = agentMetaA.Elo;
-                                            double eloBBefore = agentMetaB.Elo;
+                                            var pAgentA = GetOrAddAgent(agentMetaA);
+                                            var pAgentB = GetOrAddAgent(agentMetaB);
 
-                                            lock(_leagueManager)
+                                            using var engineA = new MCTSEngine(pAgentA.Model, batchSize: 16, cPuct: agentMetaA.Cpuct);
+                                            using var engineB = new MCTSEngine(pAgentB.Model, batchSize: 16, cPuct: agentMetaB.Cpuct);
+
+                                            var selfPlay = new SelfPlay(engineA, engineB, currentMaxMoves, exploreMoves, materialBias,
+                                                                        lowTempA: agentMetaA.Temperature, lowTempB: agentMetaB.Temperature,
+                                                                        simsA: agentMetaA.MctsSimulations, simsB: agentMetaB.MctsSimulations);
+
+                                            Log($"[对局 #{currentId} 开始] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0} DNA:S{agentMetaA.MctsSimulations}/C{agentMetaA.Cpuct:F1}/T{agentMetaA.Temperature:F1}) " +
+                                                $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} DNA:S{agentMetaB.MctsSimulations}/C{agentMetaB.Cpuct:F1}/T{agentMetaB.Temperature:F1})");
+
+                                            bool aIsRed = Random.Shared.Next(2) == 0;
+                                            using var gameTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(runCts.Token);
+                                            gameTimeoutCts.CancelAfter(LeagueGameTimeout);
+                                            using var timeoutNoticeCts = CancellationTokenSource.CreateLinkedTokenSource(runCts.Token);
+                                            _ = LogGameTimeoutRequestAsync(
+                                                currentId,
+                                                agentMetaA.Id,
+                                                agentMetaB.Id,
+                                                gameTimeoutCts.Token,
+                                                timeoutNoticeCts.Token);
+                                            var result = await selfPlay.RunGameAsync(aIsRed, null, gameTimeoutCts.Token);
+                                            timeoutNoticeCts.Cancel();
+                                            bool hitGameTimeout = gameTimeoutCts.IsCancellationRequested && !runCts.Token.IsCancellationRequested;
+
+                                            if (result.IsSuccess)
                                             {
-                                                _leagueManager.UpdateResult(agentMetaA.Id, resA, eloBBefore);
-                                                _leagueManager.UpdateResult(agentMetaB.Id, -resA, eloABefore);
+                                                float resA = result.ResultStr == "平局" ? 0
+                                                    : (result.ResultStr == (aIsRed ? "红胜" : "黑胜") ? 1.0f : -1.0f);
+
+                                                // 【修复 P1】：捕获赛前 ELO 以确保更新公平
+                                                double eloABefore = agentMetaA.Elo;
+                                                double eloBBefore = agentMetaB.Elo;
+
+                                                lock (_leagueManager)
+                                                {
+                                                    _leagueManager.UpdateResult(agentMetaA.Id, resA, eloBBefore);
+                                                    _leagueManager.UpdateResult(agentMetaB.Id, -resA, eloABefore);
+                                                }
+
+                                                var combinedExamples = new List<TrainingExample>(result.ExamplesA.Count + result.ExamplesB.Count);
+                                                combinedExamples.AddRange(result.ExamplesA);
+                                                combinedExamples.AddRange(result.ExamplesB);
+
+                                                if (combinedExamples.Count > 0)
+                                                {
+                                                    var moveHistoryUcci = result.MoveHistory.Select(NotationConverter.MoveToUcci).ToList();
+                                                    LeagueBuffer.AddGame(new MasterGameData(combinedExamples, moveHistoryUcci)
+                                                    {
+                                                        StartedAt = result.StartedAt,
+                                                        EndedAt = result.EndedAt,
+                                                        Elapsed = result.Elapsed,
+                                                        Result = result.ResultStr,
+                                                        EndReason = result.EndReason,
+                                                        MoveCount = result.MoveCount,
+                                                        GameId = currentId
+                                                    });
+                                                }
+
+                                                Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
+
+                                                OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
                                             }
-
-                                            if (result.ExamplesA.Count > 0) LeagueBuffer.AddRange(result.ExamplesA);
-                                            if (result.ExamplesB.Count > 0) LeagueBuffer.AddRange(result.ExamplesB);
-
-                                            Log($"[对局 #{currentId} 结束] Agent_{agentMetaA.Id}(ELO:{agentMetaA.Elo:F0}) VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0}) | {result.ResultStr} | {result.MoveCount}步");
-
-                                            OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, result.ResultStr);
-                                        }
-                                        else if (hitGameTimeout)
-                                        {
-                                            string? savedRecordPath = SaveTimedOutLeagueRecord(currentId, agentMetaA, agentMetaB, result);
-                                            string savedSuffix = savedRecordPath == null ? string.Empty : $" | 记录: {Path.GetFileName(savedRecordPath)}";
-                                            Log($"[对局 #{currentId} 超时] Agent_{agentMetaA.Id} VS Agent_{agentMetaB.Id} | 超过 {LeagueGameTimeout.TotalMinutes:F0} 分钟终止 | 已走 {result.MoveCount} 步{savedSuffix}");
-
-                                            if (result.MoveHistory.Count > 0)
+                                            else if (hitGameTimeout)
                                             {
-                                                OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, "超时终结");
+                                                string? savedRecordPath = SaveTimedOutLeagueRecord(currentId, agentMetaA, agentMetaB, result);
+                                                string savedSuffix = savedRecordPath == null ? string.Empty : $" | 记录: {Path.GetFileName(savedRecordPath)}";
+                                                Log($"[对局 #{currentId} 超时] Agent_{agentMetaA.Id} VS Agent_{agentMetaB.Id} | 超过 {LeagueGameTimeout.TotalMinutes:F0} 分钟终止 | 已走 {result.MoveCount} 步{savedSuffix}");
+
+                                                if (result.MoveHistory.Count > 0)
+                                                {
+                                                    OnReplayRequested?.Invoke(result.MoveHistory, currentMaxMoves, currentId, "超时终结");
+                                                }
+                                            }
+                                            else if (result.EndReason != "训练被强制终止")
+                                            {
+                                                throw new Exception($"对弈失败 - {result.EndReason}");
                                             }
                                         }
-                                        else if (result.EndReason != "训练被强制终止")
+                                        finally
                                         {
-                                            throw new Exception($"对弈失败 - {result.EndReason}");
+                                            Interlocked.Increment(ref completedGameCounter);
+                                            lockSecond.Release();
                                         }
                                     }
-                                    finally 
-                                    { 
-                                        Interlocked.Increment(ref completedGameCounter);
-                                        lockSecond.Release(); 
-                                    }
+                                    finally { lockFirst.Release(); }
                                 }
-                                finally { lockFirst.Release(); }
-                            }
-                            catch (Exception ex) { Log($"[对局异常] {ex.Message}"); }
-                            finally
-                            {
-                                ReleaseReservedAgents(agentMetaA.Id, agentMetaB.Id);
-                                MarkGameFinished();
-                                semaphore.Release();
-                            }
-                        });
+                                catch (Exception ex)
+                                {
+                                    Log($"[对局异常] {ex.Message}");
+                                    Log($"[对局异常-堆栈] {ex}");
+                                }
+                                finally
+                                {
+                                    ReleaseReservedAgents(agentMetaA.Id, agentMetaB.Id);
+                                    MarkGameFinished(currentId);
+                                    semaphore.Release();
+                                    TrimIdleAgentPool();
+                                }
+                            });
                         }
                         catch
                         {
                             ReleaseReservedAgents(agentMetaA.Id, agentMetaB.Id);
-                            MarkGameFinished();
+                            MarkGameFinished(currentId);
                             semaphore.Release();
                             throw;
                         }
@@ -433,74 +794,102 @@ namespace ChineseChessAI.Training
                             gameTasks.TryDequeue(out _);
                         }
 
-                        if (completedGameCounter >= nextTrainAt)
-                        {
-                            nextTrainAt += 20;
-                            var trainTask = PerformDiverseTrainingAsync(_cts.Token);
-                            gameTasks.Enqueue(trainTask);
-                        }
-
                         if (completedGameCounter >= nextLogAt)
                         {
                             nextLogAt += 10;
                             _leagueManager.SaveMetadata();
                             var top = _leagueManager.GetTopAgents(5);
                             Log("--- [当前排名 Top 5] ---");
-                            foreach (var t in top) Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins*100.0/Math.Max(1, t.GamesPlayed)):F1}%");
+                            foreach (var t in top)
+                                Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins * 100.0 / Math.Max(1, t.GamesPlayed)):F1}%");
                             // 【优化 P3 #8】：移除阻塞式 GC.Collect()，交给 .NET 自动管理
                         }
 
-                        if (completedGameCounter >= nextEvolutionAt)
-                        {
-                            nextEvolutionAt += populationRefreshInterval;
-                            await PerformPopulationRefreshAsync(_cts.Token);
-                            if (_cts.Token.IsCancellationRequested || !IsTraining)
-                            {
-                                break;
-                            }
-
-                            completedRefreshCycles++;
-                            if (maxPopulationRefreshCycles.HasValue && completedRefreshCycles >= maxPopulationRefreshCycles.Value)
-                            {
-                                Log($"[PopulationRefresh] Completed {completedRefreshCycles}/{maxPopulationRefreshCycles.Value} cycle(s); stopping league run.");
-                                StopTraining();
-                                break;
-                            }
-                        }
                     }
 
                     try
                     {
-                        await Task.WhenAll(gameTasks.Where(t => t != null && !t.IsCompleted).ToArray());
+                        await WaitForGameTasksToSettleAsync(gameTasks, runCts.Token);
                     }
                     catch { }
                 }
                 catch (Exception ex) { OnError?.Invoke($"[系统故障] {ex.Message}"); }
-                finally 
-                { 
+                finally
+                {
+                    if (ReferenceEquals(_watchdogCts, runWatchdogCts))
+                    {
+                        _watchdogCts?.Cancel();
+                    }
                     if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
                     {
-                        try { await _backgroundLoadTask; } catch { }
+                        try
+                        {
+                            await _backgroundLoadTask;
+                        }
+                        catch { }
                     }
-                    _isTraining = false; 
-                    _leagueManager?.SaveMetadata(); 
-                    OnTrainingStopped?.Invoke(); 
+                    _isTraining = false;
+                    _leagueManager?.SaveMetadata();
+                    OnTrainingStopped?.Invoke();
                 }
             });
         }
 
         private PersistentAgent GetOrAddAgent(AgentMetadata meta)
         {
-            return _agentPool.GetOrAdd(meta.Id, id => new Lazy<PersistentAgent>(() =>
+            PersistentAgent agent = _agentPool.GetOrAdd(meta.Id, id => new Lazy<PersistentAgent>(() =>
             {
                 var pa = new PersistentAgent();
                 // 【关键修复】：load() 必须在 CompleteInit()（即 Trainer/Adam 创建）之前完成。
                 // TorchSharp 的 load() 会替换参数张量包装器对象；若 Adam 已创建，
                 // 其持有的旧引用 handle 变为 IntPtr.Zero，下次 zero_grad() 即崩溃。
-                lock (GetFileLock(meta.ModelPath)) if (File.Exists(meta.ModelPath)) pa.Model.load(meta.ModelPath);
+                lock (GetFileLock(meta.ModelPath))
+                {
+                    if (File.Exists(meta.ModelPath))
+                    {
+                        try
+                        {
+                            pa.Model.load(meta.ModelPath);
+                        }
+                        catch (EndOfStreamException ex)
+                        {
+                            string quarantinedPath = QuarantineCorruptModelFile(meta.ModelPath);
+                            Log($"[模型损坏] Agent_{meta.Id} 模型文件已截断或损坏: {meta.ModelPath}");
+                            Log($"[模型损坏] 已隔离到: {quarantinedPath}");
+                            Log($"[模型损坏-堆栈] {ex}");
+                        }
+                    }
+                }
+
                 pa.CompleteInit(); // to(CUDA) + new Trainer(Model)，必须在 load() 之后
                 return pa;
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+            TouchAgent(meta.Id);
+            return agent;
+        }
+
+        private string QuarantineCorruptModelFile(string modelPath)
+        {
+            string directory = Path.GetDirectoryName(modelPath) ?? AppDomain.CurrentDomain.BaseDirectory;
+            string fileName = Path.GetFileName(modelPath);
+            string quarantinedPath = Path.Combine(
+                directory,
+                $"{Path.GetFileNameWithoutExtension(fileName)}.corrupt_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}{Path.GetExtension(fileName)}");
+
+            try
+            {
+                File.Move(modelPath, quarantinedPath, overwrite: false);
+            }
+            catch (IOException)
+            {
+                quarantinedPath = Path.Combine(
+                    directory,
+                    $"{Path.GetFileNameWithoutExtension(fileName)}.corrupt_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}.bak");
+                File.Copy(modelPath, quarantinedPath, overwrite: false);
+                File.Delete(modelPath);
+            }
+
+            return quarantinedPath;
         }
 
         private async Task PerformPopulationRefreshAsync(CancellationToken token)
@@ -515,12 +904,7 @@ namespace ChineseChessAI.Training
                 await _maintenanceLock.WaitAsync(token);
                 maintenanceLockHeld = true;
                 Log("[PopulationRefresh] Maintenance gate acquired; waiting for in-flight games to drain.");
-                int inFlightGames = GetInFlightGameCount();
-                if (inFlightGames > 0)
-                {
-                    Log($"[PopulationRefresh] Still waiting on {inFlightGames} in-flight game(s).");
-                }
-                await WaitForInFlightGamesToDrainAsync(token);
+                await WaitForInFlightGamesToDrainWithProgressAsync("PopulationRefresh", token);
 
                 Log("[PopulationRefresh] Games drained; waiting for agent activity locks.");
 
@@ -552,6 +936,7 @@ namespace ChineseChessAI.Training
                         immigrantCount);
 
                     RefreshAgentPool(refresh.ReplacedAgentIds);
+                    TrimIdleAgentPool();
 
                     if (refresh.Replaced > 0)
                     {
@@ -670,6 +1055,28 @@ namespace ChineseChessAI.Training
             }
         }
 
+        private async Task LogGameTimeoutRequestAsync(
+            int gameId,
+            int agentIdA,
+            int agentIdB,
+            CancellationToken gameTimeoutToken,
+            CancellationToken completionToken)
+        {
+            try
+            {
+                Task timeoutTask = Task.Delay(Timeout.InfiniteTimeSpan, gameTimeoutToken);
+                Task completionTask = Task.Delay(Timeout.InfiniteTimeSpan, completionToken);
+                Task completedTask = await Task.WhenAny(timeoutTask, completionTask).ConfigureAwait(false);
+                if (completedTask == timeoutTask && gameTimeoutToken.IsCancellationRequested && !completionToken.IsCancellationRequested)
+                {
+                    Log($"[对局 #{gameId} 超时请求] Agent_{agentIdA} VS Agent_{agentIdB} | 已达到 {LeagueGameTimeout.TotalMinutes:F0} 分钟，已请求取消，等待对局任务退出。");
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private void RefreshAgentPool(IEnumerable<int> replacedIds)
         {
             foreach (int agentId in replacedIds)
@@ -678,6 +1085,8 @@ namespace ChineseChessAI.Training
                 {
                     lazyAgent.Value.Dispose();
                 }
+
+                _agentLastTouchedUtcTicks.TryRemove(agentId, out _);
             }
         }
 
@@ -686,10 +1095,32 @@ namespace ChineseChessAI.Training
             await Task.Run(() =>
             {
                 bool maintenanceLockHeld = false;
+                var heldLocks = new List<SemaphoreSlim>();
                 try
                 {
+                    Log("[周期训练] 开始：等待当前对局安全收束...");
+
                     _maintenanceLock.Wait(token);
                     maintenanceLockHeld = true;
+                    WaitForInFlightGamesToDrainWithProgressAsync("周期训练", token).GetAwaiter().GetResult();
+
+                    foreach (int agentId in _leagueManager.GetAllAgentIds())
+                    {
+                        var agentLock = GetAgentActiveLock(agentId);
+                        agentLock.Wait(token);
+                        heldLocks.Add(agentLock);
+                    }
+
+                    var (leagueSamples, leagueGames, deletedLeagueGames) = LeagueBuffer
+                        .RetainMostRecentGamesAsync(
+                            MaxLeagueTrainingGames,
+                            logAction: Log,
+                            onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r),
+                            cancellationToken: token)
+                        .GetAwaiter()
+                        .GetResult();
+
+                    Log($"[周期训练] 联赛样本清理：保留最近 {leagueGames} 局（{leagueSamples} 条），删除 {deletedLeagueGames} 局旧对局。");
 
                     int trainedAgents = 0;
                     int skippedBusyAgents = 0;
@@ -698,58 +1129,53 @@ namespace ChineseChessAI.Training
                     int totalSamples = 0;
                     float totalLoss = 0f;
 
-                    Log($"[周期训练] 开始：大师样本 {MasterBuffer.Count}，联赛样本 {LeagueBuffer.Count}，候选智能体 {_agentPool.Count}");
+                    int populationSize = _leagueManager.GetPopulationSize();
+                    Log($"[周期训练] 开始：大师样本 {MasterBuffer.Count}，联赛样本 {LeagueBuffer.Count}，训练智能体 {populationSize}");
 
                     lock (_gpuTrainingLock)
                     {
-                        const int batchSize = 128;
-                        const float masterRatio = 0.4f;
-                        const float leagueRatio = 0.6f;
+                        const int batchSize = 192;
+                        const int trainingEpochs = 2;
+                        const float masterRatio = 0.3f;
+                        const float leagueRatio = 0.7f;
 
-                        foreach (var agentEntry in _agentPool)
+                        foreach (int agentId in _leagueManager.GetAllAgentIds())
                         {
-                            if (token.IsCancellationRequested) return;
+                            if (token.IsCancellationRequested)
+                                return;
 
-                            if (!agentEntry.Value.IsValueCreated)
+                            var meta = _leagueManager.GetAgentMeta(agentId);
+                            if (meta == null)
                             {
-                                skippedUninitializedAgents++;
                                 continue;
                             }
-                            var pa = agentEntry.Value.Value;
 
-                            var aLock = GetAgentActiveLock(agentEntry.Key);
-                            if (aLock.Wait(0))
+                            var pa = GetOrAddAgent(meta);
+
+                            var mixedBatch = new List<TrainingExample>();
+                            if (MasterBuffer.Count > 0)
+                                mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
+                            if (LeagueBuffer.Count > 0)
+                                mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
+
+                            if (mixedBatch.Count > 0)
                             {
-                                try
+                                float loss = pa.Trainer.Train(mixedBatch, epochs: trainingEpochs);
+                                trainedAgents++;
+                                totalSamples += mixedBatch.Count * trainingEpochs;
+                                totalLoss += loss;
+                                lock (GetFileLock(meta.ModelPath))
                                 {
-                                    var mixedBatch = new List<TrainingExample>();
-                                    if (MasterBuffer.Count > 0) mixedBatch.AddRange(MasterBuffer.Sample((int)(batchSize * masterRatio)));
-                                    if (LeagueBuffer.Count > 0) mixedBatch.AddRange(LeagueBuffer.Sample((int)(batchSize * leagueRatio)));
-                                    
-                                    if (mixedBatch.Count > 0)
-                                    {
-                                        float loss = pa.Trainer.Train(mixedBatch, epochs: 1);
-                                        trainedAgents++;
-                                        totalSamples += mixedBatch.Count;
-                                        totalLoss += loss;
-                                        var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
-                                        if (meta != null)
-                                        {
-                                            lock (GetFileLock(meta.ModelPath)) ModelManager.SaveModel(pa.Model, meta.ModelPath);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        skippedNoDataAgents++;
-                                    }
+                                    ModelManager.SaveModel(pa.Model, meta.ModelPath);
                                 }
-                                finally { aLock.Release(); }
                             }
                             else
                             {
-                                skippedBusyAgents++;
+                                skippedNoDataAgents++;
                             }
                         }
+
+                        TrimIdleAgentPool(populationSize);
                     }
 
                     if (!token.IsCancellationRequested)
@@ -775,6 +1201,11 @@ namespace ChineseChessAI.Training
                 }
                 finally
                 {
+                    for (int i = heldLocks.Count - 1; i >= 0; i--)
+                    {
+                        heldLocks[i].Release();
+                    }
+
                     if (maintenanceLockHeld)
                     {
                         _maintenanceLock.Release();
@@ -793,10 +1224,15 @@ namespace ChineseChessAI.Training
 
         public async Task ProcessDatasetAsync(string filePath)
         {
-            if (IsTraining) return;
+            if (IsTraining)
+                return;
             if (_currentTrainingTask != null && !_currentTrainingTask.IsCompleted)
             {
-                try { await _currentTrainingTask; } catch { }
+                try
+                {
+                    await _currentTrainingTask;
+                }
+                catch { }
             }
             _isTraining = true;
             _cts = new CancellationTokenSource();
@@ -805,18 +1241,24 @@ namespace ChineseChessAI.Training
                 try
                 {
                     string ext = Path.GetExtension(filePath).ToLower();
-                    if (ext == ".csv") ProcessCsvDataset(filePath, _cts.Token);
-                    else if (ext == ".pgn" || ext == ".txt") ProcessPgnDatasetStreaming(filePath, _cts.Token);
+                    if (ext == ".csv")
+                        ProcessCsvDataset(filePath, _cts.Token);
+                    else if (ext == ".pgn" || ext == ".txt")
+                        ProcessPgnDatasetStreaming(filePath, _cts.Token);
                 }
                 catch (Exception ex) { OnError?.Invoke($"[解析错误] {ex.Message}"); }
-                finally 
-                { 
+                finally
+                {
                     if (_backgroundLoadTask != null && !_backgroundLoadTask.IsCompleted)
                     {
-                        try { await _backgroundLoadTask; } catch { }
+                        try
+                        {
+                            await _backgroundLoadTask;
+                        }
+                        catch { }
                     }
-                    _isTraining = false; 
-                    OnTrainingStopped?.Invoke(); 
+                    _isTraining = false;
+                    OnTrainingStopped?.Invoke();
                 }
             });
         }
@@ -833,7 +1275,8 @@ namespace ChineseChessAI.Training
                 string line;
                 while ((line = reader.ReadLine()) != null)
                 {
-                    if (token.IsCancellationRequested) break;
+                    if (token.IsCancellationRequested)
+                        break;
                     if (line.StartsWith("[Event ") && blockBuilder.Length > 0)
                     {
                         ParseSinglePgnBlock(blockBuilder.ToString(), rules, ref totalProcessedGames);
@@ -862,27 +1305,35 @@ namespace ChineseChessAI.Training
                 string line;
                 while ((line = reader.ReadLine()) != null)
                 {
-                    if (token.IsCancellationRequested) break;
+                    if (token.IsCancellationRequested)
+                        break;
                     var parts = line.Split(',');
-                    if (parts.Length < 4) continue;
+                    if (parts.Length < 4)
+                        continue;
                     string gameId = parts[0].Trim();
-                    if (!int.TryParse(parts[1].Trim(), out int turn)) continue;
+                    if (!int.TryParse(parts[1].Trim(), out int turn))
+                        continue;
                     string side = parts[2].Trim().ToLower();
                     string move = parts[3].Trim();
 
                     if (currentGameId != null && gameId != currentGameId)
                     {
                         ProcessCsvGame(redMoves, blackMoves, rules, ref totalGames);
-                        redMoves.Clear(); blackMoves.Clear();
+                        redMoves.Clear();
+                        blackMoves.Clear();
                     }
                     currentGameId = gameId;
-                    if (side == "red") redMoves.Add((turn, move)); else blackMoves.Add((turn, move));
+                    if (side == "red")
+                        redMoves.Add((turn, move));
+                    else
+                        blackMoves.Add((turn, move));
                 }
 
                 if (!token.IsCancellationRequested && currentGameId != null && (redMoves.Count > 0 || blackMoves.Count > 0))
                 {
                     ProcessCsvGame(redMoves, blackMoves, rules, ref totalGames);
-                    redMoves.Clear(); blackMoves.Clear();
+                    redMoves.Clear();
+                    blackMoves.Clear();
                 }
             }
             Log($"[CSV 解析] 完成！总解析 {totalGames} 局。");
@@ -891,7 +1342,8 @@ namespace ChineseChessAI.Training
         private void ParseSinglePgnBlock(string block, ChineseChessRuleEngine rules, ref int totalGames)
         {
             string reconstructedBlock = block.Trim();
-            if (!reconstructedBlock.StartsWith("[Event ")) reconstructedBlock = "[Event " + reconstructedBlock;
+            if (!reconstructedBlock.StartsWith("[Event "))
+                reconstructedBlock = "[Event " + reconstructedBlock;
 
             float resultValue = 0.0f;
             bool hasExplicitResult = false;
@@ -899,9 +1351,21 @@ namespace ChineseChessAI.Training
             if (resultMatch.Success)
             {
                 string resStr = resultMatch.Groups[1].Value;
-                if (resStr == "1-0") { resultValue = 1.0f; hasExplicitResult = true; }
-                else if (resStr == "0-1") { resultValue = -1.0f; hasExplicitResult = true; }
-                else if (resStr == "1/2-1/2") { resultValue = 0.0f; hasExplicitResult = true; }
+                if (resStr == "1-0")
+                {
+                    resultValue = 1.0f;
+                    hasExplicitResult = true;
+                }
+                else if (resStr == "0-1")
+                {
+                    resultValue = -1.0f;
+                    hasExplicitResult = true;
+                }
+                else if (resStr == "1/2-1/2")
+                {
+                    resultValue = 0.0f;
+                    hasExplicitResult = true;
+                }
             }
 
             string moveText = System.Text.RegularExpressions.Regex.Replace(reconstructedBlock, @"\[[^\]]*\]", "");
@@ -934,9 +1398,9 @@ namespace ChineseChessAI.Training
             {
                 resultValue = GetBoardAdvantage(session.Board);
             }
-            else if (!hasExplicitResult) 
+            else if (!hasExplicitResult)
             {
-                resultValue = GetBoardAdvantage(session.Board); 
+                resultValue = GetBoardAdvantage(session.Board);
             }
 
             if (isComplete && gameHistory.Count > 10)
@@ -950,49 +1414,28 @@ namespace ChineseChessAI.Training
                 var masterData = new MasterGameData(examples, standardizedMoves);
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string guid = Guid.NewGuid().ToString("N");
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}_{guid}.json"), JsonSerializer.Serialize(masterData));
+                File.WriteAllText(
+                    Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}_{guid}.json"),
+                    JsonSerializer.Serialize(masterData),
+                    Encoding.UTF8);
 
-                // 【核心修复 P0】：大师数据镜像增广 (使用 P3 #9 优化后的稀疏翻转)
-                var flippedExamples = examples.Select(ex => {
-                    // 1. 策略坐标翻转
-                    var sparseFlipped = StateEncoder.FlipPolicySparse(ex.SparsePolicy);
-                    
-                    // 2. State翻转：180度旋转 + 敌我身份交换
-                    float[] flippedState = new float[1260];
-                    for (int plane = 0; plane < 14; plane++)
-                    {
-                        int newPlane = plane < 7 ? plane + 7 : plane - 7;
-                        for (int i = 0; i < 90; i++)
-                        {
-                            flippedState[newPlane * 90 + i] = ex.State[plane * 90 + (89 - i)];
-                        }
-                    }
-
-                    // 3. Value取反：视角转换后胜负颠倒
-                    return new TrainingExample(flippedState, sparseFlipped, -ex.Value);
-                }).ToList();
-
-                var flippedMoves = standardizedMoves.Select(m => {
-                    if (m.Length < 4) return m;
-                    char c1 = (char)('a' + 'i' - m[0]);
-                    char r1 = (char)('0' + '9' - m[1]);
-                    char c2 = (char)('a' + 'i' - m[2]);
-                    char r2 = (char)('0' + '9' - m[3]);
-                    return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
-                }).ToList();
-
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"pgn_mirror_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
-                
                 totalGames++;
             }
         }
 
         private void ProcessCsvGame(List<(int turn, string move)> redMoves, List<(int turn, string move)> blackMoves, ChineseChessRuleEngine rules, ref int totalGames)
         {
-            redMoves.Sort((a, b) => a.turn.CompareTo(b.turn)); blackMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
+            redMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
+            blackMoves.Sort((a, b) => a.turn.CompareTo(b.turn));
             var rawOrderedMoves = new List<string>();
             int maxTurn = Math.Max(redMoves.Count, blackMoves.Count);
-            for (int i = 0; i < maxTurn; i++) { if (i < redMoves.Count) rawOrderedMoves.Add(redMoves[i].move); if (i < blackMoves.Count) rawOrderedMoves.Add(blackMoves[i].move); }
+            for (int i = 0; i < maxTurn; i++)
+            {
+                if (i < redMoves.Count)
+                    rawOrderedMoves.Add(redMoves[i].move);
+                if (i < blackMoves.Count)
+                    rawOrderedMoves.Add(blackMoves[i].move);
+            }
 
             var session = new GameRuleSession(rules);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
@@ -1020,40 +1463,13 @@ namespace ChineseChessAI.Training
                     var sparse = step.policy.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();
                     return new TrainingExample(step.state, sparse, step.isRedTurn ? resultValue : -resultValue);
                 }).ToList();
-                
-                // 【同步 P0 修复】：对 CSV 数据也进行镜像增广 (使用稀疏翻转优化)
-                var flippedExamples = examples.Select(ex => {
-                    // 1. 策略坐标翻转
-                    var sparseFlipped = StateEncoder.FlipPolicySparse(ex.SparsePolicy);
-                    
-                    // 2. State翻转：180度旋转 + 敌我身份交换
-                    float[] flippedState = new float[1260];
-                    for (int plane = 0; plane < 14; plane++)
-                    {
-                        int newPlane = plane < 7 ? plane + 7 : plane - 7;
-                        for (int i = 0; i < 90; i++)
-                        {
-                            flippedState[newPlane * 90 + i] = ex.State[plane * 90 + (89 - i)];
-                        }
-                    }
-
-                    // 3. Value取反：视角转换后胜负颠倒
-                    return new TrainingExample(flippedState, sparseFlipped, -ex.Value);
-                }).ToList();
-
-                var flippedMoves = standardizedMoves.Select(m => {
-                    if (m.Length < 4) return m;
-                    char c1 = (char)('a' + 'i' - m[0]);
-                    char r1 = (char)('0' + '9' - m[1]);
-                    char c2 = (char)('a' + 'i' - m[2]);
-                    char r2 = (char)('0' + '9' - m[3]);
-                    return $"{c1}{r1}{c2}{r2}{(m.Length > 4 ? m.Substring(4) : "")}";
-                }).ToList();
 
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string guid = Guid.NewGuid().ToString("N");
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
-                File.WriteAllText(Path.Combine(MasterBuffer.DataDir, $"csv_mirror_{timestamp}_{guid}.json"), JsonSerializer.Serialize(new MasterGameData(flippedExamples, flippedMoves)));
+                File.WriteAllText(
+                    Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}_{guid}.json"),
+                    JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)),
+                    Encoding.UTF8);
                 totalGames++;
             }
         }
@@ -1078,9 +1494,16 @@ namespace ChineseChessAI.Training
 
             float[] piData = new float[8100];
             int netIdx = parsedMove.ToNetworkIndex();
-            float epsilon = 0.05f; float backgroundProb = epsilon / legalMoves.Count;
-            foreach (var m in legalMoves) { int idx = m.ToNetworkIndex(); if (idx >= 0 && idx < 8100) piData[idx] = backgroundProb; }
-            if (netIdx >= 0 && netIdx < 8100) piData[netIdx] = (1.0f - epsilon) + backgroundProb;
+            float epsilon = 0.05f;
+            float backgroundProb = epsilon / legalMoves.Count;
+            foreach (var m in legalMoves)
+            {
+                int idx = m.ToNetworkIndex();
+                if (idx >= 0 && idx < 8100)
+                    piData[idx] = backgroundProb;
+            }
+            if (netIdx >= 0 && netIdx < 8100)
+                piData[netIdx] = (1.0f - epsilon) + backgroundProb;
 
             gameHistory.Add((stateData, isRed ? piData : StateEncoder.FlipPolicy(piData), isRed));
             session.ApplyMove(parsedMove, normalizedUcci);
@@ -1089,6 +1512,8 @@ namespace ChineseChessAI.Training
 
         private void Log(string msg)
         {
+            Volatile.Write(ref _lastLogUtcTicks, DateTimeOffset.UtcNow.UtcTicks);
+
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(_runtimeLogPath)!);

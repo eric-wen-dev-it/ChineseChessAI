@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using ChineseChessAI.Utils;
 
 namespace ChineseChessAI.Core
@@ -17,14 +16,14 @@ namespace ChineseChessAI.Core
             _generator = generator ?? new MoveGenerator();
         }
 
-        public List<Move> GetLegalMoves(Board board, bool skipPerpetualCheck = false)
+        public List<Move> GetLegalMoves(Board board, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
-            return _generator.GenerateLegalMoves(board, skipPerpetualCheck);
+            return _generator.GenerateLegalMoves(board, skipPerpetualCheck, cancellationToken);
         }
 
-        public string ValidateMove(Board board, Move move, bool skipPerpetualCheck = false)
+        public string ValidateMove(Board board, Move move, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
-            return _generator.GetMoveValidationResult(board, move, skipPerpetualCheck);
+            return _generator.GetMoveValidationResult(board, move, skipPerpetualCheck, cancellationToken);
         }
 
         public bool IsKingSafe(Board board, bool checkRed)

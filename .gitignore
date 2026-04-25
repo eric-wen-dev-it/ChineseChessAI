@@ -365,3 +365,9 @@ FodyWeavers.xsd
 /master_data.7z
 /xqdb_masters_40711_UCI_games.pgn
 /data/league_data
+
+# Local agent/tool scratch files
+.codex-temp/
+.claude/settings.local.json
+log.txt
+timeout_game_*.json

@@ -1,14 +1,22 @@
-using ChineseChessAI.Core;
+﻿using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
+using ChineseChessAI.Utils;
+using System.Diagnostics;
 
 namespace ChineseChessAI.Training
 {
-    public record GameResult(List<TrainingExample> ExamplesA, List<TrainingExample> ExamplesB, string EndReason, string ResultStr, int MoveCount, List<Move> MoveHistory, bool IsSuccess = true);
+    public record GameResult(
+        List<TrainingExample> ExamplesA,
+        List<TrainingExample> ExamplesB,
+        string EndReason,
+        string ResultStr,
+        int MoveCount,
+        List<Move> MoveHistory,
+        DateTimeOffset StartedAt,
+        DateTimeOffset EndedAt,
+        TimeSpan Elapsed,
+        bool IsSuccess = true);
 
     public class SelfPlay
     {
@@ -26,6 +34,10 @@ namespace ChineseChessAI.Training
         private readonly double _lowTempB;
         private readonly int _simsA;
         private readonly int _simsB;
+        private readonly RuntimeDiagnostics.RollingCounter _legalMoveMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayLegalMovesMs", 50);
+        private readonly RuntimeDiagnostics.RollingCounter _stateEncodeMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayStateEncodeMs", 50);
+        private readonly RuntimeDiagnostics.RollingCounter _searchMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlaySearchMs", 50);
+        private readonly RuntimeDiagnostics.RollingCounter _plyMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayPlyMs", 50);
 
         public SelfPlay(
             MCTSEngine engineA,
@@ -56,6 +68,7 @@ namespace ChineseChessAI.Training
 
         public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null, System.Threading.CancellationToken cancellationToken = default)
         {
+            DateTimeOffset startedAt = DateTimeOffset.Now;
             var board = new Board();
             board.Reset();
 
@@ -78,6 +91,7 @@ namespace ChineseChessAI.Training
             {
                 try
                 {
+                    var plyStopwatch = Stopwatch.StartNew();
                     if (cancellationToken.IsCancellationRequested)
                     {
                         isSuccess = false;
@@ -111,7 +125,7 @@ namespace ChineseChessAI.Training
                         else
                             gameHistoryB.Add((instantStateData, instantTrainingPi, isRed));
 
-                        Console.WriteLine($"[规则裁判] 发现送将/未应将，执行绝杀: {instantKillMove.Value}");
+                        Console.WriteLine($"[瑙勫垯瑁佸垽] 鍙戠幇閫佸皢/鏈簲灏嗭紝鎵ц缁濇潃: {instantKillMove.Value}");
                         moveHistory.Add(instantKillMove.Value);
                         board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
 
@@ -122,19 +136,21 @@ namespace ChineseChessAI.Training
                         }
 
                         moveCount++;
-                        endReason = "对方送将/未应将，老将被击杀";
+                        endReason = "瀵规柟閫佸皢/鏈簲灏嗭紝鑰佸皢琚嚮鏉€";
                         finalResult = isRed ? 1.0f : -1.0f;
                         break;
                     }
 
-                    var legalMoves = _rules.GetLegalMoves(board);
+                    var legalMoveStopwatch = Stopwatch.StartNew();
+                    var legalMoves = _rules.GetLegalMoves(board, cancellationToken: cancellationToken);
+                    _legalMoveMsCounter.AddSample(legalMoveStopwatch.ElapsedMilliseconds);
                     if (legalMoves.Count == 0)
                     {
                         if (onMovePerformed != null)
                             await Task.Delay(1000);
 
                         bool inCheck = !_rules.IsKingSafe(board, board.IsRedTurn);
-                        endReason = inCheck ? "绝杀" : "困毙";
+                        endReason = inCheck ? "缁濇潃" : "鍥版瘷";
                         finalResult = board.IsRedTurn ? -1.0f : 1.0f;
                         break;
                     }
@@ -144,25 +160,29 @@ namespace ChineseChessAI.Training
                         if (onMovePerformed != null)
                             await Task.Delay(1000);
 
-                        endReason = "步数限制(强制平局)";
+                        endReason = "姝ユ暟闄愬埗(寮哄埗骞冲眬)";
                         finalResult = 0.0f;
                         break;
                     }
 
                     float[] stateData;
+                    var stateEncodeStopwatch = Stopwatch.StartNew();
                     using (var stateTensor = StateEncoder.Encode(board))
                     using (var state3D = stateTensor.squeeze(0))
                     using (var stateCpu = state3D.cpu())
                     {
                         stateData = stateCpu.data<float>().ToArray();
                     }
+                    _stateEncodeMsCounter.AddSample(stateEncodeStopwatch.ElapsedMilliseconds);
 
+                    var searchStopwatch = Stopwatch.StartNew();
                     (_, float[] piData) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(
                         board,
                         activeSims,
                         moveCount,
                         _maxMoves,
                         cancellationToken);
+                    _searchMsCounter.AddSample(searchStopwatch.ElapsedMilliseconds);
 
                     float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
                     if (isEngineA)
@@ -175,7 +195,7 @@ namespace ChineseChessAI.Training
 
                     if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
                     {
-                        Console.WriteLine($"[警告拦截] 拦截到无效动作 {move.From}->{move.To}，强行重选...");
+                        Console.WriteLine($"[璀﹀憡鎷︽埅] 鎷︽埅鍒版棤鏁堝姩浣?{move.From}->{move.To}锛屽己琛岄噸閫?..");
                         move = legalMoves[Random.Shared.Next(legalMoves.Count)];
                     }
 
@@ -202,16 +222,18 @@ namespace ChineseChessAI.Training
                         positionHistory[currentHash] = 0;
                     positionHistory[currentHash]++;
 
+                    _plyMsCounter.AddSample(plyStopwatch.ElapsedMilliseconds);
+
                     if (positionHistory[currentHash] >= 3)
                     {
-                        endReason = "三次重复局面(平局)";
+                        endReason = "涓夋閲嶅灞€闈?骞冲眬)";
                         finalResult = 0.0f;
                         break;
                     }
 
                     if (noProgressCount >= 100)
                     {
-                        endReason = "自然限着百步无进展(平局)";
+                        endReason = "鑷劧闄愮潃鐧炬鏃犺繘灞?骞冲眬)";
                         finalResult = 0.0f;
                         break;
                     }
@@ -225,6 +247,7 @@ namespace ChineseChessAI.Training
                 catch (Exception ex)
                 {
                     isSuccess = false;
+                    RuntimeDiagnostics.Log($"[SelfPlay异常-堆栈] {ex}");
                     endReason = $"内部错误: {ex.Message}";
                     break;
                 }
@@ -233,7 +256,8 @@ namespace ChineseChessAI.Training
             string resultStr = isSuccess ? (finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜")) : "异常中断";
             var examplesA = FinalizeData(gameHistoryA, finalResult, board);
             var examplesB = FinalizeData(gameHistoryB, finalResult, board);
-            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory, isSuccess);
+            DateTimeOffset endedAt = DateTimeOffset.Now;
+            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory, startedAt, endedAt, endedAt - startedAt, isSuccess);
         }
 
         private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)

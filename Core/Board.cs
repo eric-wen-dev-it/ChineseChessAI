@@ -1,7 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-
 namespace ChineseChessAI.Core
 {
     /// <summary>
@@ -48,23 +44,33 @@ namespace ChineseChessAI.Core
             BlackMaterial = 0;
 
             // --- 摆放黑方 (第 0-3 行) ---
-            SetPieceWithMaterial(0, -5); SetPieceWithMaterial(8, -5); // 黑车
-            SetPieceWithMaterial(1, -4); SetPieceWithMaterial(7, -4); // 黑马
-            SetPieceWithMaterial(2, -3); SetPieceWithMaterial(6, -3); // 黑象
-            SetPieceWithMaterial(3, -2); SetPieceWithMaterial(5, -2); // 黑士
+            SetPieceWithMaterial(0, -5);
+            SetPieceWithMaterial(8, -5); // 黑车
+            SetPieceWithMaterial(1, -4);
+            SetPieceWithMaterial(7, -4); // 黑马
+            SetPieceWithMaterial(2, -3);
+            SetPieceWithMaterial(6, -3); // 黑象
+            SetPieceWithMaterial(3, -2);
+            SetPieceWithMaterial(5, -2); // 黑士
             SetPieceWithMaterial(4, -1);             // 黑将
-            SetPieceWithMaterial(19, -6); SetPieceWithMaterial(25, -6); // 黑炮
+            SetPieceWithMaterial(19, -6);
+            SetPieceWithMaterial(25, -6); // 黑炮
             for (int i = 0; i < 9; i += 2)
                 SetPieceWithMaterial(27 + i, -7); // 黑卒
 
             // --- 摆放红方 (第 6-9 行) ---
             for (int i = 0; i < 9; i += 2)
                 SetPieceWithMaterial(6 * 9 + i, 7);  // 红兵
-            SetPieceWithMaterial(7 * 9 + 1, 6); SetPieceWithMaterial(7 * 9 + 7, 6); // 红炮
-            SetPieceWithMaterial(9 * 9 + 0, 5); SetPieceWithMaterial(9 * 9 + 8, 5); // 红车
-            SetPieceWithMaterial(9 * 9 + 1, 4); SetPieceWithMaterial(9 * 9 + 7, 4); // 红马
-            SetPieceWithMaterial(9 * 9 + 2, 3); SetPieceWithMaterial(9 * 9 + 6, 3); // 红相
-            SetPieceWithMaterial(9 * 9 + 3, 2); SetPieceWithMaterial(9 * 9 + 5, 2); // 红仕
+            SetPieceWithMaterial(7 * 9 + 1, 6);
+            SetPieceWithMaterial(7 * 9 + 7, 6); // 红炮
+            SetPieceWithMaterial(9 * 9 + 0, 5);
+            SetPieceWithMaterial(9 * 9 + 8, 5); // 红车
+            SetPieceWithMaterial(9 * 9 + 1, 4);
+            SetPieceWithMaterial(9 * 9 + 7, 4); // 红马
+            SetPieceWithMaterial(9 * 9 + 2, 3);
+            SetPieceWithMaterial(9 * 9 + 6, 3); // 红相
+            SetPieceWithMaterial(9 * 9 + 3, 2);
+            SetPieceWithMaterial(9 * 9 + 5, 2); // 红仕
             SetPieceWithMaterial(9 * 9 + 4, 1);                     // 红帅
 
             IsRedTurn = true;
@@ -85,20 +91,30 @@ namespace ChineseChessAI.Core
 
         private void UpdateMaterial(sbyte p, int sign)
         {
-            if (p == 0) return;
+            if (p == 0)
+                return;
             float val = Math.Abs(p) switch
             {
-                1 => 0, 2 => 2, 3 => 2, 4 => 4, 5 => 9, 6 => 4.5f, 7 => 1, _ => 0
+                1 => 0,
+                2 => 2,
+                3 => 2,
+                4 => 4,
+                5 => 9,
+                6 => 4.5f,
+                7 => 1,
+                _ => 0
             };
-            if (p > 0) RedMaterial += val * sign;
-            else BlackMaterial += val * sign;
+            if (p > 0)
+                RedMaterial += val * sign;
+            else
+                BlackMaterial += val * sign;
         }
 
         public Board Clone()
         {
             var newBoard = new Board();
             // 【BUG C 修复】：new Board() 已经写入了初始哈希计数，必须清空后再复制
-            newBoard._hashCounts.Clear(); 
+            newBoard._hashCounts.Clear();
 
             Array.Copy(this._cells, newBoard._cells, 90);
             newBoard.IsRedTurn = this.IsRedTurn;
@@ -200,7 +216,7 @@ namespace ChineseChessAI.Core
             }
 
             var last = _history.Pop();
-            
+
             if (last.HashCountsSnapshot != null)
             {
                 _hashCounts.Clear();
@@ -329,10 +345,12 @@ namespace ChineseChessAI.Core
         {
             Array.Copy(state, _cells, 90);
             this.IsRedTurn = isRedTurn;
-            
+
             // 【核心修复 BUG-3】：重新计算材料分数
-            RedMaterial = 0; BlackMaterial = 0;
-            for (int i = 0; i < 90; i++) UpdateMaterial(_cells[i], 1);
+            RedMaterial = 0;
+            BlackMaterial = 0;
+            for (int i = 0; i < 90; i++)
+                UpdateMaterial(_cells[i], 1);
 
             CalculateFullHash();
 

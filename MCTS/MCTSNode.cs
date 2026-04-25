@@ -1,6 +1,5 @@
 ﻿using ChineseChessAI.Core;
 using System.Collections.Concurrent;
-using System.Threading;
 
 namespace ChineseChessAI.MCTS
 {
@@ -57,8 +56,9 @@ namespace ChineseChessAI.MCTS
             double w_raw = W;
 
             int n = n_raw + vl;
-            // 【核心修复 P0】：取负号。Negamax 结构下，子节点的 Q 是对手视角，父节点需取 -Q。
-            double q = n == 0 ? 0 : -(w_raw - vl) / n;
+            // Negamax 结构下，父节点评估子节点时需要取 -Q。
+            // Virtual loss 必须让当前边临时变差，因此应加到子节点自身视角的 W 上。
+            double q = n == 0 ? 0 : -(w_raw + vl) / n;
             double u = cPuct * P * Math.Sqrt(parentN) / (1 + n);
             return q + u;
         }

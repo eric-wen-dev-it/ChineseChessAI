@@ -1,8 +1,6 @@
 using ChineseChessAI.Training;
-using System;
 using System.Globalization;
 using System.IO;
-using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -38,8 +36,10 @@ namespace ChineseChessAI
                 return;
             }
 
+            bool autoStartLeague = e.Args.Contains("--start-league", StringComparer.OrdinalIgnoreCase);
+
             ShutdownMode = ShutdownMode.OnMainWindowClose;
-            MainWindow = new MainWindow();
+            MainWindow = new MainWindow(autoStartLeague);
             MainWindow.Show();
         }
 
