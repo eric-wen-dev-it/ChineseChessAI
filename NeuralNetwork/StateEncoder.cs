@@ -1,5 +1,4 @@
 ﻿using ChineseChessAI.Core;
-using System;
 using System.Buffers; // 必须引用：用于 ArrayPool
 using TorchSharp;
 using static TorchSharp.torch;
@@ -19,14 +18,15 @@ namespace ChineseChessAI.NeuralNetwork
         /// </summary>
         public static ActionProb[] FlipPolicySparse(ActionProb[] sparsePi)
         {
-            if (sparsePi == null) return Array.Empty<ActionProb>();
+            if (sparsePi == null)
+                return Array.Empty<ActionProb>();
             var flipped = new ActionProb[sparsePi.Length];
             for (int i = 0; i < sparsePi.Length; i++)
             {
                 int originalIdx = sparsePi[i].Index;
                 int from = originalIdx / 90, to = originalIdx % 90;
                 int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
-                
+
                 // 180 度中心对称翻转：(r, c) -> (9-r, 8-c)
                 int nf = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
                 flipped[i] = new ActionProb(nf, sparsePi[i].Prob);

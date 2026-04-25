@@ -17,6 +17,7 @@
     <Compile Include="..\Core\*.cs" Link="Core\%(Filename)%(Extension)" />
     <Compile Include="..\MCTS\*.cs" Link="MCTS\%(Filename)%(Extension)" />
     <Compile Include="..\NeuralNetwork\*.cs" Link="NeuralNetwork\%(Filename)%(Extension)" />
+    <Compile Include="..\Traditional\*.cs" Link="Traditional\%(Filename)%(Extension)" />
     <Compile Include="..\Utils\*.cs" Link="Utils\%(Filename)%(Extension)" />
   </ItemGroup>
 

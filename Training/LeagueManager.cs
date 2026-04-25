@@ -1,14 +1,14 @@
-using System;
-using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Text.Json;
 
 namespace ChineseChessAI.Training
 {
     public class AgentMetadata
     {
-        public int Id { get; set; }
+        public int Id
+        {
+            get; set;
+        }
         public double Elo { get; set; } = 1500;
         public int GamesPlayed { get; set; } = 0;
         public int Wins { get; set; } = 0;
@@ -22,6 +22,8 @@ namespace ChineseChessAI.Training
         public double Temperature { get; set; } = 1.0;
         public double Cpuct { get; set; } = 2.5;
         public int MctsSimulations { get; set; } = 400;
+        public string EngineKind { get; set; } = "Mcts";
+        public int TraditionalDepth { get; set; } = 5;
 
         public void RandomizePersonality(Random? customRnd = null)
         {
@@ -29,6 +31,8 @@ namespace ChineseChessAI.Training
             Temperature = 0.1 + rnd.NextDouble() * 1.9;
             Cpuct = 1.0 + rnd.NextDouble() * 4.0;
             MctsSimulations = 100 + rnd.Next(701);
+            EngineKind = "Mcts";
+            TraditionalDepth = 4 + rnd.Next(3);
         }
 
         public void MutateFromParent(AgentMetadata parent, Random? customRnd = null, bool wideMutation = false)
@@ -41,6 +45,8 @@ namespace ChineseChessAI.Training
             Temperature = Math.Clamp(parent.Temperature + ((rnd.NextDouble() * 2.0) - 1.0) * tempSpan, 0.1, 2.0);
             Cpuct = Math.Clamp(parent.Cpuct + ((rnd.NextDouble() * 2.0) - 1.0) * cpuctSpan, 1.0, 5.0);
             MctsSimulations = Math.Clamp(parent.MctsSimulations + rnd.Next(-simSpan, simSpan + 1), 100, 800);
+            EngineKind = parent.EngineKind;
+            TraditionalDepth = Math.Clamp(parent.TraditionalDepth + rnd.Next(-1, 2), 3, 8);
         }
 
         public void ResetCompetitiveState(double startingElo = 1500, int generation = 0, int parentId = -1)
@@ -58,12 +64,30 @@ namespace ChineseChessAI.Training
 
     public sealed class PopulationRefreshResult
     {
-        public int EliteKept { get; init; }
-        public int ContenderKept { get; init; }
-        public int DiverseKept { get; init; }
-        public int Replaced { get; init; }
-        public int OffspringCreated { get; init; }
-        public int ImmigrantsCreated { get; init; }
+        public int EliteKept
+        {
+            get; init;
+        }
+        public int ContenderKept
+        {
+            get; init;
+        }
+        public int DiverseKept
+        {
+            get; init;
+        }
+        public int Replaced
+        {
+            get; init;
+        }
+        public int OffspringCreated
+        {
+            get; init;
+        }
+        public int ImmigrantsCreated
+        {
+            get; init;
+        }
         public List<int> ReplacedAgentIds { get; init; } = new List<int>();
         public List<string> PreviewLines { get; init; } = new List<string>();
     }
@@ -81,7 +105,8 @@ namespace ChineseChessAI.Training
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             _metadataPath = Path.Combine(baseDir, "data", "league_metadata.json");
             _modelsDir = Path.Combine(baseDir, "data", "models", "league");
-            if (!Directory.Exists(_modelsDir)) Directory.CreateDirectory(_modelsDir);
+            if (!Directory.Exists(_modelsDir))
+                Directory.CreateDirectory(_modelsDir);
             LoadMetadata(populationSize);
         }
 
@@ -134,17 +159,20 @@ namespace ChineseChessAI.Training
 
         public AgentMetadata? GetAgentMeta(int id)
         {
-            lock (_lock) return _agents.FirstOrDefault(a => a.Id == id);
+            lock (_lock)
+                return _agents.FirstOrDefault(a => a.Id == id);
         }
 
         public int GetPopulationSize()
         {
-            lock (_lock) return _agents.Count;
+            lock (_lock)
+                return _agents.Count;
         }
 
         public List<int> GetAllAgentIds()
         {
-            lock (_lock) return _agents.Select(a => a.Id).OrderBy(id => id).ToList();
+            lock (_lock)
+                return _agents.Select(a => a.Id).OrderBy(id => id).ToList();
         }
 
         public (AgentMetadata, AgentMetadata) PickMatch()
@@ -232,7 +260,8 @@ namespace ChineseChessAI.Training
 
         public List<AgentMetadata> GetTopAgents(int count = 10)
         {
-            lock (_lock) return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
+            lock (_lock)
+                return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
         }
 
         public PopulationRefreshResult RefreshPopulation(
@@ -277,8 +306,10 @@ namespace ChineseChessAI.Training
                     .ToList();
 
                 var survivorIds = new HashSet<int>(elites.Select(a => a.Id));
-                foreach (var contender in contenders) survivorIds.Add(contender.Id);
-                foreach (var keeper in diverseKeepers) survivorIds.Add(keeper.Id);
+                foreach (var contender in contenders)
+                    survivorIds.Add(contender.Id);
+                foreach (var keeper in diverseKeepers)
+                    survivorIds.Add(keeper.Id);
 
                 var replacements = ranked.Where(a => !survivorIds.Contains(a.Id)).ToList();
                 if (replacements.Count == 0)
@@ -355,11 +386,15 @@ namespace ChineseChessAI.Training
             lock (_lock)
             {
                 var agent = _agents.FirstOrDefault(a => a.Id == agentId);
-                if (agent == null) return;
+                if (agent == null)
+                    return;
                 agent.GamesPlayed++;
-                if (result > 0.5f) agent.Wins++;
-                else if (result < -0.5f) agent.Losses++;
-                else agent.Draws++;
+                if (result > 0.5f)
+                    agent.Wins++;
+                else if (result < -0.5f)
+                    agent.Losses++;
+                else
+                    agent.Draws++;
                 double expectedScore = 1.0 / (1.0 + Math.Pow(10, (opponentElo - agent.Elo) / 400.0));
                 double actualScore = (result + 1.0) / 2.0;
                 double kFactor = agent.GamesPlayed <= 20 ? 48.0 : 32.0;

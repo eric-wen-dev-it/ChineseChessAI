@@ -1,14 +1,19 @@
-﻿using System;
-using System.IO;
-using System.Linq;
+﻿using System.IO;
 using TorchSharp;
-using static TorchSharp.torch;
 
 namespace ChineseChessAI.NeuralNetwork
 {
     public static class ModelManager
     {
         private static readonly object _saveLock = new object();
+        private static readonly CChessNet _cpuShadowModel = CreateCpuShadowModel();
+
+        private static CChessNet CreateCpuShadowModel()
+        {
+            var model = new CChessNet(autoCuda: false);
+            model.to(DeviceType.CPU);
+            return model;
+        }
 
         public static void SaveModel(CChessNet model, string filePath)
         {
@@ -27,15 +32,9 @@ namespace ChineseChessAI.NeuralNetwork
 
                 try
                 {
-                    // 【关键修复】：为了防止 TorchSharp 在保存 CUDA 上的模型时崩溃，
-                    // 先在 CPU 上克隆出一个副本进行保存。这解决了 Save(Tensor, BinaryWriter) 的潜在设备同步问题。
-                    // 新创建的模型实例默认在 CPU 上。
-                    using (var cpuModel = new CChessNet())
-                    {
-                        cpuModel.load_state_dict(model.state_dict());
-                        cpuModel.to(TorchSharp.DeviceType.CPU); // 显式确保 CPU，防止 load_state_dict 带入 CUDA 张量
-                        cpuModel.save(filePath);
-                    }
+                    // Reuse a shared CPU shadow model so saving only incurs one CUDA->CPU state copy.
+                    _cpuShadowModel.load_state_dict(model.state_dict());
+                    _cpuShadowModel.save(filePath);
                     Console.WriteLine($"[ModelManager] 模型参数已成功保存至: {filePath}");
                 }
                 catch (Exception ex)

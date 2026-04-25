@@ -1,9 +1,7 @@
 using ChineseChessAI.NeuralNetwork;
-using System;
+using ChineseChessAI.Utils;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Diagnostics;
 using TorchSharp;
 using static TorchSharp.torch;
 
@@ -16,14 +14,27 @@ namespace ChineseChessAI.MCTS
         private readonly ConcurrentQueue<InferenceTask> _taskQueue = new();
         private readonly ManualResetEventSlim _signal = new(false);
         private readonly Task _workerTask;
+        private readonly RuntimeDiagnostics.RollingCounter _queueDepthCounter;
+        private readonly RuntimeDiagnostics.RollingCounter _batchSizeCounter;
+        private readonly RuntimeDiagnostics.RollingCounter _batchLatencyMsCounter;
+        private readonly RuntimeDiagnostics.RollingCounter _gpuWaitMsCounter;
+        private long _lastMultiQueueTick;
         private volatile bool _isDisposed;
 
         private const int InputSize = 14 * 10 * 9;
+        private static readonly TimeSpan OpportunisticBatchCoalescingWindow = TimeSpan.FromMilliseconds(2);
+        private static readonly TimeSpan ConcurrentBatchCoalescingWindow = TimeSpan.FromMilliseconds(8);
+        private static readonly TimeSpan ConcurrentSignalTtl = TimeSpan.FromMilliseconds(50);
 
         public BatchInference(CChessNet model, int batchSize = 16)
         {
             _model = model;
             _batchSize = batchSize;
+            string tag = $"{model.GetHashCode():x8}";
+            _queueDepthCounter = new RuntimeDiagnostics.RollingCounter($"InferenceQueue/{tag}", 100);
+            _batchSizeCounter = new RuntimeDiagnostics.RollingCounter($"InferenceBatch/{tag}", 50);
+            _batchLatencyMsCounter = new RuntimeDiagnostics.RollingCounter($"InferenceLatencyMs/{tag}", 50);
+            _gpuWaitMsCounter = new RuntimeDiagnostics.RollingCounter($"InferenceGpuWaitMs/{tag}", 50);
             _workerTask = Task.Run(() =>
             {
                 try
@@ -50,7 +61,13 @@ namespace ChineseChessAI.MCTS
                 return (new float[8100], 0f);
 
             var tcs = new TaskCompletionSource<(float[], float)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _taskQueue.Enqueue(new InferenceTask(inputData, tcs));
+            _taskQueue.Enqueue(new InferenceTask(inputData, tcs, cancellationToken));
+            int queueDepth = _taskQueue.Count;
+            _queueDepthCounter.AddSample(queueDepth);
+            if (queueDepth > 1)
+            {
+                Interlocked.Exchange(ref _lastMultiQueueTick, Stopwatch.GetTimestamp());
+            }
             _signal.Set();
 
             using var reg = cancellationToken.UnsafeRegister(
@@ -73,11 +90,13 @@ namespace ChineseChessAI.MCTS
                     continue;
 
                 var batchTasks = new List<InferenceTask>();
-                while (batchTasks.Count < _batchSize && _taskQueue.TryDequeue(out var task))
+                if (_taskQueue.TryDequeue(out var firstTask))
                 {
-                    batchTasks.Add(task);
+                    batchTasks.Add(firstTask);
+                    CoalesceBatch(batchTasks);
                 }
 
+                CancelQueuedTasksThatNoLongerHaveCallers(batchTasks);
                 if (batchTasks.Count > 0)
                 {
                     ProcessBatch(batchTasks);
@@ -90,10 +109,71 @@ namespace ChineseChessAI.MCTS
             }
         }
 
+        private void CoalesceBatch(List<InferenceTask> batchTasks)
+        {
+            if (batchTasks.Count >= _batchSize)
+            {
+                return;
+            }
+
+            TimeSpan waitWindow = HasRecentConcurrentSignal()
+                ? ConcurrentBatchCoalescingWindow
+                : OpportunisticBatchCoalescingWindow;
+
+            var coalescingStopwatch = Stopwatch.StartNew();
+            while (!_isDisposed && batchTasks.Count < _batchSize)
+            {
+                while (batchTasks.Count < _batchSize && _taskQueue.TryDequeue(out var task))
+                {
+                    batchTasks.Add(task);
+                }
+
+                if (batchTasks.Count >= _batchSize || coalescingStopwatch.Elapsed >= waitWindow)
+                {
+                    break;
+                }
+
+                Thread.Sleep(1);
+            }
+        }
+
+        private static void CancelQueuedTasksThatNoLongerHaveCallers(List<InferenceTask> tasks)
+        {
+            for (int i = tasks.Count - 1; i >= 0; i--)
+            {
+                var task = tasks[i];
+                if (!task.CancellationToken.IsCancellationRequested && !task.Tcs.Task.IsCompleted)
+                {
+                    continue;
+                }
+
+                if (task.CancellationToken.IsCancellationRequested)
+                {
+                    task.Tcs.TrySetCanceled(task.CancellationToken);
+                }
+
+                tasks.RemoveAt(i);
+            }
+        }
+
+        private bool HasRecentConcurrentSignal()
+        {
+            long tick = Volatile.Read(ref _lastMultiQueueTick);
+            if (tick == 0)
+            {
+                return false;
+            }
+
+            long elapsedTicks = Stopwatch.GetTimestamp() - tick;
+            double elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
+            return elapsedSeconds <= ConcurrentSignalTtl.TotalSeconds;
+        }
+
         private void ProcessBatch(List<InferenceTask> tasks)
         {
             try
             {
+                var totalStopwatch = Stopwatch.StartNew();
                 if (_isDisposed)
                 {
                     foreach (var task in tasks)
@@ -101,50 +181,57 @@ namespace ChineseChessAI.MCTS
                     return;
                 }
 
-                _model.eval();
-                using var noGrad = torch.no_grad();
-
-                int batchCount = tasks.Count;
-                float[] batchData = new float[batchCount * InputSize];
-                for (int i = 0; i < batchCount; i++)
+                _batchSizeCounter.AddSample(tasks.Count);
+                var gpuWaitStopwatch = Stopwatch.StartNew();
+                GpuExecutionGate.Run(() =>
                 {
-                    Buffer.BlockCopy(tasks[i].InputData, 0, batchData, i * InputSize * sizeof(float), InputSize * sizeof(float));
-                }
+                    _gpuWaitMsCounter.AddSample(gpuWaitStopwatch.ElapsedMilliseconds);
+                    _model.eval();
+                    using var noGrad = torch.no_grad();
 
-                using var inputCpu = torch.tensor(batchData, new long[] { batchCount, 14, 10, 9 });
-                Tensor? inputGpu = null;
-                Tensor modelInput = inputCpu;
-
-                if (torch.cuda.is_available())
-                {
-                    inputGpu = inputCpu.to(DeviceType.CUDA);
-                    modelInput = inputGpu;
-                }
-
-                var (policyGpu, valueGpu) = _model.forward(modelInput);
-                try
-                {
-                    using var policyCpu = policyGpu.cpu();
-                    using var valueCpu = valueGpu.cpu();
-
+                    int batchCount = tasks.Count;
+                    float[] batchData = new float[batchCount * InputSize];
                     for (int i = 0; i < batchCount; i++)
                     {
-                        using var policyRow = policyCpu[i];
-                        using var policyFloat = policyRow.to_type(ScalarType.Float32);
-                        using var valueRow = valueCpu[i];
-                        using var valueFloat = valueRow.to_type(ScalarType.Float32);
-
-                        float[] policy = policyFloat.data<float>().ToArray();
-                        float value = valueFloat.item<float>();
-                        tasks[i].Tcs.TrySetResult((policy, value));
+                        Buffer.BlockCopy(tasks[i].InputData, 0, batchData, i * InputSize * sizeof(float), InputSize * sizeof(float));
                     }
-                }
-                finally
-                {
-                    valueGpu.Dispose();
-                    policyGpu.Dispose();
-                    inputGpu?.Dispose();
-                }
+
+                    using var inputCpu = torch.tensor(batchData, new long[] { batchCount, 14, 10, 9 });
+                    Tensor? inputGpu = null;
+                    Tensor modelInput = inputCpu;
+
+                    if (torch.cuda.is_available())
+                    {
+                        inputGpu = inputCpu.to(DeviceType.CUDA);
+                        modelInput = inputGpu;
+                    }
+
+                    var (policyGpu, valueGpu) = _model.forward(modelInput);
+                    try
+                    {
+                        using var policyCpu = policyGpu.cpu();
+                        using var valueCpu = valueGpu.cpu();
+
+                        for (int i = 0; i < batchCount; i++)
+                        {
+                            using var policyRow = policyCpu[i];
+                            using var policyFloat = policyRow.to_type(ScalarType.Float32);
+                            using var valueRow = valueCpu[i];
+                            using var valueFloat = valueRow.to_type(ScalarType.Float32);
+
+                            float[] policy = policyFloat.data<float>().ToArray();
+                            float value = valueFloat.item<float>();
+                            tasks[i].Tcs.TrySetResult((policy, value));
+                        }
+                    }
+                    finally
+                    {
+                        valueGpu.Dispose();
+                        policyGpu.Dispose();
+                        inputGpu?.Dispose();
+                    }
+                });
+                _batchLatencyMsCounter.AddSample(totalStopwatch.ElapsedMilliseconds);
             }
             catch (Exception ex)
             {
@@ -173,6 +260,9 @@ namespace ChineseChessAI.MCTS
             }
         }
 
-        private record InferenceTask(float[] InputData, TaskCompletionSource<(float[], float)> Tcs);
+        private record InferenceTask(
+            float[] InputData,
+            TaskCompletionSource<(float[], float)> Tcs,
+            CancellationToken CancellationToken);
     }
 }

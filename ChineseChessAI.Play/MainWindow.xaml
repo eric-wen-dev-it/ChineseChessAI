@@ -104,10 +104,50 @@
                        Foreground="#5E4A36"
                        Text="Separate play app backed by the shared engine project." />
 
-            <TextBlock Margin="0,18,0,6"
+            <Grid Margin="0,18,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0">
+                    <TextBlock Margin="0,0,0,6"
+                               FontWeight="SemiBold"
+                               Text="Red player" />
+                    <ComboBox x:Name="RedPlayerComboBox"
+                              Height="30"
+                              SelectedIndex="0"
+                              SelectionChanged="OnPlayerTypeChanged">
+                        <ComboBoxItem Content="Human" />
+                        <ComboBoxItem Content="MCTS" />
+                        <ComboBoxItem Content="Traditional" />
+                        <ComboBoxItem Content="Pikafish" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Grid.Column="2">
+                    <TextBlock Margin="0,0,0,6"
+                               FontWeight="SemiBold"
+                               Text="Black player" />
+                    <ComboBox x:Name="BlackPlayerComboBox"
+                              Height="30"
+                              SelectedIndex="2"
+                              SelectionChanged="OnPlayerTypeChanged">
+                        <ComboBoxItem Content="Human" />
+                        <ComboBoxItem Content="MCTS" />
+                        <ComboBoxItem Content="Traditional" />
+                        <ComboBoxItem Content="Pikafish" />
+                    </ComboBox>
+                </StackPanel>
+            </Grid>
+
+            <TextBlock x:Name="ModelFileLabel"
+                       Margin="0,14,0,6"
                        FontWeight="SemiBold"
-                       Text="Model file" />
-            <DockPanel LastChildFill="False">
+                       Text="Model / engine file" />
+            <DockPanel x:Name="ModelFilePanel"
+                       LastChildFill="False">
                 <TextBox x:Name="ModelPathTextBox"
                          Width="270"
                          Height="30"
@@ -126,22 +166,11 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Column="0">
-                    <TextBlock Margin="0,0,0,6"
-                               FontWeight="SemiBold"
-                               Text="Human side" />
-                    <ComboBox x:Name="HumanSideComboBox"
-                              Height="30"
-                              SelectedIndex="0">
-                        <ComboBoxItem Content="Play Red" />
-                        <ComboBoxItem Content="Play Black" />
-                    </ComboBox>
-                </StackPanel>
-
                 <StackPanel Grid.Column="2">
-                    <TextBlock Margin="0,0,0,6"
+                    <TextBlock x:Name="SearchBudgetLabel"
+                               Margin="0,0,0,6"
                                FontWeight="SemiBold"
-                               Text="Simulations" />
+                               Text="Simulations / Depth" />
                     <TextBox x:Name="SimulationsTextBox"
                              Height="30"
                              VerticalContentAlignment="Center"
@@ -162,6 +191,12 @@
                         Margin="0,0,8,0"
                         Click="OnAiMoveClick"
                         Content="AI Move" />
+                <Button x:Name="TraditionalDemoButton"
+                        Width="110"
+                        Height="34"
+                        Margin="0,0,8,0"
+                        Click="OnTraditionalDemoClick"
+                        Content="Trad Demo" />
                 <Button x:Name="ResignButton"
                         Width="110"
                         Height="34"

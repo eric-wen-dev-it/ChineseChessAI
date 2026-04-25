@@ -1,5 +1,10 @@
 {
   "defaultSimulations": 2400,
+  "traditionalDepth": 5,
+  "traditionalMoveTimeMs": 5000,
+  "traditionalRootParallelism": 0,
+  "pikafishPath": "",
+  "pikafishMoveTimeMs": 3000,
   "batchSize": 64,
   "cPuct": 1.6,
   "addRootNoise": false

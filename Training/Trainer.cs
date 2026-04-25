@@ -1,9 +1,7 @@
-﻿using ChineseChessAI.NeuralNetwork;
-using ChineseChessAI.Core;
+﻿using ChineseChessAI.Core;
+using ChineseChessAI.NeuralNetwork;
+using ChineseChessAI.Utils;
 using TorchSharp;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using static TorchSharp.torch;
 using static TorchSharp.torch.optim.lr_scheduler;
 
@@ -105,35 +103,38 @@ namespace ChineseChessAI.Training
 
         private double TrainStep(Tensor statesDevice, Tensor targetPoliciesDevice, Tensor targetValuesDevice)
         {
-            _model.train();
-            _optimizer.zero_grad();
-
-            // 【关键修复】：DisposeScope 仅覆盖 forward + backward（激活张量），
-            // _optimizer.step() 在 scope 退出后调用。
-            // Adam 动量缓冲区在 step() 内创建时没有活跃 scope，
-            // 因此不会被注册到任何 scope，可以在 Trainer 生命周期内持久存在。
-            float lossValue;
-            using (var forwardScope = torch.NewDisposeScope())
+            return GpuExecutionGate.Run(() =>
             {
-                var (policyLogits, valuePred) = _model.forward(statesDevice);
+                _model.train();
+                _optimizer.zero_grad();
 
-                var vLoss = torch.nn.functional.mse_loss(valuePred, targetValuesDevice.view(-1, 1));
-                var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
-                var pLoss = -(targetPoliciesDevice * logProbs).sum(1).mean();
+                // 【关键修复】：DisposeScope 仅覆盖 forward + backward（激活张量），
+                // _optimizer.step() 在 scope 退出后调用。
+                // Adam 动量缓冲区在 step() 内创建时没有活跃 scope，
+                // 因此不会被注册到任何 scope，可以在 Trainer 生命周期内持久存在。
+                float lossValue;
+                using (var forwardScope = torch.NewDisposeScope())
+                {
+                    var (policyLogits, valuePred) = _model.forward(statesDevice);
 
-                var totalLoss = vLoss + pLoss;
+                    var vLoss = torch.nn.functional.mse_loss(valuePred, targetValuesDevice.view(-1, 1));
+                    var logProbs = torch.nn.functional.log_softmax(policyLogits, 1);
+                    var pLoss = -(targetPoliciesDevice * logProbs).sum(1).mean();
 
-                if (!totalLoss.requires_grad)
-                    throw new Exception($"计算图断裂！参数状态: {_model.parameters().First().requires_grad}");
+                    var totalLoss = vLoss + pLoss;
 
-                totalLoss.backward();
-                lossValue = totalLoss.item<float>();
-                // forwardScope 退出：policyLogits、valuePred、vLoss、logProbs、pLoss、totalLoss 全部释放
-                // 参数梯度（param.grad）附属于模型参数，不受 scope 影响，optimizer.step() 可正常读取
-            }
+                    if (!totalLoss.requires_grad)
+                        throw new Exception($"计算图断裂！参数状态: {_model.parameters().First().requires_grad}");
 
-            _optimizer.step(); // 在 scope 外调用：动量张量不被任何 scope 捕获，生命周期与 Trainer 绑定
-            return lossValue;
+                    totalLoss.backward();
+                    lossValue = totalLoss.item<float>();
+                    // forwardScope 退出：policyLogits、valuePred、vLoss、logProbs、pLoss、totalLoss 全部释放
+                    // 参数梯度（param.grad）附属于模型参数，不受 scope 影响，optimizer.step() 可正常读取
+                }
+
+                _optimizer.step(); // 在 scope 外调用：动量张量不被任何 scope 捕获，生命周期与 Trainer 绑定
+                return (double)lossValue;
+            });
         }
 
         public double GetCurrentLR()

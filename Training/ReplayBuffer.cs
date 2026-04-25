@@ -1,11 +1,6 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using ChineseChessAI.Core;
+using System.IO;
+using System.Text.Json;
 
 namespace ChineseChessAI.Training
 {
@@ -15,7 +10,6 @@ namespace ChineseChessAI.Training
         private readonly TrainingExample[] _buffer;
         private int _count;
         private int _head;
-        private readonly Random _random = new Random();
         private readonly string _dataDir;
 
         public event Action<string>? OnSaveError;
@@ -26,7 +20,7 @@ namespace ChineseChessAI.Training
         {
             _capacity = capacity;
             _buffer = new TrainingExample[capacity];
-            _dataDir = dataDir ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "self_play_data");
+            _dataDir = dataDir ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "replay_data");
             if (!Directory.Exists(_dataDir))
                 Directory.CreateDirectory(_dataDir);
         }
@@ -48,6 +42,23 @@ namespace ChineseChessAI.Training
             }
         }
 
+        public void SaveGame(MasterGameData gameData)
+        {
+            try
+            {
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string filePath = Path.Combine(_dataDir, $"game_{timestamp}_{Guid.NewGuid():N}.json");
+                string json = JsonSerializer.Serialize(gameData);
+                File.WriteAllText(filePath, json);
+            }
+            catch (Exception ex)
+            {
+                string msg = $"[ReplayBuffer] 纾佺洏鍐欏叆澶辫触: {ex.Message}";
+                Console.WriteLine(msg);
+                OnSaveError?.Invoke(msg);
+            }
+        }
+
         public async Task<(int samples, int games)> LoadOldSamplesAsync(
             int maxFiles = 200,
             bool randomize = false,
@@ -64,7 +75,7 @@ namespace ChineseChessAI.Training
                 allFilesInfo = allFilesInfo.Where(f => f.CreationTime < cutoffTime.Value);
 
             IEnumerable<string> ordered = randomize
-                ? allFilesInfo.OrderBy(_ => _random.Next()).Select(f => f.FullName)
+                ? allFilesInfo.OrderBy(_ => Random.Shared.Next()).Select(f => f.FullName)
                 : allFilesInfo.OrderByDescending(f => f.CreationTime).Select(f => f.FullName);
 
             var files = ordered.Take(maxFiles).ToList();
@@ -149,6 +160,58 @@ namespace ChineseChessAI.Training
             return (totalLoaded, totalGames);
         }
 
+        public async Task<(int samples, int games, int deletedGames)> RetainMostRecentGamesAsync(
+            int maxGames,
+            Action<string>? logAction = null,
+            Action<List<Move>, Move, string>? onAuditFailure = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (maxGames <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxGames));
+
+            if (!Directory.Exists(_dataDir))
+            {
+                Clear();
+                return (0, 0, 0);
+            }
+
+            var allFiles = Directory.GetFiles(_dataDir, "*.json")
+                .Select(path => new FileInfo(path))
+                .OrderByDescending(info => info.CreationTimeUtc)
+                .ThenByDescending(info => info.Name, StringComparer.Ordinal)
+                .ToList();
+
+            var keptFiles = allFiles
+                .Take(maxGames)
+                .Select(info => info.FullName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            int deletedGames = 0;
+            foreach (var file in allFiles.Skip(maxGames))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    File.Delete(file.FullName);
+                    deletedGames++;
+                }
+                catch (Exception ex)
+                {
+                    logAction?.Invoke($"[ReplayBuffer] 清理旧对局失败 {file.Name}: {ex.Message}");
+                }
+            }
+
+            Clear();
+            var (samples, games) = await LoadOldSamplesAsync(
+                maxFiles: maxGames,
+                randomize: false,
+                logAction: logAction,
+                onAuditFailure: onAuditFailure,
+                cancellationToken: cancellationToken);
+
+            return (samples, games, deletedGames);
+        }
+
         private bool AuditGame(List<string> ucciHistory, string fileName, Action<string>? logAction, Action<List<Move>, Move, string>? onAuditFailure)
         {
             var session = new GameRuleSession();
@@ -194,6 +257,17 @@ namespace ChineseChessAI.Training
             }
         }
 
+        public void AddGame(MasterGameData gameData, bool saveToDisk = true)
+        {
+            if (gameData == null || gameData.Examples == null || gameData.Examples.Count == 0)
+                return;
+
+            if (saveToDisk)
+                SaveGame(gameData);
+
+            AddRange(gameData.Examples, saveToDisk: false);
+        }
+
         public List<TrainingExample> Sample(int batchSize)
         {
             lock (_buffer)
@@ -207,7 +281,7 @@ namespace ChineseChessAI.Training
                 var indices = new HashSet<int>();
                 while (indices.Count < sampleCount)
                 {
-                    indices.Add(_random.Next(_count));
+                    indices.Add(Random.Shared.Next(_count));
                 }
 
                 foreach (var i in indices)

@@ -1,7 +1,4 @@
 ﻿using ChineseChessAI.Core;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace ChineseChessAI.Utils
 {

@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using ChineseChessAI.Utils;
 
 namespace ChineseChessAI.Core
@@ -12,7 +11,10 @@ namespace ChineseChessAI.Core
         private readonly List<Move> _moveHistory = new();
         private readonly List<string> _ucciHistory = new();
 
-        public Board Board { get; }
+        public Board Board
+        {
+            get;
+        }
         public ChineseChessRuleEngine Rules => _rules;
         public IReadOnlyList<Move> MoveHistory => _moveHistory;
         public IReadOnlyList<string> UcciHistory => _ucciHistory;
