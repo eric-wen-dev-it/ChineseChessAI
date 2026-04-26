@@ -1,5 +1,5 @@
 {
-  "defaultSimulations": 2400,
+  "defaultSimulations": 400,
   "traditionalDepth": 5,
   "traditionalMoveTimeMs": 5000,
   "traditionalRootParallelism": 0,

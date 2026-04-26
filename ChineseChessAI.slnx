@@ -2,4 +2,5 @@
   <Project Path="ChineseChessAI.csproj" />
   <Project Path="ChineseChessAI.Engine\ChineseChessAI.Engine.csproj" />
   <Project Path="ChineseChessAI.Play\ChineseChessAI.Play.csproj" />
+  <Project Path="ChineseChessAI.Tests\ChineseChessAI.Tests.csproj" />
 </Solution>

@@ -12,6 +12,9 @@ switch (command)
     case "book":
         BuildBook(repoRoot, args);
         break;
+    case "knowledge":
+        BuildKnowledgeBook(repoRoot, args);
+        break;
     case "bench":
         await RunDepthBench(args);
         break;
@@ -68,6 +71,37 @@ static void BuildBook(string repoRoot, string[] args)
         Console.WriteLine($"ordering_output={orderOutput}");
         Console.WriteLine($"ordering_min_count={orderMinCount}");
         Console.WriteLine($"ordering_top_moves={orderTopMoves}");
+    }
+}
+
+static void BuildKnowledgeBook(string repoRoot, string[] args)
+{
+    int maxPly = GetIntArg(args, "--ply", 120);
+    int minCount = GetIntArg(args, "--min-count", 2);
+    int topMoves = GetIntArg(args, "--top", 6);
+    int maxGames = GetIntArg(args, "--games", int.MaxValue);
+    string source = GetStringArg(args, "--source", FindDefaultBookSource(repoRoot));
+    string output = GetStringArg(args, "--out", Path.Combine(repoRoot, "data", "master_knowledge_book.json"));
+
+    var knowledge = new MasterKnowledgeBook(maxPly);
+    int games = knowledge.LoadFromPath(source, maxGames);
+    knowledge.Prune(minCount, topMoves);
+    knowledge.SaveCache(output);
+
+    var board = new Board();
+    Console.WriteLine($"source={source}");
+    Console.WriteLine($"games={games}");
+    Console.WriteLine($"result_red_wins={knowledge.RedWinGames}");
+    Console.WriteLine($"result_black_wins={knowledge.BlackWinGames}");
+    Console.WriteLine($"result_draws={knowledge.DrawGames}");
+    Console.WriteLine($"result_unknown={knowledge.UnknownGames}");
+    Console.WriteLine($"positions={knowledge.PositionCount}");
+    Console.WriteLine($"output={output}");
+    Console.WriteLine($"min_count={minCount}");
+    Console.WriteLine($"top_moves={topMoves}");
+    foreach (var entry in knowledge.GetMoves(board, 8))
+    {
+        Console.WriteLine($"initial_move={entry.Move} count={entry.Count} red_wins={entry.RedWins} black_wins={entry.BlackWins} draws={entry.Draws} unknown={entry.Unknown}");
     }
 }
 
@@ -213,7 +247,8 @@ static TraditionalEngineOptions CreateCurrentTraditionalOptions()
     {
         OpeningBook = book,
         OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
-        MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json")
+        MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+        MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120)
     };
 }
 

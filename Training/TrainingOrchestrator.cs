@@ -454,6 +454,7 @@ namespace ChineseChessAI.Training
 
         public TrainingOrchestrator()
         {
+            ModelPaths.EnsureBestModelsDirectory(AppDomain.CurrentDomain.BaseDirectory);
             MasterBuffer = new ReplayBuffer(5000000, "data/master_data");
             LeagueBuffer = new ReplayBuffer(1000000, "data/league_data");
 
@@ -481,7 +482,7 @@ namespace ChineseChessAI.Training
                 throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
 
             if (populationRefreshInterval <= 0)
-                populationRefreshInterval = populationSize * 8;
+                populationRefreshInterval = populationSize * 25;
             populationRefreshInterval = Math.Max(populationRefreshInterval, populationSize * 4);
             if (maxPopulationRefreshCycles.HasValue && maxPopulationRefreshCycles.Value <= 0)
                 throw new ArgumentOutOfRangeException(nameof(maxPopulationRefreshCycles));
@@ -763,6 +764,10 @@ namespace ChineseChessAI.Training
                                         }
                                     }
                                     finally { lockFirst.Release(); }
+                                }
+                                catch (OperationCanceledException) when (runCts.IsCancellationRequested)
+                                {
+                                    Log($"[对局 #{currentId} 取消] 联赛停止或重启，取消等待/搜索。");
                                 }
                                 catch (Exception ex)
                                 {
@@ -1062,7 +1067,8 @@ namespace ChineseChessAI.Training
                 {
                     OpeningBook = book,
                     OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
-                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json")
+                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120)
                 };
                 return new LeagueEngineHandle(new TraditionalGameEngineAdapter(new TraditionalEngine(options)));
             }
@@ -1199,12 +1205,12 @@ namespace ChineseChessAI.Training
                             var meta = _leagueManager.GetAgentMeta(agentId);
                             if (meta == null)
                             {
+                                skippedUninitializedAgents++;
                                 continue;
                             }
 
                             if (IsTraditionalAgent(meta))
                             {
-                                skippedUninitializedAgents++;
                                 continue;
                             }
 

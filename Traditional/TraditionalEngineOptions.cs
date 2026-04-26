@@ -26,6 +26,8 @@ namespace ChineseChessAI.Traditional
 
         public OpeningBook? MoveOrderingBook { get; init; }
 
+        public MasterKnowledgeBook? MasterKnowledgeBook { get; init; }
+
         public int RootParallelism { get; init; } = Math.Clamp(Environment.ProcessorCount, 1, 16);
     }
 }

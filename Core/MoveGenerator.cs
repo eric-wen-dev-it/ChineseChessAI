@@ -4,6 +4,45 @@ namespace ChineseChessAI.Core
     {
         private const int ROWS = 10;
         private const int COLS = 9;
+        private readonly Action<string>? _statusChanged;
+        private int _lastStatusTick;
+
+        // 长杀搜索 transposition table，跨 IsThreateningToMate 调用共享。
+        // MoveGenerator 在 MCTSEngine 内被多线程并发使用，故用 ConcurrentDictionary。
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, bool IsRedAttacker, int Depth), bool> _mateMemo = new();
+        private const int MateMemoMaxSize = 200_000;
+
+        // 热路径线程本地缓冲：禁手判定不会自身嵌套（GenerateLegalMoves 内层都传 skipPerpetualCheck=true），
+        // 故同线程内 IsForbiddenPerpetualMove → SnapshotAttackPairs → IsChasing 串行使用同一组 buffer 安全。
+        [ThreadStatic] private static List<Move>? _tlsMoves;
+        [ThreadStatic] private static HashSet<int>? _tlsPreAttacks;
+        [ThreadStatic] private static HashSet<int>? _tlsAffected;
+
+        private static List<Move> RentTlsMoves()
+        {
+            var l = _tlsMoves ??= new List<Move>(64);
+            l.Clear();
+            return l;
+        }
+
+        private static HashSet<int> RentTlsPreAttacks()
+        {
+            var s = _tlsPreAttacks ??= new HashSet<int>(64);
+            s.Clear();
+            return s;
+        }
+
+        private static HashSet<int> RentTlsAffected()
+        {
+            var s = _tlsAffected ??= new HashSet<int>(8);
+            s.Clear();
+            return s;
+        }
+
+        public MoveGenerator(Action<string>? statusChanged = null)
+        {
+            _statusChanged = statusChanged;
+        }
 
         public string GetMoveValidationResult(Board board, Move move, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
@@ -29,7 +68,7 @@ namespace ChineseChessAI.Core
                 return "自方王受威胁 (送将)";
 
             // 3. 检查禁手规则（长打/长捉）
-            if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
+            if (!skipPerpetualCheck && board.WillCauseThreefoldRepetition(move.From, move.To))
             {
                 if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                     return "禁手 (违规长打/长捉)";
@@ -70,7 +109,7 @@ namespace ChineseChessAI.Core
                 if (!safe)
                     continue;
 
-                if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
+                if (!skipPerpetualCheck && board.WillCauseThreefoldRepetition(move.From, move.To))
                 {
                     if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                         continue;
@@ -129,21 +168,94 @@ namespace ChineseChessAI.Core
         private bool IsForbiddenPerpetualMove(Board board, Move move, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            // 走子前先快照攻击方所有"对敌方非豁免子"的攻击 pair (attackerPos, targetPos)，
+            // 用于 IsChasing 区分"既得攻击"与"新生攻击"——只有新生攻击才计入捉。
+            bool isRedAttacker = board.IsRedTurn;
+            var preMoveAttacks = RentTlsPreAttacks();
+            FillAttackPairs(board, isRedAttacker, preMoveAttacks);
+
             board.Push(move.From, move.To);
             int count = board.GetRepetitionCount();
             bool isForbidden = false;
             if (count >= 3)
             {
                 // 长将、长捉、长杀均视为禁手
+                ReportStatus("正在检查长将/长打禁着与强制杀威胁...");
                 bool isChecking = IsChecking(board, !board.IsRedTurn);
-                bool isChasing = IsChasing(board, move);
-                bool isKillThreat = IsThreateningToMate(board, !board.IsRedTurn, cancellationToken);
-
-                if (isChecking || isChasing || isKillThreat)
+                if (isChecking)
+                {
                     isForbidden = true;
+                }
+                else
+                {
+                    bool isChasing = IsChasing(board, move, preMoveAttacks);
+                    if (isChasing)
+                    {
+                        isForbidden = true;
+                    }
+                    else
+                    {
+                        ReportStatus("正在检查长将/长打禁着与强制杀威胁...");
+                        isForbidden = IsThreateningToMate(board, !board.IsRedTurn, cancellationToken);
+                    }
+                }
             }
             board.Pop();
             return isForbidden;
+        }
+
+        /// <summary>
+        /// 写入当前局面下，攻击方对所有敌方"可被捉子"的攻击对 (attackerPos*100+targetPos)到提供的 set。
+        /// 仅记录满足 IsRealChase 入口豁免条件外的目标（将士象 / 未过河兵卒被排除前置过滤）。
+        /// </summary>
+        private void FillAttackPairs(Board board, bool isRedAttacker, HashSet<int> set)
+        {
+            var moves = RentTlsMoves();
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte p = board.GetPiece(i);
+                if (p == 0)
+                    continue;
+                if ((isRedAttacker && p < 0) || (!isRedAttacker && p > 0))
+                    continue;
+
+                moves.Clear();
+                GeneratePieceMoves(board, i, p, moves);
+                foreach (var m in moves)
+                {
+                    sbyte target = board.GetPiece(m.To);
+                    if (target == 0)
+                        continue;
+                    if ((isRedAttacker && target > 0) || (!isRedAttacker && target < 0))
+                        continue;
+
+                    int targetType = Math.Abs(target);
+                    if (targetType <= 3)
+                        continue; // 将士象不计入捉
+                    if (targetType == 7)
+                    {
+                        bool isRedTarget = target > 0;
+                        int row = m.To / 9;
+                        if (isRedTarget ? (row >= 5) : (row <= 4))
+                            continue; // 未过河兵卒不计入捉
+                    }
+                    set.Add(i * 100 + m.To);
+                }
+            }
+        }
+
+        private void ReportStatus(string message)
+        {
+            if (_statusChanged == null)
+                return;
+
+            int now = Environment.TickCount;
+            if (unchecked(now - _lastStatusTick) < 1000)
+                return;
+
+            _lastStatusTick = now;
+            _statusChanged(message);
         }
 
         public bool IsChecking(Board board, bool isRedAttacker)
@@ -152,58 +264,159 @@ namespace ChineseChessAI.Core
         }
 
         /// <summary>
-        /// 判断是否产生“捉”的威胁。
-        /// 优化版：仅针对刚移动的那枚棋子及其产生的抽吃威胁进行判定。
+        /// 判断走子是否构成"捉"的威胁。
+        /// 仅当攻击 (attackerPos, targetPos) 在走子前不存在（新生攻击或抽吃）时才计入捉，
+        /// 排除既得既存攻击导致的误判。同时过滤"假打"（被牵制子的虚假攻击）。
         /// </summary>
-        private bool IsChasing(Board board, Move move)
+        private bool IsChasing(Board board, Move move, HashSet<int> preMoveAttacks)
         {
             // 在执行 move 之后的局面判断
             bool isRedAttacker = !board.IsRedTurn;
-
-            // 【BUG 8 优化】：标准常捉规则通常判定“主动走动并产生攻击”的子。
-            // 遍历所有我方棋子，检测是否对敌方重要棋子产生新的或持续的“捉”。
-            // 注意：move.To 是当前落子点。
             int attackerPos = move.To;
             sbyte attacker = board.GetPiece(attackerPos);
             if (attacker == 0 || (isRedAttacker ? attacker < 0 : attacker > 0))
                 return false;
 
-            // 1. 检查刚走动的这枚棋子是否在“捉”
-            var attacks = new List<Move>();
+            // 1. 走动棋子自身的捉：pre 中该棋子在 move.From，故查 (move.From, m.To) 是否已存在
+            var attacks = RentTlsMoves();
             GeneratePieceMoves(board, attackerPos, attacker, attacks);
             foreach (var m in attacks)
             {
                 sbyte target = board.GetPiece(m.To);
-                if (target != 0 && (isRedAttacker ? target < 0 : target > 0))
-                {
-                    if (IsRealChase(board, attackerPos, m.To))
-                        return true;
-                }
+                if (target == 0 || (isRedAttacker ? target > 0 : target < 0))
+                    continue;
+
+                int preKey = move.From * 100 + m.To;
+                if (preMoveAttacks.Contains(preKey))
+                    continue; // 既得攻击，本步未新增捉势
+
+                if (!IsAttackLegal(board, attackerPos, m.To, isRedAttacker))
+                    continue; // 假打：攻击者被牵制，吃子即送将
+
+                if (IsRealChase(board, attackerPos, m.To))
+                    return true;
             }
 
-            // 2. 检查因为这枚棋子的走动导致的“抽吃”威胁（由于其移开或作为炮架产生的其他子威胁）
-            // 这种情况下通常遍历全场受攻击点是安全的，且能捕捉复杂的“捉”。
-            for (int i = 0; i < 90; i++)
+            // 2. 抽吃 / 闪击：本步可能改变攻击集的友方子（沿 from/to 横纵线上的车王炮 + 邻接 4 格友方马）
+            //    其它子（士象兵、远处子）的攻击集本步不变，已被 preMoveAttacks 全场快照覆盖。
+            var affected = RentTlsAffected();
+            CollectAffectedFriendlies(board, move.From, move.To, isRedAttacker, attackerPos, affected);
+
+            // 注：foreach 内调用 GeneratePieceMoves 复用 _tlsMoves（与上方 attacks 同一缓冲），
+            //    第一段 attacks foreach 已结束、attacks 不再读，复用安全。
+            foreach (int i in affected)
             {
-                if (i == attackerPos)
-                    continue;
                 sbyte otherAttacker = board.GetPiece(i);
+                // affected 集合在加入时已校验同色，但保留 sanity 检查
                 if (otherAttacker == 0 || (isRedAttacker ? otherAttacker < 0 : otherAttacker > 0))
                     continue;
 
-                var otherAttacks = new List<Move>();
+                var otherAttacks = RentTlsMoves();
                 GeneratePieceMoves(board, i, otherAttacker, otherAttacks);
                 foreach (var m in otherAttacks)
                 {
                     sbyte target = board.GetPiece(m.To);
-                    if (target != 0 && (isRedAttacker ? target < 0 : target > 0))
-                    {
-                        if (IsRealChase(board, i, m.To))
-                            return true;
-                    }
+                    if (target == 0 || (isRedAttacker ? target > 0 : target < 0))
+                        continue;
+
+                    int preKey = i * 100 + m.To;
+                    if (preMoveAttacks.Contains(preKey))
+                        continue; // 既得攻击
+
+                    if (!IsAttackLegal(board, i, m.To, isRedAttacker))
+                        continue; // 假打过滤
+
+                    if (IsRealChase(board, i, m.To))
+                        return true;
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// 收集本步走子可能改变其攻击集的"友方子"集合。
+        /// 几何分析：沿 from / to 的横纵 4 方向第一/二个非空若是友方车/王/炮 → 视野受影响；
+        /// from / to 的邻接 4 格上若有友方马 → 该马的某些走法的"马腿"是 from/to，攻击集变化。
+        /// 排除 attacker 自己（excludePos = move.To，已在第一段处理）。
+        /// 非线性子（士、象、兵）的攻击集不受单步移动影响，故不纳入。
+        /// </summary>
+        private void CollectAffectedFriendlies(Board board, int from, int to, bool isRedAttacker, int excludePos, HashSet<int> affected)
+        {
+            int[] linDr = { -1, 1, 0, 0 };
+            int[] linDc = { 0, 0, -1, 1 };
+            int[] adjDr = { -1, 1, 0, 0 };
+            int[] adjDc = { 0, 0, -1, 1 };
+
+            for (int o = 0; o < 2; o++)
+            {
+                int origin = (o == 0) ? from : to;
+                int r = origin / 9, c = origin % 9;
+
+                // 沿 origin 的横/纵 4 方向：第一非空若友方车/王/炮加入；第二非空若友方炮加入
+                for (int dir = 0; dir < 4; dir++)
+                {
+                    int count = 0;
+                    for (int step = 1; step < 10; step++)
+                    {
+                        int nr = r + linDr[dir] * step;
+                        int nc = c + linDc[dir] * step;
+                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
+                            break;
+                        int idx = nr * 9 + nc;
+                        sbyte p = board.GetPiece(idx);
+                        if (p == 0)
+                            continue;
+                        count++;
+                        if (idx != excludePos)
+                        {
+                            bool sameColor = isRedAttacker ? p > 0 : p < 0;
+                            if (sameColor)
+                            {
+                                int t = Math.Abs(p);
+                                if (t == 5 || t == 1 || t == 6)
+                                    affected.Add(idx);
+                            }
+                        }
+                        if (count >= 2)
+                            break;
+                    }
+                }
+
+                // 邻接 4 格上的友方马（以 origin 为马腿之一的马）
+                for (int i = 0; i < 4; i++)
+                {
+                    int hr = r + adjDr[i];
+                    int hc = c + adjDc[i];
+                    if (hr < 0 || hr >= ROWS || hc < 0 || hc >= COLS)
+                        continue;
+                    int hidx = hr * 9 + hc;
+                    if (hidx == excludePos)
+                        continue;
+                    sbyte p = board.GetPiece(hidx);
+                    if (Math.Abs(p) != 4)
+                        continue;
+                    bool sameColor = isRedAttacker ? p > 0 : p < 0;
+                    if (sameColor)
+                        affected.Add(hidx);
+                }
+            }
+        }
+
+        /// <summary>
+        /// 验证 from→to 这步攻击是否合法（攻击方完成捕获后，自方将不被攻击）。
+        /// 用于过滤"假打"——被牵制子的虚假威胁不计入捉。
+        /// </summary>
+        private bool IsAttackLegal(Board board, int from, int to, bool isRedAttacker)
+        {
+            sbyte captured = board.PerformMoveInternal(from, to);
+            try
+            {
+                return IsKingSafe(board, isRedAttacker);
+            }
+            finally
+            {
+                board.UndoMoveInternal(from, to, captured);
+            }
         }
 
         /// <summary>
@@ -248,166 +461,155 @@ namespace ChineseChessAI.Core
             return false;
         }
 
+        /// <summary>
+        /// 判断 pos 上的棋子是否被同色友军保护（对方若吃掉它，本方有子可以回吃）。
+        /// 反向几何查找：从 pos 出发反推哪些位置上的友军能攻击/保护 pos，避免 90 格全扫。
+        /// </summary>
         private bool IsProtected(Board board, int pos)
         {
             sbyte target = board.GetPiece(pos);
             if (target == 0)
                 return false;
             bool isRed = target > 0;
+            int r = pos / 9, c = pos % 9;
 
-            // 遍历所有自方棋子
-            for (int i = 0; i < 90; i++)
+            // A. 横/纵线扫描：第一个非空若是己方车 → 保护；step==1 且是己方王 → 保护；
+            //    第二个非空（炮架后）若是己方炮 → 保护
+            int[] linDr = { -1, 1, 0, 0 };
+            int[] linDc = { 0, 0, -1, 1 };
+            for (int dir = 0; dir < 4; dir++)
             {
-                if (i == pos)
-                    continue;
-                sbyte p = board.GetPiece(i);
-                if (p == 0 || (isRed ? p < 0 : p > 0))
-                    continue;
-
-                var moves = new List<Move>();
-                // 注意：炮的保护逻辑特殊，需要单独处理。
-                // 我们使用专门的 GeneratePieceMovesForProtection，它会包含友方棋子所在的位置。
-                GeneratePieceMovesForProtection(board, i, p, moves);
-                if (moves.Any(m => m.To == pos))
-                {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// 专门用于判定保护的走法生成（炮可以越过一个棋子保护自方棋子）
-        /// </summary>
-        private void GeneratePieceMovesForProtection(Board board, int from, sbyte piece, List<Move> moves)
-        {
-            // 大部分棋子的保护范围与其攻击范围一致
-            int type = Math.Abs(piece);
-            if (type != 6) // 非炮
-            {
-                GeneratePieceMoves(board, from, piece, moves);
-                // 默认的 GeneratePieceMoves 遇到友军会停止，我们需要包含友军位置
-                // 所以这里稍微修改逻辑
-                RefineMovesWithFriends(board, from, piece, moves);
-            }
-            else // 炮的特殊保护逻辑
-            {
-                GenerateCannonProtection(board, from, piece, moves);
-            }
-        }
-
-        private void RefineMovesWithFriends(Board board, int from, sbyte piece, List<Move> moves)
-        {
-            int r = from / 9, c = from % 9, type = Math.Abs(piece);
-            bool isRed = piece > 0;
-
-            switch (type)
-            {
-                case 1: // King
-                case 2: // Advisor
-                    int[] drKA = type == 1 ? new[] { -1, 1, 0, 0 } : new[] { -1, -1, 1, 1 };
-                    int[] dcKA = type == 1 ? new[] { 0, 0, -1, 1 } : new[] { -1, 1, -1, 1 };
-                    for (int i = 0; i < 4; i++)
-                    {
-                        int nr = r + drKA[i], nc = c + dcKA[i];
-                        if (nc < 3 || nc > 5 || (isRed ? (nr < 7 || nr > 9) : (nr < 0 || nr > 2)))
-                            continue;
-                        if (board.GetPiece(nr, nc) != 0)
-                            moves.Add(new Move(from, nr * 9 + nc));
-                    }
-                    break;
-                case 3: // Bishop
-                    int[] drB = { -2, -2, 2, 2 }, dcB = { -2, 2, -2, 2 };
-                    int[] prB = { -1, -1, 1, 1 }, pcB = { -1, 1, -1, 1 };
-                    for (int i = 0; i < 4; i++)
-                    {
-                        int nr = r + drB[i], nc = c + dcB[i];
-                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
-                            continue;
-                        if ((isRed && nr < 5) || (!isRed && nr > 4))
-                            continue;
-                        if (board.GetPiece(r + prB[i], c + pcB[i]) != 0)
-                            continue;
-                        if (board.GetPiece(nr, nc) != 0)
-                            moves.Add(new Move(from, nr * 9 + nc));
-                    }
-                    break;
-                case 4: // Knight
-                    int[] drK = { -2, -2, -1, -1, 1, 1, 2, 2 }, dcK = { -1, 1, -2, 2, -2, 2, -1, 1 };
-                    int[] prK = { -1, -1, 0, 0, 0, 0, 1, 1 }, pcK = { 0, 0, -1, 1, -1, 1, 0, 0 };
-                    for (int i = 0; i < 8; i++)
-                    {
-                        int nr = r + drK[i], nc = c + dcK[i];
-                        if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
-                            continue;
-                        if (board.GetPiece(r + prK[i], c + pcK[i]) != 0)
-                            continue;
-                        if (board.GetPiece(nr, nc) != 0)
-                            moves.Add(new Move(from, nr * 9 + nc));
-                    }
-                    break;
-                case 5: // Rook
-                    int[] drR = { -1, 1, 0, 0 }, dcR = { 0, 0, -1, 1 };
-                    for (int i = 0; i < 4; i++)
-                    {
-                        for (int step = 1; step < 10; step++)
-                        {
-                            int nr = r + drR[i] * step, nc = c + dcR[i] * step;
-                            if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
-                                break;
-                            sbyte target = board.GetPiece(nr, nc);
-                            if (target != 0)
-                            {
-                                moves.Add(new Move(from, nr * 9 + nc));
-                                break;
-                            }
-                        }
-                    }
-                    break;
-                case 7: // Pawn
-                    int forwardR = isRed ? r - 1 : r + 1;
-                    if (forwardR >= 0 && forwardR < 10 && board.GetPiece(forwardR, c) != 0)
-                        moves.Add(new Move(from, forwardR * 9 + c));
-                    if (isRed ? (r <= 4) : (r >= 5))
-                    {
-                        if (c - 1 >= 0 && board.GetPiece(r, c - 1) != 0)
-                            moves.Add(new Move(from, r * 9 + (c - 1)));
-                        if (c + 1 < 9 && board.GetPiece(r, c + 1) != 0)
-                            moves.Add(new Move(from, r * 9 + (c + 1)));
-                    }
-                    break;
-            }
-        }
-
-        private void GenerateCannonProtection(Board board, int from, sbyte piece, List<Move> moves)
-        {
-            int r = from / 9, c = from % 9;
-            int[] dr = { -1, 1, 0, 0 }, dc = { 0, 0, -1, 1 };
-            for (int i = 0; i < 4; i++)
-            {
-                bool overPiece = false;
+                int count = 0;
                 for (int step = 1; step < 10; step++)
                 {
-                    int nr = r + dr[i] * step, nc = c + dc[i] * step;
+                    int nr = r + linDr[dir] * step, nc = c + linDc[dir] * step;
                     if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS)
                         break;
-                    sbyte target = board.GetPiece(nr, nc);
-                    if (!overPiece)
+                    sbyte p = board.GetPiece(nr, nc);
+                    if (p == 0)
+                        continue;
+
+                    count++;
+                    if (count == 1)
                     {
-                        if (target != 0)
-                            overPiece = true;
-                    }
-                    else
-                    {
-                        if (target != 0)
+                        bool sameColor = isRed ? p > 0 : p < 0;
+                        if (sameColor)
                         {
-                            // 只要翻山后碰到棋子（无论敌友），都是在保护/攻击
-                            moves.Add(new Move(from, nr * 9 + nc));
-                            break;
+                            int t = Math.Abs(p);
+                            if (t == 5)
+                                return true; // 车
+                            if (t == 1 && step == 1)
+                                return true; // 王（仅相邻一格）
                         }
+                        // 不论敌友，下一格起作为潜在炮架
+                    }
+                    else if (count == 2)
+                    {
+                        bool sameColor = isRed ? p > 0 : p < 0;
+                        if (sameColor && Math.Abs(p) == 6)
+                            return true; // 隔一架的己方炮
+                        break; // 第三个棋子起再无线性威胁
                     }
                 }
             }
+
+            // B. 马的保护：8 个"日字"起点上是否有己方马，且其马腿空
+            int[] knDr = { -2, -2, -1, -1, 1, 1, 2, 2 };
+            int[] knDc = { -1, 1, -2, 2, -2, 2, -1, 1 };
+            for (int i = 0; i < 8; i++)
+            {
+                int kr = r + knDr[i], kc = c + knDc[i];
+                if (kr < 0 || kr >= ROWS || kc < 0 || kc >= COLS)
+                    continue;
+                sbyte p = board.GetPiece(kr, kc);
+                if (Math.Abs(p) != 4)
+                    continue;
+                if (isRed ? p < 0 : p > 0)
+                    continue; // 敌方马
+                // 马腿：紧挨着马朝 pos 方向的格子
+                int ddr = r - kr, ddc = c - kc;
+                int legR, legC;
+                if (Math.Abs(ddr) == 2)
+                {
+                    legR = kr + ddr / 2;
+                    legC = kc;
+                }
+                else
+                {
+                    legR = kr;
+                    legC = kc + ddc / 2;
+                }
+                if (board.GetPiece(legR, legC) == 0)
+                    return true;
+            }
+
+            // C. 兵的保护
+            if (isRed)
+            {
+                // 红兵向上走（forwardR = r-1），故红兵在 (r+1, c) 时能保护 (r, c)
+                if (r + 1 < ROWS && board.GetPiece(r + 1, c) == 7)
+                    return true;
+                // 红兵过河（自己 row<=4）后可横走，故 (r, c±1) 处的红兵能保护 (r, c) 当 r<=4
+                if (r <= 4)
+                {
+                    if (c - 1 >= 0 && board.GetPiece(r, c - 1) == 7)
+                        return true;
+                    if (c + 1 < COLS && board.GetPiece(r, c + 1) == 7)
+                        return true;
+                }
+            }
+            else
+            {
+                if (r - 1 >= 0 && board.GetPiece(r - 1, c) == -7)
+                    return true;
+                if (r >= 5)
+                {
+                    if (c - 1 >= 0 && board.GetPiece(r, c - 1) == -7)
+                        return true;
+                    if (c + 1 < COLS && board.GetPiece(r, c + 1) == -7)
+                        return true;
+                }
+            }
+
+            // D. 士的保护：斜一格且自己在九宫
+            int[] adDr = { -1, -1, 1, 1 };
+            int[] adDc = { -1, 1, -1, 1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int ar = r + adDr[i], ac = c + adDc[i];
+                if (ac < 3 || ac > 5)
+                    continue;
+                if (isRed && (ar < 7 || ar > 9))
+                    continue;
+                if (!isRed && (ar < 0 || ar > 2))
+                    continue;
+                sbyte p = board.GetPiece(ar, ac);
+                if (Math.Abs(p) == 2 && (isRed ? p > 0 : p < 0))
+                    return true;
+            }
+
+            // E. 象的保护：田字且象眼空、象在己方半盘
+            int[] biDr = { -2, -2, 2, 2 };
+            int[] biDc = { -2, 2, -2, 2 };
+            int[] biPr = { -1, -1, 1, 1 };
+            int[] biPc = { -1, 1, -1, 1 };
+            for (int i = 0; i < 4; i++)
+            {
+                int br = r + biDr[i], bc = c + biDc[i];
+                if (br < 0 || br >= ROWS || bc < 0 || bc >= COLS)
+                    continue;
+                if (isRed && br < 5)
+                    continue;
+                if (!isRed && br > 4)
+                    continue;
+                if (board.GetPiece(r + biPr[i], c + biPc[i]) != 0)
+                    continue; // 象眼被堵
+                sbyte p = board.GetPiece(br, bc);
+                if (Math.Abs(p) == 3 && (isRed ? p > 0 : p < 0))
+                    return true;
+            }
+
+            return false;
         }
 
         // 长杀禁手入口：检查攻击方是否已形成强制杀势（最多向前搜索 MateSearchDepth 步攻击）
@@ -419,6 +621,10 @@ namespace ChineseChessAI.Core
             // 调用时机：IsForbiddenPerpetualMove 已 Push(攻击方着法)，board.IsRedTurn = 防守方。
             // 正确语义：对"防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
             // 攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
+            // memo 用类共享 _mateMemo，跨调用复用搜索结果（同形面命中率极高）。
+            if (_mateMemo.Count > MateMemoMaxSize)
+                _mateMemo.Clear();
+
             var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
             if (defenderMoves.Count == 0)
                 return true;
@@ -441,11 +647,19 @@ namespace ChineseChessAI.Core
             return true;
         }
 
-        private bool HasForcedKill(Board board, bool isRedAttacker, int depth, CancellationToken cancellationToken)
+        private bool HasForcedKill(
+            Board board,
+            bool isRedAttacker,
+            int depth,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (depth <= 0)
                 return false;
+
+            var key = (board.CurrentHash, isRedAttacker, depth);
+            if (_mateMemo.TryGetValue(key, out bool cached))
+                return cached;
 
             foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
             {
@@ -455,7 +669,10 @@ namespace ChineseChessAI.Core
                 {
                     var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
                     if (defenderMoves.Count == 0)
+                    {
+                        _mateMemo[key] = true;
                         return true;
+                    }
 
                     bool defenderHasEscape = false;
                     foreach (var defenderMove in defenderMoves)
@@ -477,7 +694,10 @@ namespace ChineseChessAI.Core
                     }
 
                     if (!defenderHasEscape)
+                    {
+                        _mateMemo[key] = true;
                         return true;
+                    }
                 }
                 finally
                 {
@@ -485,9 +705,12 @@ namespace ChineseChessAI.Core
                 }
             }
 
+            _mateMemo[key] = false;
             return false;
         }
 
+        // 棋例分值（亚洲象棋联合会规则，用于"捉/兑/闲"判定，与子力评估分离）
+        // 车=4，马=炮=2（等价子互捉判兑），过河兵卒=1，将帅特殊高分
         private int GetPieceValue(sbyte piece)
         {
             switch (Math.Abs(piece))
@@ -495,15 +718,15 @@ namespace ChineseChessAI.Core
                 case 1:
                     return 1000; // 帅
                 case 5:
-                    return 9;    // 俥
-                case 6:
-                    return 5;    // 炮
+                    return 4;    // 俥
                 case 4:
-                    return 4;    // 傌
+                    return 2;    // 傌
+                case 6:
+                    return 2;    // 炮（与马等价）
                 case 7:
-                    return 2;    // 卒 (过河)
+                    return 1;    // 卒 (过河)
                 default:
-                    return 2;   // 其他
+                    return 1;
             }
         }
 

@@ -10,6 +10,8 @@ namespace ChineseChessAI.Core
         private readonly ChineseChessRuleEngine _rules;
         private readonly List<Move> _moveHistory = new();
         private readonly List<string> _ucciHistory = new();
+        private readonly List<int> _noProgressHistory = new();
+        private int _noProgressPlyCount;
 
         public Board Board
         {
@@ -18,6 +20,8 @@ namespace ChineseChessAI.Core
         public ChineseChessRuleEngine Rules => _rules;
         public IReadOnlyList<Move> MoveHistory => _moveHistory;
         public IReadOnlyList<string> UcciHistory => _ucciHistory;
+        public int NoProgressPlyCount => _noProgressPlyCount;
+        public int CurrentRepetitionCount => Board.GetRepetitionCount();
 
         public GameRuleSession(ChineseChessRuleEngine? rules = null)
         {
@@ -30,6 +34,8 @@ namespace ChineseChessAI.Core
             Board.Reset();
             _moveHistory.Clear();
             _ucciHistory.Clear();
+            _noProgressHistory.Clear();
+            _noProgressPlyCount = 0;
         }
 
         public List<Move> GetLegalMoves(bool skipPerpetualCheck = false)
@@ -85,6 +91,8 @@ namespace ChineseChessAI.Core
             Board.Push(move.From, move.To);
             _moveHistory.Add(move);
             _ucciHistory.Add(normalizedUcci ?? NotationConverter.MoveToUcci(move));
+            _noProgressPlyCount = Board.LastMoveWasIrreversible ? 0 : _noProgressPlyCount + 1;
+            _noProgressHistory.Add(_noProgressPlyCount);
         }
 
         public bool UndoLastMove()
@@ -95,6 +103,8 @@ namespace ChineseChessAI.Core
             Board.Pop();
             _moveHistory.RemoveAt(_moveHistory.Count - 1);
             _ucciHistory.RemoveAt(_ucciHistory.Count - 1);
+            _noProgressHistory.RemoveAt(_noProgressHistory.Count - 1);
+            _noProgressPlyCount = _noProgressHistory.Count == 0 ? 0 : _noProgressHistory[^1];
             return true;
         }
     }

@@ -10,6 +10,8 @@ namespace ChineseChessAI.Traditional
             int redScore = 0;
             int blackScore = 0;
             int totalMaterial = 0;
+            var redProfile = new SideProfile();
+            var blackProfile = new SideProfile();
 
             for (int index = 0; index < 90; index++)
             {
@@ -18,6 +20,11 @@ namespace ChineseChessAI.Traditional
                     continue;
 
                 totalMaterial += PieceValues[Math.Abs(piece)];
+                if (piece > 0)
+                    redProfile = redProfile.Add(piece);
+                else
+                    blackProfile = blackProfile.Add(piece);
+
                 int score = PieceValues[Math.Abs(piece)] + GetPositionBonus(piece, index);
                 score += GetShapeBonus(board, piece, index);
                 score += GetAttackDefenseBonus(board, piece, index);
@@ -31,6 +38,10 @@ namespace ChineseChessAI.Traditional
             blackScore += GetKingSafety(board, false);
             redScore += GetEndgameKingPressure(board, true, totalMaterial);
             blackScore += GetEndgameKingPressure(board, false, totalMaterial);
+            redScore += GetCoordinationBonus(board, true, redProfile, blackProfile);
+            blackScore += GetCoordinationBonus(board, false, blackProfile, redProfile);
+            redScore += GetEndgameMaterialBonus(redProfile, blackProfile, totalMaterial);
+            blackScore += GetEndgameMaterialBonus(blackProfile, redProfile, totalMaterial);
 
             int sideRelative = redScore - blackScore;
             return board.IsRedTurn ? sideRelative : -sideRelative;
@@ -90,12 +101,50 @@ namespace ChineseChessAI.Traditional
 
             return type switch
             {
-                5 => CountRookMobility(board, row, col) * 5 + OpenFileBonus(board, red, col),
-                6 => CountCannonMobilityAndScreens(board, red, row, col),
-                4 => CountKnightMobility(board, row, col) * 7,
+                5 => GetRookShapeBonus(board, red, row, col),
+                6 => GetCannonShapeBonus(board, red, row, col),
+                4 => GetKnightShapeBonus(board, red, row, col),
                 7 => PawnShapeBonus(board, red, row, col),
                 _ => 0
             };
+        }
+
+        private static int GetRookShapeBonus(Board board, bool red, int row, int col)
+        {
+            int score = CountRookMobility(board, row, col) * 5 + OpenFileBonus(board, red, col);
+            int forwardRank = red ? 9 - row : row;
+            if (col is 3 or 5 && forwardRank >= 2)
+                score += 26;
+            if (col == 4 && forwardRank >= 3)
+                score += 16;
+            if (HasPressureLineToKing(board, row, col, red, maxScreens: 0))
+                score += 45;
+            return score;
+        }
+
+        private static int GetCannonShapeBonus(Board board, bool red, int row, int col)
+        {
+            int score = CountCannonMobilityAndScreens(board, red, row, col);
+            int forwardRank = red ? 9 - row : row;
+            if (forwardRank >= 3 && col is >= 2 and <= 6)
+                score += 12;
+            if (HasPressureLineToKing(board, row, col, red, maxScreens: 1))
+                score += 55;
+            score += CountUsefulCannonScreens(board, red, row, col) * 14;
+            return score;
+        }
+
+        private static int GetKnightShapeBonus(Board board, bool red, int row, int col)
+        {
+            int mobility = CountKnightMobility(board, row, col);
+            int blockedLegs = CountKnightBlockedLegs(board, row, col);
+            int forwardRank = red ? 9 - row : row;
+            int score = mobility * 8 - blockedLegs * 16;
+            if (forwardRank >= 3 && col is >= 2 and <= 6)
+                score += 18;
+            if (mobility <= 2)
+                score -= 28;
+            return score;
         }
 
         private static int CountRookMobility(Board board, int row, int col)
@@ -165,6 +214,20 @@ namespace ChineseChessAI.Traditional
             return count;
         }
 
+        private static int CountKnightBlockedLegs(Board board, int row, int col)
+        {
+            int blocked = 0;
+            if (row > 0 && board.GetPiece(row - 1, col) != 0)
+                blocked++;
+            if (row < 9 && board.GetPiece(row + 1, col) != 0)
+                blocked++;
+            if (col > 0 && board.GetPiece(row, col - 1) != 0)
+                blocked++;
+            if (col < 8 && board.GetPiece(row, col + 1) != 0)
+                blocked++;
+            return blocked;
+        }
+
         private static int PawnShapeBonus(Board board, bool red, int row, int col)
         {
             int score = 0;
@@ -176,6 +239,8 @@ namespace ChineseChessAI.Traditional
             int forward = red ? row - 1 : row + 1;
             if (InBoard(forward, col) && board.GetPiece(forward, col) == 0)
                 score += 8;
+            if ((red && row <= 2) || (!red && row >= 7))
+                score += col is >= 3 and <= 5 ? 35 : 18;
             return score;
         }
 
@@ -306,6 +371,8 @@ namespace ChineseChessAI.Traditional
                 score += 12;
             if (CountAttackers(board, king, !red) > 0)
                 score -= 120;
+            score -= CountKingZoneAttackers(board, red, king) * 34;
+            score -= CountKingFilePressure(board, red) * 45;
             score -= Math.Abs(col - 4) * 10;
             score -= red ? Math.Max(0, 9 - row) * 6 : row * 6;
             return score;
@@ -325,6 +392,189 @@ namespace ChineseChessAI.Traditional
             int enemyRow = enemyKing / 9, enemyCol = enemyKing % 9;
             int distance = Math.Abs(ownRow - enemyRow) + Math.Abs(ownCol - enemyCol);
             return Math.Max(0, 60 - distance * 8);
+        }
+
+        private static int GetCoordinationBonus(Board board, bool red, SideProfile own, SideProfile enemy)
+        {
+            int score = 0;
+            if (own.Rooks >= 2)
+                score += 45;
+            if (own.Rooks >= 1 && own.Cannons >= 1)
+                score += 30;
+            if (own.Knights >= 1 && own.Cannons >= 1)
+                score += 22;
+            if (own.Rooks >= 1 && own.Knights >= 1)
+                score += 18;
+            if (own.Advisors + own.Bishops <= 2)
+                score -= 28;
+            if (enemy.Advisors + enemy.Bishops <= 2 && own.Rooks + own.Cannons + own.Knights >= 2)
+                score += 36;
+
+            int enemyKing = FindKing(board, !red);
+            if (enemyKing >= 0)
+                score += CountHeavyPiecesNearKing(board, red, enemyKing) * 20;
+            return score;
+        }
+
+        private static int GetEndgameMaterialBonus(SideProfile own, SideProfile enemy, int totalMaterial)
+        {
+            if (totalMaterial > 2600)
+                return 0;
+
+            int ownAttackers = own.Rooks * 4 + own.Cannons * 2 + own.Knights * 2 + own.Pawns;
+            int enemyGuards = enemy.Advisors + enemy.Bishops;
+            int score = 0;
+
+            if (own.Rooks >= 1 && ownAttackers >= 5)
+                score += 60;
+            if (own.Rooks == 0 && own.Cannons == 1 && own.Knights == 0 && own.Pawns <= 1 && enemyGuards >= 3)
+                score -= 70;
+            if (own.Knights == 1 && own.Cannons == 0 && own.Rooks == 0 && own.Pawns <= 1 && enemyGuards >= 3)
+                score -= 55;
+            if (own.Pawns >= 2 && enemyGuards <= 2)
+                score += 35;
+            if (ownAttackers <= 1 && enemyGuards >= 3)
+                score -= 80;
+
+            return score;
+        }
+
+        private static int CountUsefulCannonScreens(Board board, bool red, int row, int col)
+        {
+            int screens = 0;
+            foreach (var (dr, dc) in Directions())
+            {
+                bool foundScreen = false;
+                for (int step = 1; step < 10; step++)
+                {
+                    int nr = row + dr * step;
+                    int nc = col + dc * step;
+                    if (!InBoard(nr, nc))
+                        break;
+
+                    sbyte target = board.GetPiece(nr, nc);
+                    if (target == 0)
+                        continue;
+
+                    if (!foundScreen)
+                    {
+                        foundScreen = true;
+                        continue;
+                    }
+
+                    if ((red && target < 0) || (!red && target > 0))
+                        screens++;
+                    break;
+                }
+            }
+            return screens;
+        }
+
+        private static bool HasPressureLineToKing(Board board, int row, int col, bool red, int maxScreens)
+        {
+            int king = FindKing(board, !red);
+            if (king < 0)
+                return false;
+
+            int kingRow = king / 9;
+            int kingCol = king % 9;
+            if (row != kingRow && col != kingCol)
+                return false;
+
+            int screens = CountPiecesBetween(board, row, col, kingRow, kingCol);
+            return screens <= maxScreens;
+        }
+
+        private static int CountKingZoneAttackers(Board board, bool redKing, int kingIndex)
+        {
+            int kingRow = kingIndex / 9;
+            int kingCol = kingIndex % 9;
+            bool enemyRed = !redKing;
+            int count = 0;
+            for (int from = 0; from < 90; from++)
+            {
+                sbyte piece = board.GetPiece(from);
+                if (piece == 0 || (piece > 0) != enemyRed)
+                    continue;
+
+                int row = from / 9;
+                int col = from % 9;
+                int distance = Math.Abs(row - kingRow) + Math.Abs(col - kingCol);
+                if (distance > 5 && col != kingCol)
+                    continue;
+
+                if (AttacksSquare(board, from, kingIndex, piece))
+                {
+                    count += 2;
+                    continue;
+                }
+
+                if (IsInKingZone(redKing, kingRow - 1, kingCol) && AttacksSquare(board, from, (kingRow - 1) * 9 + kingCol, piece))
+                    count++;
+                if (IsInKingZone(redKing, kingRow, kingCol - 1) && AttacksSquare(board, from, kingRow * 9 + kingCol - 1, piece))
+                    count++;
+                if (IsInKingZone(redKing, kingRow, kingCol + 1) && AttacksSquare(board, from, kingRow * 9 + kingCol + 1, piece))
+                    count++;
+            }
+            return count;
+        }
+
+        private static bool IsInKingZone(bool redKing, int row, int col)
+        {
+            if (col is < 3 or > 5)
+                return false;
+            return redKing ? row is >= 7 and <= 9 : row is >= 0 and <= 2;
+        }
+
+        private static int CountKingFilePressure(Board board, bool red)
+        {
+            int king = FindKing(board, red);
+            if (king < 0)
+                return 0;
+
+            int row = king / 9;
+            int col = king % 9;
+            int pressure = 0;
+            for (int r = 0; r < 10; r++)
+            {
+                if (r == row)
+                    continue;
+                sbyte piece = board.GetPiece(r, col);
+                if (piece == 0 || (piece > 0) == red)
+                    continue;
+
+                int type = Math.Abs(piece);
+                int between = CountPiecesBetween(board, r, col, row, col);
+                if (type == 5 && between == 0)
+                    pressure++;
+                else if (type == 6 && between == 1)
+                    pressure++;
+            }
+            return pressure;
+        }
+
+        private static int CountHeavyPiecesNearKing(Board board, bool redAttackers, int kingIndex)
+        {
+            int kingRow = kingIndex / 9;
+            int kingCol = kingIndex % 9;
+            int count = 0;
+            for (int i = 0; i < 90; i++)
+            {
+                sbyte piece = board.GetPiece(i);
+                if (piece == 0 || (piece > 0) != redAttackers)
+                    continue;
+
+                int type = Math.Abs(piece);
+                if (type is not (4 or 5 or 6))
+                    continue;
+
+                int row = i / 9;
+                int col = i % 9;
+                int distance = Math.Abs(row - kingRow) + Math.Abs(col - kingCol);
+                if (distance <= 4 || AttacksSquare(board, i, kingIndex, piece))
+                    count++;
+            }
+            return count;
         }
 
         private static int FindKing(Board board, bool red)
@@ -349,6 +599,29 @@ namespace ChineseChessAI.Traditional
         private static bool InBoard(int row, int col)
         {
             return row >= 0 && row < 10 && col >= 0 && col < 9;
+        }
+
+        private readonly record struct SideProfile(
+            int Rooks,
+            int Knights,
+            int Cannons,
+            int Pawns,
+            int Advisors,
+            int Bishops)
+        {
+            public SideProfile Add(sbyte piece)
+            {
+                return Math.Abs(piece) switch
+                {
+                    2 => this with { Advisors = Advisors + 1 },
+                    3 => this with { Bishops = Bishops + 1 },
+                    4 => this with { Knights = Knights + 1 },
+                    5 => this with { Rooks = Rooks + 1 },
+                    6 => this with { Cannons = Cannons + 1 },
+                    7 => this with { Pawns = Pawns + 1 },
+                    _ => this
+                };
+            }
         }
     }
 }

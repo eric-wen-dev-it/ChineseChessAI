@@ -29,11 +29,11 @@ namespace ChineseChessAI.MCTS
         private static readonly RuntimeDiagnostics.RollingCounter LegalMovesCacheTrimCounter = new("LegalMovesCacheTrim", 50);
         private static readonly RuntimeDiagnostics.RollingCounter InferenceCacheTrimCounter = new("InferenceCacheTrim", 50);
 
-        public MCTSEngine(CChessNet model, int batchSize = 64, double cPuct = 2.5)
+        public MCTSEngine(CChessNet model, int batchSize = 64, double cPuct = 2.5, Action<string>? statusChanged = null)
         {
             _model = model;
             _cPuct = cPuct;
-            _rules = new ChineseChessRuleEngine();
+            _rules = new ChineseChessRuleEngine(new MoveGenerator(statusChanged));
 
             _model.eval();
             _inferenceLease = InferenceService.Acquire(_model, batchSize);
@@ -70,12 +70,15 @@ namespace ChineseChessAI.MCTS
 
             if (root.Children.IsEmpty)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 if (legalMoves.Count == 0)
                 {
                     throw new Exception("无合法走法");
                 }
 
-                throw new Exception("MCTS 搜索未能展开任何节点，可能是内部异常导致");
+                RuntimeDiagnostics.Log($"[MCTS空展开兜底] legalMoves={legalMoves.Count}, simulations={simulations}, currentMoves={currentMoves}, maxMoves={maxMoves}, canceled={cancellationToken.IsCancellationRequested}");
+                return CreateFallbackMovePolicy(legalMoves);
             }
 
             var rootChildren = root.Children.ToArray();
@@ -245,6 +248,11 @@ namespace ChineseChessAI.MCTS
                 if (idx >= 0 && idx < 8100)
                 {
                     float val = logits[idx];
+                    if (!float.IsFinite(val))
+                    {
+                        continue;
+                    }
+
                     if (val > maxLogit)
                     {
                         maxLogit = val;
@@ -254,15 +262,49 @@ namespace ChineseChessAI.MCTS
                 }
             }
 
+            if (validMoves.Count == 0)
+            {
+                double uniform = legalMoves.Count > 0 ? 1.0 / legalMoves.Count : 0.0;
+                return legalMoves.Select(move => (move, uniform));
+            }
+
             double sum = 0;
             foreach (var (move, val) in validMoves)
             {
                 double p = Math.Exp(val - maxLogit);
+                if (!double.IsFinite(p))
+                {
+                    continue;
+                }
+
                 probs.Add((move, p));
                 sum += p;
             }
 
-            return probs.Select(x => (x.Item1, x.Item2 / (sum > 0 ? sum : 1)));
+            if (probs.Count == 0 || !double.IsFinite(sum) || sum <= 0)
+            {
+                double uniform = legalMoves.Count > 0 ? 1.0 / legalMoves.Count : 0.0;
+                return legalMoves.Select(move => (move, uniform));
+            }
+
+            return probs.Select(x => (x.Item1, x.Item2 / sum));
+        }
+
+        private (Move move, float[] pi) CreateFallbackMovePolicy(List<Move> legalMoves)
+        {
+            float[] piData = new float[8100];
+            float probability = legalMoves.Count > 0 ? 1.0f / legalMoves.Count : 0f;
+            foreach (var move in legalMoves)
+            {
+                int moveIdx = move.ToNetworkIndex();
+                if (moveIdx >= 0 && moveIdx < piData.Length)
+                {
+                    piData[moveIdx] = probability;
+                }
+            }
+
+            Move selectedMove = legalMoves[Random.Shared.Next(legalMoves.Count)];
+            return (selectedMove, piData);
         }
 
         private Board CloneBoard(Board original)
