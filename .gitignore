@@ -367,6 +367,7 @@ FodyWeavers.xsd
 /data/league_data
 /data/opening_book.json
 /data/master_move_ordering.json
+/data/master_knowledge_book.json
 
 # Local agent/tool scratch files
 .codex-temp/

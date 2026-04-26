@@ -764,6 +764,10 @@ namespace ChineseChessAI.Training
                                     }
                                     finally { lockFirst.Release(); }
                                 }
+                                catch (OperationCanceledException) when (runCts.IsCancellationRequested)
+                                {
+                                    Log($"[对局 #{currentId} 取消] 联赛停止或重启，取消等待/搜索。");
+                                }
                                 catch (Exception ex)
                                 {
                                     Log($"[对局异常] {ex.Message}");
@@ -1062,7 +1066,8 @@ namespace ChineseChessAI.Training
                 {
                     OpeningBook = book,
                     OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
-                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json")
+                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120)
                 };
                 return new LeagueEngineHandle(new TraditionalGameEngineAdapter(new TraditionalEngine(options)));
             }
@@ -1199,12 +1204,12 @@ namespace ChineseChessAI.Training
                             var meta = _leagueManager.GetAgentMeta(agentId);
                             if (meta == null)
                             {
+                                skippedUninitializedAgents++;
                                 continue;
                             }
 
                             if (IsTraditionalAgent(meta))
                             {
-                                skippedUninitializedAgents++;
                                 continue;
                             }
 

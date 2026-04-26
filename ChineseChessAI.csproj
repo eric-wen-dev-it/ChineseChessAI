@@ -17,6 +17,7 @@
   <ItemGroup>
     <Compile Remove="ChineseChessAI.Engine\**\*.cs" />
     <Compile Remove="ChineseChessAI.Play\**\*.cs" />
+    <Compile Remove="ChineseChessAI.Tests\**\*.cs" />
     <Compile Remove="Tools\**\*.cs" />
     <Page Remove="ChineseChessAI.Play\**\*.xaml" />
     <ApplicationDefinition Remove="ChineseChessAI.Play\App.xaml" />

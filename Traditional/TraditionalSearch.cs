@@ -48,80 +48,89 @@ namespace ChineseChessAI.Traditional
             Array.Clear(_history);
             _stopwatch = Stopwatch.StartNew();
 
-            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false, cancellationToken);
-            if (rootMoves.Count == 0)
+            try
             {
-                return new SearchResult(default, -_options.MateScore, 0, 0, _stopwatch.Elapsed, Array.Empty<Move>(), true);
-            }
+                var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false);
+                if (rootMoves.Count == 0)
+                {
+                    return new SearchResult(default, -_options.MateScore, 0, 0, _stopwatch.Elapsed, Array.Empty<Move>(), true);
+                }
 
-            _bestMove = rootMoves[0];
-            int bestScore = int.MinValue + 1;
-            for (int depth = 1; depth <= Math.Max(1, limits.MaxDepth); depth++)
-            {
-                if (ShouldStop(cancellationToken))
-                    break;
-
-                int alpha = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore - 80 : -_options.MateScore;
-                int beta = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore + 80 : _options.MateScore;
-                int windowAlpha = alpha;
-                int windowBeta = beta;
-                Move depthBestMove = _bestMove;
-                int depthBestScore = int.MinValue + 1;
-                List<Move> depthBestPv = new();
-                bool retryFullWindow = false;
-
-            RetryRoot:
-                foreach (var move in _moveOrdering.OrderMoves(board, rootMoves, _bestMove, null, null, _history))
+                _bestMove = rootMoves[0];
+                int bestScore = int.MinValue + 1;
+                for (int depth = 1; depth <= Math.Max(1, limits.MaxDepth); depth++)
                 {
                     if (ShouldStop(cancellationToken))
                         break;
-                    board.Push(move.From, move.To);
-                    try
+
+                    int alpha = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore - 80 : -_options.MateScore;
+                    int beta = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore + 80 : _options.MateScore;
+                    int windowAlpha = alpha;
+                    int windowBeta = beta;
+                    Move depthBestMove = _bestMove;
+                    int depthBestScore = int.MinValue + 1;
+                    List<Move> depthBestPv = new();
+                    bool retryFullWindow = false;
+
+                RetryRoot:
+                    foreach (var move in _moveOrdering.OrderMoves(board, rootMoves, _bestMove, null, null, _history))
                     {
-                        int score = -Negamax(board, depth - 1, -beta, -alpha, 1, 2, true, out var childPv, cancellationToken);
-                        if (_stopRequested)
+                        if (ShouldStop(cancellationToken))
                             break;
-
-                        if (score > depthBestScore)
+                        board.Push(move.From, move.To);
+                        try
                         {
-                            depthBestScore = score;
-                            depthBestMove = move;
-                            depthBestPv = new List<Move> { move };
-                            depthBestPv.AddRange(childPv);
+                            int score = -Negamax(board, depth - 1, -beta, -alpha, 1, 2, true, out var childPv, cancellationToken);
+                            if (_stopRequested)
+                                break;
+
+                            if (score > depthBestScore)
+                            {
+                                depthBestScore = score;
+                                depthBestMove = move;
+                                depthBestPv = new List<Move> { move };
+                                depthBestPv.AddRange(childPv);
+                            }
+
+                            if (score > alpha)
+                                alpha = score;
                         }
-
-                        if (score > alpha)
-                            alpha = score;
+                        finally
+                        {
+                            board.Pop();
+                        }
                     }
-                    finally
+
+                    if (_stopRequested)
+                        break;
+
+                    if (!retryFullWindow && (depthBestScore <= windowAlpha || depthBestScore >= windowBeta))
                     {
-                        board.Pop();
+                        alpha = -_options.MateScore;
+                        beta = _options.MateScore;
+                        windowAlpha = alpha;
+                        windowBeta = beta;
+                        depthBestScore = int.MinValue + 1;
+                        depthBestPv.Clear();
+                        retryFullWindow = true;
+                        goto RetryRoot;
                     }
+
+                    _bestMove = depthBestMove;
+                    bestScore = depthBestScore;
+                    _completedDepth = depth;
+                    _principalVariation = depthBestPv;
                 }
 
-                if (_stopRequested)
-                    break;
-
-                if (!retryFullWindow && (depthBestScore <= windowAlpha || depthBestScore >= windowBeta))
-                {
-                    alpha = -_options.MateScore;
-                    beta = _options.MateScore;
-                    windowAlpha = alpha;
-                    windowBeta = beta;
-                    depthBestScore = int.MinValue + 1;
-                    depthBestPv.Clear();
-                    retryFullWindow = true;
-                    goto RetryRoot;
-                }
-
-                _bestMove = depthBestMove;
-                bestScore = depthBestScore;
-                _completedDepth = depth;
-                _principalVariation = depthBestPv;
+                _stopwatch.Stop();
+                return new SearchResult(_bestMove, bestScore, _completedDepth, _nodes, _stopwatch.Elapsed, _principalVariation, !_stopRequested);
             }
-
-            _stopwatch.Stop();
-            return new SearchResult(_bestMove, bestScore, _completedDepth, _nodes, _stopwatch.Elapsed, _principalVariation, !_stopRequested);
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                _stopRequested = true;
+                _stopwatch.Stop();
+                return new SearchResult(_bestMove, _evaluator.Evaluate(board), _completedDepth, _nodes, _stopwatch.Elapsed, _principalVariation, false);
+            }
         }
 
         private int Negamax(Board board, int depth, int alpha, int beta, int ply, int checkExtensionsLeft, bool allowNullMove, out List<Move> principalVariation, CancellationToken cancellationToken)
@@ -177,8 +186,7 @@ namespace ChineseChessAI.Traditional
 
             var moves = _generator.GenerateLegalMoves(
                 board,
-                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                cancellationToken);
+                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
 
             if (moves.Count == 0)
                 return -_options.MateScore + ply;
@@ -248,7 +256,7 @@ namespace ChineseChessAI.Traditional
                     }
                 }
 
-                if (_options.UseSeePruning && isCapture && depth <= 3 && EstimateSee(board, move) < -120)
+                if (_options.UseSeePruning && isCapture && depth <= 3 && IsPotentiallyBadCapture(board, move) && EstimateSee(board, move) < -120)
                 {
                     moveIndex++;
                     continue;
@@ -326,8 +334,7 @@ namespace ChineseChessAI.Traditional
             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
             var legalMoves = _generator.GenerateLegalMoves(
                 board,
-                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                cancellationToken);
+                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
 
             if (legalMoves.Count == 0)
                 return -_options.MateScore;
@@ -410,8 +417,7 @@ namespace ChineseChessAI.Traditional
 
                     var replies = _generator.GenerateLegalMoves(
                         board,
-                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                        cancellationToken);
+                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
                     if (replies.Count == 0)
                     {
                         mateMove = move;
@@ -438,8 +444,7 @@ namespace ChineseChessAI.Traditional
 
             var opponentMoves = _generator.GenerateLegalMoves(
                 opponentBoard,
-                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                cancellationToken);
+                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
             return TryFindImmediateMate(opponentBoard, opponentMoves, out _, cancellationToken);
         }
 
@@ -464,8 +469,7 @@ namespace ChineseChessAI.Traditional
 
             var legalMoves = _generator.GenerateLegalMoves(
                 board,
-                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                cancellationToken);
+                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
 
             foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
             {
@@ -480,8 +484,7 @@ namespace ChineseChessAI.Traditional
 
                     var replies = _generator.GenerateLegalMoves(
                         board,
-                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch,
-                        cancellationToken);
+                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
                     if (replies.Count == 0)
                     {
                         mateMove = move;
@@ -540,14 +543,19 @@ namespace ChineseChessAI.Traditional
             return false;
         }
 
-        private static int EstimateSee(Board board, Move move)
+        private int EstimateSee(Board board, Move move)
+        {
+            return StaticExchangeEvaluator.Evaluate(board, move, _generator);
+        }
+
+        private static bool IsPotentiallyBadCapture(Board board, Move move)
         {
             sbyte attacker = board.GetPiece(move.From);
             sbyte victim = board.GetPiece(move.To);
-            if (victim == 0)
-                return 0;
+            if (attacker == 0 || victim == 0)
+                return false;
 
-            return PieceValue(victim) - PieceValue(attacker) / 2;
+            return PieceValue(victim) <= PieceValue(attacker);
         }
 
         private static int PieceValue(sbyte piece)

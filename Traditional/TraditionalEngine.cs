@@ -15,7 +15,7 @@ namespace ChineseChessAI.Traditional
             _options = options ?? new TraditionalEngineOptions();
             _generator = generator ?? new MoveGenerator();
             var evaluator = new TraditionalEvaluator();
-            _moveOrdering = new TraditionalMoveOrdering(_generator, _options.MoveOrderingBook ?? _options.OpeningBook);
+            _moveOrdering = new TraditionalMoveOrdering(_generator, _options.MoveOrderingBook ?? _options.OpeningBook, _options.MasterKnowledgeBook);
             var table = new TranspositionTable(_options.TranspositionTableEntries);
             _search = new TraditionalSearch(_generator, evaluator, _moveOrdering, _options, table);
         }
@@ -41,7 +41,7 @@ namespace ChineseChessAI.Traditional
         private SearchResult SearchParallelRoot(Board board, SearchLimits limits, CancellationToken cancellationToken)
         {
             var stopwatch = Stopwatch.StartNew();
-            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false, cancellationToken);
+            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false);
             if (rootMoves.Count == 0)
                 return new SearchResult(default, -_options.MateScore, 0, 0, stopwatch.Elapsed, Array.Empty<Move>(), true);
 
@@ -65,12 +65,19 @@ namespace ChineseChessAI.Traditional
                     orderedMoves.Select((move, index) => (Move: move, Order: index)),
                     new ParallelOptions
                     {
-                        MaxDegreeOfParallelism = Math.Max(1, _options.RootParallelism),
-                        CancellationToken = token
+                        MaxDegreeOfParallelism = Math.Max(1, _options.RootParallelism)
                     },
                     item =>
                     {
-                        token.ThrowIfCancellationRequested();
+                        if (token.IsCancellationRequested)
+                        {
+                            lock (sync)
+                            {
+                                allCompleted = false;
+                            }
+
+                            return;
+                        }
 
                         var childBoard = board.Clone();
                         childBoard.Push(item.Move.From, item.Move.To);
@@ -141,6 +148,7 @@ namespace ChineseChessAI.Traditional
                 OpeningBook = null,
                 OpeningBookMode = OpeningBookMode.Off,
                 MoveOrderingBook = _options.MoveOrderingBook,
+                MasterKnowledgeBook = _options.MasterKnowledgeBook,
                 RootParallelism = 1
             });
         }

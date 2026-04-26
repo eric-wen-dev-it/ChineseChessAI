@@ -4,6 +4,13 @@ namespace ChineseChessAI.Core
     {
         private const int ROWS = 10;
         private const int COLS = 9;
+        private readonly Action<string>? _statusChanged;
+        private int _lastStatusTick;
+
+        public MoveGenerator(Action<string>? statusChanged = null)
+        {
+            _statusChanged = statusChanged;
+        }
 
         public string GetMoveValidationResult(Board board, Move move, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
@@ -29,7 +36,7 @@ namespace ChineseChessAI.Core
                 return "自方王受威胁 (送将)";
 
             // 3. 检查禁手规则（长打/长捉）
-            if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
+            if (!skipPerpetualCheck && board.WillCauseThreefoldRepetition(move.From, move.To))
             {
                 if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                     return "禁手 (违规长打/长捉)";
@@ -70,7 +77,7 @@ namespace ChineseChessAI.Core
                 if (!safe)
                     continue;
 
-                if (!skipPerpetualCheck && board.GetRepetitionCount() >= 2)
+                if (!skipPerpetualCheck && board.WillCauseThreefoldRepetition(move.From, move.To))
                 {
                     if (IsForbiddenPerpetualMove(board, move, cancellationToken))
                         continue;
@@ -135,15 +142,41 @@ namespace ChineseChessAI.Core
             if (count >= 3)
             {
                 // 长将、长捉、长杀均视为禁手
+                ReportStatus("正在检查长将/长打禁着与强制杀威胁...");
                 bool isChecking = IsChecking(board, !board.IsRedTurn);
-                bool isChasing = IsChasing(board, move);
-                bool isKillThreat = IsThreateningToMate(board, !board.IsRedTurn, cancellationToken);
-
-                if (isChecking || isChasing || isKillThreat)
+                if (isChecking)
+                {
                     isForbidden = true;
+                }
+                else
+                {
+                    bool isChasing = IsChasing(board, move);
+                    if (isChasing)
+                    {
+                        isForbidden = true;
+                    }
+                    else
+                    {
+                        ReportStatus("正在检查长将/长打禁着与强制杀威胁...");
+                        isForbidden = IsThreateningToMate(board, !board.IsRedTurn, cancellationToken);
+                    }
+                }
             }
             board.Pop();
             return isForbidden;
+        }
+
+        private void ReportStatus(string message)
+        {
+            if (_statusChanged == null)
+                return;
+
+            int now = Environment.TickCount;
+            if (unchecked(now - _lastStatusTick) < 1000)
+                return;
+
+            _lastStatusTick = now;
+            _statusChanged(message);
         }
 
         public bool IsChecking(Board board, bool isRedAttacker)
@@ -416,6 +449,7 @@ namespace ChineseChessAI.Core
         public bool IsThreateningToMate(Board board, bool isRedAttacker, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var memo = new Dictionary<(ulong Hash, bool IsRedAttacker, int Depth), bool>(1024);
             // 调用时机：IsForbiddenPerpetualMove 已 Push(攻击方着法)，board.IsRedTurn = 防守方。
             // 正确语义：对"防守方所有合法应手"（AND 节点）逐一检查，每个应手之后
             // 攻击方是否仍有强制杀势（HasForcedKill = OR 节点）。
@@ -429,7 +463,7 @@ namespace ChineseChessAI.Core
                 board.Push(defenderMove.From, defenderMove.To);
                 try
                 {
-                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, cancellationToken))
+                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, memo, cancellationToken))
                         return false;
                 }
                 finally
@@ -441,11 +475,20 @@ namespace ChineseChessAI.Core
             return true;
         }
 
-        private bool HasForcedKill(Board board, bool isRedAttacker, int depth, CancellationToken cancellationToken)
+        private bool HasForcedKill(
+            Board board,
+            bool isRedAttacker,
+            int depth,
+            Dictionary<(ulong Hash, bool IsRedAttacker, int Depth), bool> memo,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (depth <= 0)
                 return false;
+
+            var key = (board.CurrentHash, isRedAttacker, depth);
+            if (memo.TryGetValue(key, out bool cached))
+                return cached;
 
             foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
             {
@@ -455,7 +498,10 @@ namespace ChineseChessAI.Core
                 {
                     var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
                     if (defenderMoves.Count == 0)
+                    {
+                        memo[key] = true;
                         return true;
+                    }
 
                     bool defenderHasEscape = false;
                     foreach (var defenderMove in defenderMoves)
@@ -464,7 +510,7 @@ namespace ChineseChessAI.Core
                         board.Push(defenderMove.From, defenderMove.To);
                         try
                         {
-                            if (!HasForcedKill(board, isRedAttacker, depth - 1, cancellationToken))
+                            if (!HasForcedKill(board, isRedAttacker, depth - 1, memo, cancellationToken))
                             {
                                 defenderHasEscape = true;
                                 break;
@@ -477,7 +523,10 @@ namespace ChineseChessAI.Core
                     }
 
                     if (!defenderHasEscape)
+                    {
+                        memo[key] = true;
                         return true;
+                    }
                 }
                 finally
                 {
@@ -485,6 +534,7 @@ namespace ChineseChessAI.Core
                 }
             }
 
+            memo[key] = false;
             return false;
         }
 

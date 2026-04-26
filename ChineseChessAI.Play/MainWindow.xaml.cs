@@ -31,17 +31,22 @@ namespace ChineseChessAI.Play
         private readonly HashSet<int> _legalTargets = new();
         private readonly PlayStrengthSettings _playSettings = LoadPlaySettings();
 
-        private CChessNet? _model;
-        private MCTSEngine? _mctsEngine;
+        private CChessNet? _redMctsModel;
+        private CChessNet? _blackMctsModel;
+        private MCTSEngine? _redMctsEngine;
+        private MCTSEngine? _blackMctsEngine;
         private TraditionalEngine? _traditionalEngine;
         private PikafishEngineClient? _pikafishEngine;
         private OpeningBook? _openingBook;
         private CancellationTokenSource? _aiCts;
 
         private int? _selectedIndex;
-        private string _loadedModelPath = string.Empty;
+        private string _loadedRedMctsModelPath = string.Empty;
+        private string _loadedBlackMctsModelPath = string.Empty;
+        private string _loadedPikafishPath = string.Empty;
         private bool _isAiThinking;
         private bool _gameOver;
+        private bool _suppressGameOverDialogs = true;
 
         public MainWindow()
         {
@@ -50,10 +55,12 @@ namespace ChineseChessAI.Play
             Loaded += (_, _) => DrawBoardLines();
 
             SimulationsTextBox.Text = _playSettings.DefaultSimulations.ToString();
-            ModelPathTextBox.Text = FindDefaultEnginePath();
+            RedMctsModelPathTextBox.Text = FindDefaultModelPath();
+            BlackMctsModelPathTextBox.Text = FindDefaultModelPath();
+            PikafishPathTextBox.Text = FindDefaultPikafishPath();
             RefreshEngineTypeUi();
             RefreshBoard();
-            UpdateUiState("Choose a model and start a game.");
+            UpdateUiState("选择红方和黑方后开始对弈。");
 
             Closed += (_, _) => DisposeResources();
         }
@@ -233,6 +240,7 @@ namespace ChineseChessAI.Play
                     OpeningBook = book,
                     OpeningBookMode = bookMode,
                     MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
                     RootParallelism = ResolveTraditionalRootParallelism()
                 });
                 var blackEngine = new TraditionalEngine(new TraditionalEngineOptions
@@ -240,6 +248,7 @@ namespace ChineseChessAI.Play
                     OpeningBook = book,
                     OpeningBookMode = bookMode,
                     MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
                     RootParallelism = ResolveTraditionalRootParallelism()
                 });
                 const int demoMaxPly = 80;
@@ -273,7 +282,9 @@ namespace ChineseChessAI.Play
 
                     AppendLog($"{actor} search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms.");
                     bool irreversible = _session.Board.GetPiece(result.BestMove.To) != 0 || Math.Abs(_session.Board.GetPiece(result.BestMove.From)) == 7;
-                    ApplyMove(result.BestMove, actor);
+                    if (!await TryValidateAndApplyMoveAsync(result.BestMove, actor, token))
+                        break;
+
                     RefreshBoard();
 
                     if (TryFinishGame())
@@ -356,21 +367,42 @@ namespace ChineseChessAI.Play
             UpdateUiState($"{winner} wins by resignation.");
             AppendLog($"Game over: {winner} wins by resignation.");
             RefreshBoard();
+            ReleaseEnginesAfterGame();
             ShowGameOverDialog(winner, "resignation");
         }
 
-        private void OnBrowseModelClick(object sender, RoutedEventArgs e)
+        private void OnBrowseRedMctsModelClick(object sender, RoutedEventArgs e)
+        {
+            BrowseMctsModel(RedMctsModelPathTextBox);
+        }
+
+        private void OnBrowseBlackMctsModelClick(object sender, RoutedEventArgs e)
+        {
+            BrowseMctsModel(BlackMctsModelPathTextBox);
+        }
+
+        private static void BrowseMctsModel(TextBox target)
         {
             var dialog = new OpenFileDialog
             {
-                Title = NeedsPikafish() ? "Select Pikafish executable" : "Select model file",
-                Filter = NeedsPikafish()
-                    ? "Executable (*.exe)|*.exe|All files (*.*)|*.*"
-                    : "Torch model (*.pt)|*.pt|All files (*.*)|*.*"
+                Title = "Select MCTS model file",
+                Filter = "Torch model (*.pt)|*.pt|All files (*.*)|*.*"
             };
 
             if (dialog.ShowDialog() == true)
-                ModelPathTextBox.Text = dialog.FileName;
+                target.Text = dialog.FileName;
+        }
+
+        private void OnBrowsePikafishClick(object sender, RoutedEventArgs e)
+        {
+            var dialog = new OpenFileDialog
+            {
+                Title = "Select Pikafish executable",
+                Filter = "Executable (*.exe)|*.exe|All files (*.*)|*.*"
+            };
+
+            if (dialog.ShowDialog() == true)
+                PikafishPathTextBox.Text = dialog.FileName;
         }
 
         private void OnPlayerTypeChanged(object sender, SelectionChangedEventArgs e)
@@ -409,7 +441,9 @@ namespace ChineseChessAI.Play
 
             if (_legalTargets.Contains(index))
             {
-                ApplyMove(new Move(_selectedIndex.Value, index), "Human");
+                if (!await TryValidateAndApplyHumanMoveAsync(new Move(_selectedIndex.Value, index)))
+                    return;
+
                 ResetSelection();
                 RefreshBoard();
 
@@ -434,10 +468,43 @@ namespace ChineseChessAI.Play
             _selectedIndex = index;
             _legalTargets.Clear();
 
-            foreach (var move in _rules.GetLegalMoves(_session.Board).Where(m => m.From == index))
+            foreach (var move in _rules.GetLegalMoves(_session.Board, skipPerpetualCheck: true).Where(m => m.From == index))
                 _legalTargets.Add(move.To);
 
             UpdateUiState(_legalTargets.Count > 0 ? $"Selected {Board.GetPieceName(_session.Board.GetPiece(index))}." : "That piece has no legal moves.");
+        }
+
+        private async Task<bool> TryValidateAndApplyHumanMoveAsync(Move move)
+        {
+            var validationBoard = _session.Board.Clone();
+            var token = ResetAiToken();
+            _isAiThinking = true;
+
+            try
+            {
+                string reason = await Task.Run(
+                    () => _rules.ValidateMove(validationBoard, move, skipPerpetualCheck: false, token),
+                    token);
+
+                if (reason != "\u5408\u6CD5")
+                {
+                    UpdateUiState(reason);
+                    AppendLog($"Human move rejected: {reason}");
+                    return false;
+                }
+
+                ApplyMove(move, "Human");
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                UpdateUiState("Move validation canceled.");
+                return false;
+            }
+            finally
+            {
+                _isAiThinking = false;
+            }
         }
 
         private async Task ContinueAutoPlayAsync()
@@ -458,7 +525,7 @@ namespace ChineseChessAI.Play
             if (playerKind == PlayPlayerKind.Human)
                 return;
 
-            if ((playerKind == PlayPlayerKind.Mcts && _mctsEngine == null)
+            if ((playerKind == PlayPlayerKind.Mcts && GetMctsEngine(_session.Board.IsRedTurn) == null)
                 || (playerKind == PlayPlayerKind.Traditional && _traditionalEngine == null)
                 || (playerKind == PlayPlayerKind.Pikafish && _pikafishEngine == null))
                 return;
@@ -495,14 +562,14 @@ namespace ChineseChessAI.Play
                 {
                     var engine = _pikafishEngine ?? throw new InvalidOperationException("Pikafish engine is not initialized.");
                     string bestMove = await engine.GetBestMoveAsync(_session.UcciHistory, searchBudget, _playSettings.PikafishMoveTimeMs, token);
-                    if (!_session.TryResolveUcci(bestMove, out move, out string reason))
+                    if (!_session.TryResolveUcci(bestMove, out move, out string reason, skipPerpetualCheck: true))
                         throw new InvalidOperationException($"Pikafish returned illegal move {bestMove}: {reason}");
 
                     AppendLog($"{side} Pikafish bestmove: {bestMove}.");
                 }
                 else
                 {
-                    var engine = _mctsEngine ?? throw new InvalidOperationException("MCTS engine is not initialized.");
+                    var engine = GetMctsEngine(_session.Board.IsRedTurn) ?? throw new InvalidOperationException($"{side} MCTS engine is not initialized.");
                     (move, _) = await engine.GetMoveWithProbabilitiesAsArrayAsync(
                         _session.Board,
                         searchBudget,
@@ -512,7 +579,10 @@ namespace ChineseChessAI.Play
                         addRootNoise: _playSettings.AddRootNoise);
                 }
 
-                ApplyMove(move, side);
+                if (!await TryValidateAndApplyMoveAsync(move, side, token)
+                    && !await TryApplyFallbackAiMoveAsync(side, move, token))
+                    return;
+
                 RefreshBoard();
                 TryFinishGame();
             }
@@ -540,6 +610,50 @@ namespace ChineseChessAI.Play
             AppendLog($"{actor}: {moveName} ({move})");
         }
 
+        private async Task<bool> TryValidateAndApplyMoveAsync(Move move, string actor, CancellationToken cancellationToken)
+        {
+            var validationBoard = _session.Board.Clone();
+            UpdateUiState($"{actor} validating move...");
+
+            string reason = await Task.Run(
+                () => _rules.ValidateMove(validationBoard, move, skipPerpetualCheck: false, cancellationToken),
+                cancellationToken);
+
+            if (reason != "\u5408\u6CD5")
+            {
+                UpdateUiState($"{actor} move rejected: {reason}");
+                AppendLog($"{actor} move rejected: {reason} ({move})");
+                return false;
+            }
+
+            ApplyMove(move, actor);
+            return true;
+        }
+
+        private async Task<bool> TryApplyFallbackAiMoveAsync(string actor, Move rejectedMove, CancellationToken cancellationToken)
+        {
+            UpdateUiState($"{actor} selecting fallback legal move...");
+            AppendLog($"{actor}: selecting fallback after rejected move {rejectedMove}.");
+
+            var legalMoves = await Task.Run(
+                () => _rules.GetLegalMoves(_session.Board.Clone(), skipPerpetualCheck: false, cancellationToken),
+                cancellationToken);
+
+            if (legalMoves.Count == 0)
+            {
+                AppendLog($"{actor}: no fully legal fallback move.");
+                TryFinishGame();
+                return false;
+            }
+
+            int fallbackIndex = legalMoves.FindIndex(m => m.From != rejectedMove.From || m.To != rejectedMove.To);
+            Move fallback = fallbackIndex >= 0 ? legalMoves[fallbackIndex] : legalMoves[0];
+
+            AppendLog($"{actor}: fallback move selected ({fallback}).");
+            ApplyMove(fallback, $"{actor} fallback");
+            return true;
+        }
+
         private bool TryFinishGame()
         {
             if (!HasKing(1))
@@ -548,6 +662,7 @@ namespace ChineseChessAI.Play
                 const string winner = "Black";
                 UpdateUiState($"{winner} wins.");
                 AppendLog($"Game over: {winner} wins.");
+                ReleaseEnginesAfterGame();
                 ShowGameOverDialog(winner, null);
                 return true;
             }
@@ -558,11 +673,30 @@ namespace ChineseChessAI.Play
                 const string winner = "Red";
                 UpdateUiState($"{winner} wins.");
                 AppendLog($"Game over: {winner} wins.");
+                ReleaseEnginesAfterGame();
                 ShowGameOverDialog(winner, null);
                 return true;
             }
 
-            var legalMoves = _rules.GetLegalMoves(_session.Board);
+            if (_session.CurrentRepetitionCount >= 3)
+            {
+                FinishDraw("threefold repetition");
+                return true;
+            }
+
+            if (_session.NoProgressPlyCount >= 100)
+            {
+                FinishDraw("100 plies without capture or pawn move");
+                return true;
+            }
+
+            if (_session.MoveHistory.Count >= DefaultMaxMoves)
+            {
+                FinishDraw($"move limit {DefaultMaxMoves}");
+                return true;
+            }
+
+            var legalMoves = _rules.GetLegalMoves(_session.Board, skipPerpetualCheck: false);
             if (legalMoves.Count == 0)
             {
                 _gameOver = true;
@@ -571,6 +705,7 @@ namespace ChineseChessAI.Play
                 string ending = currentSideSafe ? "stalemate" : "checkmate";
                 UpdateUiState($"{winner} wins by {ending}.");
                 AppendLog($"Game over: {winner} wins by {ending}.");
+                ReleaseEnginesAfterGame();
                 ShowGameOverDialog(winner, ending);
                 return true;
             }
@@ -578,8 +713,34 @@ namespace ChineseChessAI.Play
             return false;
         }
 
+        private void FinishDraw(string reason)
+        {
+            _gameOver = true;
+            UpdateUiState($"Draw by {reason}.");
+            AppendLog($"Game over: draw by {reason}.");
+            ReleaseEnginesAfterGame();
+            ShowDrawDialog(reason);
+        }
+
+        private void ShowDrawDialog(string reason)
+        {
+            AppendLog($"Draw dialog suppressed: {reason}.");
+            if (_suppressGameOverDialogs)
+                return;
+
+            MessageBox.Show(
+                $"Draw.\nEnding: {reason}.",
+                "Game over",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+
         private void ShowGameOverDialog(string winner, string? ending)
         {
+            AppendLog($"Game over dialog suppressed: {winner} wins ({ending ?? "king captured"}).");
+            if (_suppressGameOverDialogs)
+                return;
+
             bool humanWon = (winner == "Red" && GetPlayerKind(true) == PlayPlayerKind.Human)
                 || (winner == "Black" && GetPlayerKind(false) == PlayPlayerKind.Human);
             string resultLine = humanWon ? "你赢了。" : "你输了。";
@@ -603,6 +764,8 @@ namespace ChineseChessAI.Play
         {
             bool needsTraditional = GetPlayerKind(true) == PlayPlayerKind.Traditional || GetPlayerKind(false) == PlayPlayerKind.Traditional;
             bool needsMcts = GetPlayerKind(true) == PlayPlayerKind.Mcts || GetPlayerKind(false) == PlayPlayerKind.Mcts;
+            bool needsRedMcts = GetPlayerKind(true) == PlayPlayerKind.Mcts;
+            bool needsBlackMcts = GetPlayerKind(false) == PlayPlayerKind.Mcts;
             bool needsPikafish = GetPlayerKind(true) == PlayPlayerKind.Pikafish || GetPlayerKind(false) == PlayPlayerKind.Pikafish;
 
             if (!needsTraditional)
@@ -614,10 +777,15 @@ namespace ChineseChessAI.Play
             }
             if (!needsMcts)
             {
-                _mctsEngine?.Dispose();
-                _mctsEngine = null;
-                _model?.Dispose();
-                _model = null;
+                DisposeMctsEngine(red: true);
+                DisposeMctsEngine(red: false);
+            }
+            else
+            {
+                if (!needsRedMcts)
+                    DisposeMctsEngine(red: true);
+                if (!needsBlackMcts)
+                    DisposeMctsEngine(red: false);
             }
 
             if (needsTraditional && _traditionalEngine == null)
@@ -628,9 +796,9 @@ namespace ChineseChessAI.Play
                     OpeningBook = book,
                     OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
                     MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
                     RootParallelism = ResolveTraditionalRootParallelism()
                 });
-                _loadedModelPath = string.Empty;
                 AppendLog(book.PositionCount > 0
                     ? $"Traditional engine ready. Opening book positions: {book.PositionCount}."
                     : "Traditional engine ready. Opening book not found.");
@@ -639,7 +807,7 @@ namespace ChineseChessAI.Play
 
             if (needsPikafish)
             {
-                string pikafishPath = ModelPathTextBox.Text.Trim();
+                string pikafishPath = PikafishPathTextBox.Text.Trim();
                 if (string.IsNullOrWhiteSpace(pikafishPath))
                 {
                     UpdateUiState("Select Pikafish executable first.");
@@ -654,7 +822,7 @@ namespace ChineseChessAI.Play
                     return false;
                 }
 
-                if (_pikafishEngine != null && string.Equals(_loadedModelPath, pikafishFullPath, StringComparison.OrdinalIgnoreCase))
+                if (_pikafishEngine != null && string.Equals(_loadedPikafishPath, pikafishFullPath, StringComparison.OrdinalIgnoreCase))
                 {
                     // Already loaded.
                 }
@@ -667,7 +835,7 @@ namespace ChineseChessAI.Play
                         _pikafishEngine = new PikafishEngineClient(pikafishFullPath);
                         await _pikafishEngine.InitializeAsync(CancellationToken.None);
                         await _pikafishEngine.NewGameAsync(CancellationToken.None);
-                        _loadedModelPath = pikafishFullPath;
+                        _loadedPikafishPath = pikafishFullPath;
                         AppendLog($"Loaded Pikafish: {Path.GetFileName(pikafishFullPath)}");
                         AppendLog($"Pikafish settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.PikafishMoveTimeMs}ms.");
                     }
@@ -682,52 +850,87 @@ namespace ChineseChessAI.Play
                 }
             }
 
-            if (!needsMcts)
-                return true;
+            if (needsRedMcts && !TryCreateMctsEngine(red: true))
+                return false;
+            if (needsBlackMcts && !TryCreateMctsEngine(red: false))
+                return false;
 
-            string rawPath = ModelPathTextBox.Text.Trim();
+            return true;
+        }
+
+        private bool TryCreateMctsEngine(bool red)
+        {
+            string side = red ? "Red" : "Black";
+            string rawPath = red ? RedMctsModelPathTextBox.Text.Trim() : BlackMctsModelPathTextBox.Text.Trim();
             if (string.IsNullOrWhiteSpace(rawPath))
             {
-                UpdateUiState("Select a model file first.");
+                UpdateUiState($"Select {side} MCTS model file first.");
                 return false;
             }
 
             string fullPath = Path.GetFullPath(rawPath);
             if (!File.Exists(fullPath))
             {
-                UpdateUiState("Model file does not exist.");
-                MessageBox.Show(fullPath, "Model file not found", MessageBoxButton.OK, MessageBoxImage.Warning);
+                UpdateUiState($"{side} MCTS model file does not exist.");
+                MessageBox.Show(fullPath, $"{side} MCTS model not found", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
             }
 
-            if (_mctsEngine != null && string.Equals(_loadedModelPath, fullPath, StringComparison.OrdinalIgnoreCase))
+            var existingEngine = GetMctsEngine(red);
+            string loadedPath = red ? _loadedRedMctsModelPath : _loadedBlackMctsModelPath;
+            if (existingEngine != null && string.Equals(loadedPath, fullPath, StringComparison.OrdinalIgnoreCase))
                 return true;
 
-            _mctsEngine?.Dispose();
-            _mctsEngine = null;
-            _model?.Dispose();
-            _model = null;
+            DisposeMctsEngine(red);
 
             try
             {
                 var model = new CChessNet();
                 ModelManager.LoadModel(model, fullPath);
+                var engine = new MCTSEngine(
+                    model,
+                    _playSettings.BatchSize,
+                    _playSettings.CPuct,
+                    message => PostRuleStatus(side, message));
 
-                _model = model;
-                _mctsEngine = new MCTSEngine(model, _playSettings.BatchSize, _playSettings.CPuct);
-                _loadedModelPath = fullPath;
+                if (red)
+                {
+                    _redMctsModel = model;
+                    _redMctsEngine = engine;
+                    _loadedRedMctsModelPath = fullPath;
+                }
+                else
+                {
+                    _blackMctsModel = model;
+                    _blackMctsEngine = engine;
+                    _loadedBlackMctsModelPath = fullPath;
+                }
 
-                AppendLog($"Loaded model: {Path.GetFileName(fullPath)}");
-                AppendLog($"Play settings: sims={_playSettings.DefaultSimulations}, batch={_playSettings.BatchSize}, c_puct={_playSettings.CPuct:F2}, root_noise={_playSettings.AddRootNoise}.");
+                AppendLog($"Loaded {side} MCTS model: {Path.GetFileName(fullPath)}");
+                AppendLog($"{side} MCTS settings: sims={_playSettings.DefaultSimulations}, batch={_playSettings.BatchSize}, c_puct={_playSettings.CPuct:F2}, root_noise={_playSettings.AddRootNoise}.");
                 return true;
             }
             catch (Exception ex)
             {
-                DisposeEngine();
-                UpdateUiState($"Model load failed: {ex.Message}");
-                MessageBox.Show(ex.Message, "Model load failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                DisposeMctsEngine(red);
+                UpdateUiState($"{side} MCTS model load failed: {ex.Message}");
+                MessageBox.Show(ex.Message, $"{side} MCTS model load failed", MessageBoxButton.OK, MessageBoxImage.Error);
                 return false;
             }
+        }
+
+        private MCTSEngine? GetMctsEngine(bool red) => red ? _redMctsEngine : _blackMctsEngine;
+
+        private void PostRuleStatus(string side, string message)
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(() => PostRuleStatus(side, message));
+                return;
+            }
+
+            if (!_gameOver)
+                UpdateUiState($"{side} MCTS: {message}");
         }
 
         private void RefreshBoard()
@@ -846,23 +1049,34 @@ namespace ChineseChessAI.Play
             bool traditional = NeedsTraditional();
             bool pikafish = NeedsPikafish();
             bool mcts = NeedsMcts();
-            if (ModelFileLabel != null)
-            {
-                ModelFileLabel.IsEnabled = mcts || pikafish;
-                ModelFileLabel.Text = pikafish ? "Pikafish executable" : "Model file";
-            }
-            if (ModelFilePanel != null)
-                ModelFilePanel.IsEnabled = mcts || pikafish;
+            bool redMcts = GetPlayerKind(true) == PlayPlayerKind.Mcts;
+            bool blackMcts = GetPlayerKind(false) == PlayPlayerKind.Mcts;
+            if (RedMctsModelFileLabel != null)
+                RedMctsModelFileLabel.IsEnabled = redMcts;
+            if (RedMctsModelFilePanel != null)
+                RedMctsModelFilePanel.IsEnabled = redMcts;
+            if (BlackMctsModelFileLabel != null)
+                BlackMctsModelFileLabel.IsEnabled = blackMcts;
+            if (BlackMctsModelFilePanel != null)
+                BlackMctsModelFilePanel.IsEnabled = blackMcts;
+            if (PikafishFileLabel != null)
+                PikafishFileLabel.IsEnabled = pikafish;
+            if (PikafishFilePanel != null)
+                PikafishFilePanel.IsEnabled = pikafish;
             if (SearchBudgetLabel != null)
-                SearchBudgetLabel.Text = mcts && !traditional && !pikafish ? "Simulations" : "Depth";
+                SearchBudgetLabel.Text = mcts && !traditional && !pikafish ? "模拟次数" : "搜索深度";
 
             if (SimulationsTextBox != null)
                 SimulationsTextBox.Text = traditional || pikafish
                     ? _playSettings.TraditionalDepth.ToString()
                     : _playSettings.DefaultSimulations.ToString();
 
-            if (ModelPathTextBox != null)
-                ModelPathTextBox.Text = FindDefaultEnginePath();
+            if (RedMctsModelPathTextBox != null && string.IsNullOrWhiteSpace(RedMctsModelPathTextBox.Text))
+                RedMctsModelPathTextBox.Text = FindDefaultModelPath();
+            if (BlackMctsModelPathTextBox != null && string.IsNullOrWhiteSpace(BlackMctsModelPathTextBox.Text))
+                BlackMctsModelPathTextBox.Text = FindDefaultModelPath();
+            if (PikafishPathTextBox != null && string.IsNullOrWhiteSpace(PikafishPathTextBox.Text))
+                PikafishPathTextBox.Text = FindDefaultPikafishPath();
         }
 
         private CancellationToken ResetAiToken()
@@ -871,11 +1085,6 @@ namespace ChineseChessAI.Play
             _aiCts?.Dispose();
             _aiCts = new CancellationTokenSource();
             return _aiCts.Token;
-        }
-
-        private string FindDefaultEnginePath()
-        {
-            return NeedsPikafish() ? FindDefaultPikafishPath() : FindDefaultModelPath();
         }
 
         private string FindDefaultPikafishPath()
@@ -894,7 +1103,10 @@ namespace ChineseChessAI.Play
                 Path.Combine(baseDir, "pikafish.exe"),
                 Path.Combine(repoRoot, "pikafish.exe"),
                 Path.Combine(repoRoot, "tools", "pikafish", "pikafish.exe"),
-                Path.Combine(repoRoot, "Tools", "Pikafish", "pikafish.exe")
+                Path.Combine(repoRoot, "Tools", "Pikafish", "pikafish.exe"),
+                Path.Combine(repoRoot, "Pikafish.2026-01-02_2", "Windows", "pikafish-avx2.exe"),
+                Path.Combine(repoRoot, "Pikafish.2026-01-02_2", "Windows", "pikafish-sse41-popcnt.exe"),
+                Path.Combine(repoRoot, "Pikafish.2026-01-02_2", "Windows", "pikafish-bmi2.exe")
             };
 
             return candidates.FirstOrDefault(File.Exists) ?? string.Empty;
@@ -1034,18 +1246,42 @@ namespace ChineseChessAI.Play
             DisposeEngine();
         }
 
+        private void ReleaseEnginesAfterGame()
+        {
+            _aiCts?.Cancel();
+            _aiCts?.Dispose();
+            _aiCts = null;
+            DisposeEngine();
+        }
+
         private void DisposeEngine()
         {
-            _mctsEngine?.Dispose();
-            _mctsEngine = null;
+            DisposeMctsEngine(red: true);
+            DisposeMctsEngine(red: false);
             _traditionalEngine = null;
             _pikafishEngine?.Dispose();
             _pikafishEngine = null;
+            _loadedPikafishPath = string.Empty;
+        }
 
-            _model?.Dispose();
-            _model = null;
-
-            _loadedModelPath = string.Empty;
+        private void DisposeMctsEngine(bool red)
+        {
+            if (red)
+            {
+                _redMctsEngine?.Dispose();
+                _redMctsEngine = null;
+                _redMctsModel?.Dispose();
+                _redMctsModel = null;
+                _loadedRedMctsModelPath = string.Empty;
+            }
+            else
+            {
+                _blackMctsEngine?.Dispose();
+                _blackMctsEngine = null;
+                _blackMctsModel?.Dispose();
+                _blackMctsModel = null;
+                _loadedBlackMctsModelPath = string.Empty;
+            }
         }
     }
 }

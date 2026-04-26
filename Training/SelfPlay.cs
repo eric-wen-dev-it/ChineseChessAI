@@ -209,6 +209,13 @@ namespace ChineseChessAI.Training
                         moveCount,
                         _maxMoves,
                         cancellationToken);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        isSuccess = false;
+                        endReason = "训练被强制终止";
+                        break;
+                    }
+
                     _searchMsCounter.AddSample(searchStopwatch.ElapsedMilliseconds);
 
                     float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);

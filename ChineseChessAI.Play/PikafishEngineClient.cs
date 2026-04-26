@@ -173,7 +173,6 @@ namespace ChineseChessAI.Play
 
         public void Dispose()
         {
-            _readerCts.Cancel();
             try
             {
                 if (!_process.HasExited)
@@ -190,11 +189,16 @@ namespace ChineseChessAI.Play
                     if (!_process.WaitForExit(1000))
                         _process.Kill(entireProcessTree: true);
                 }
+
+                Task.WaitAll(new[] { _stdoutTask, _stderrTask }, 1000);
             }
             catch
             {
                 // Ignore disposal failures.
             }
+
+            if (!_stdoutTask.IsCompleted || !_stderrTask.IsCompleted)
+                _readerCts.Cancel();
 
             _readerCts.Dispose();
             _lineSignal.Dispose();

@@ -7,11 +7,13 @@ namespace ChineseChessAI.Traditional
         private static readonly int[] VictimValues = { 0, 10_000, 200, 200, 400, 900, 450, 100 };
         private readonly MoveGenerator _generator;
         private readonly OpeningBook? _book;
+        private readonly MasterKnowledgeBook? _knowledgeBook;
 
-        public TraditionalMoveOrdering(MoveGenerator generator, OpeningBook? book = null)
+        public TraditionalMoveOrdering(MoveGenerator generator, OpeningBook? book = null, MasterKnowledgeBook? knowledgeBook = null)
         {
             _generator = generator;
             _book = book;
+            _knowledgeBook = knowledgeBook;
         }
 
         public List<Move> OrderMoves(
@@ -39,6 +41,8 @@ namespace ChineseChessAI.Traditional
             sbyte victim = board.GetPiece(move.To);
             if (_book != null)
                 score += _book.GetMoveOrderingBonus(board, move);
+            if (_knowledgeBook != null)
+                score += _knowledgeBook.GetMoveOrderingBonus(board, move);
 
             if (victim != 0)
             {
