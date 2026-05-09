@@ -100,8 +100,11 @@ namespace ChineseChessAI.Training
         private List<int> _waitList = new List<int>();
         private readonly object _lock = new object();
 
-        public LeagueManager(int populationSize = 10000)
+        private readonly int _traditionalAgentCount;
+
+        public LeagueManager(int populationSize = 10000, int traditionalAgentCount = 0)
         {
+            _traditionalAgentCount = Math.Clamp(traditionalAgentCount, 0, Math.Max(0, populationSize - 1));
             string baseDir = AppDomain.CurrentDomain.BaseDirectory;
             _metadataPath = Path.Combine(baseDir, "data", "league_metadata.json");
             _modelsDir = Path.Combine(baseDir, "data", "models", "league");
@@ -144,8 +147,35 @@ namespace ChineseChessAI.Training
                     _agents = _agents.OrderBy(a => a.Id).Take(populationSize).ToList();
                 }
 
+                ConfigureTraditionalAgents(populationSize);
                 _waitList = _agents.Select(a => a.Id).OrderBy(_ => Random.Shared.Next()).ToList();
             }
+        }
+
+        private void ConfigureTraditionalAgents(int populationSize)
+        {
+            int firstTraditionalId = Math.Max(0, populationSize - _traditionalAgentCount);
+            var rnd = new Random();
+            foreach (var agent in _agents)
+            {
+                if (agent.Id >= firstTraditionalId)
+                {
+                    agent.EngineKind = "Traditional";
+                    agent.TraditionalDepth = Math.Clamp(agent.TraditionalDepth, 4, 8);
+                    agent.MctsSimulations = 0;
+                    agent.Cpuct = 1.6;
+                    agent.Temperature = 0.05;
+                    if (string.IsNullOrWhiteSpace(agent.ModelPath))
+                        agent.ModelPath = Path.Combine(_modelsDir, $"agent_{agent.Id}.pt");
+                }
+                else if (string.Equals(agent.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase))
+                {
+                    agent.RandomizePersonality(rnd);
+                    agent.ModelPath = Path.Combine(_modelsDir, $"agent_{agent.Id}.pt");
+                }
+            }
+
+            SaveMetadata();
         }
 
         public void SaveMetadata()
@@ -291,11 +321,25 @@ namespace ChineseChessAI.Training
                 }
 
                 var rnd = Random.Shared;
+                var traditionalAgents = _agents
+                    .Where(a => string.Equals(a.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
                 var ranked = _agents
+                    .Where(a => !string.Equals(a.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase))
                     .OrderByDescending(a => a.Elo)
                     .ThenByDescending(a => a.Wins)
                     .ThenBy(a => a.Id)
                     .ToList();
+                populationSize = ranked.Count;
+                if (populationSize < 6)
+                {
+                    return new PopulationRefreshResult();
+                }
+
+                eliteCount = Math.Clamp(eliteCount, 1, Math.Max(1, populationSize - 1));
+                contenderKeepCount = Math.Clamp(contenderKeepCount, 0, Math.Max(0, populationSize - eliteCount - 1));
+                diverseKeepCount = Math.Clamp(diverseKeepCount, 0, Math.Max(0, populationSize - eliteCount - contenderKeepCount - 1));
 
                 var elites = ranked.Take(eliteCount).ToList();
                 var contenders = ranked.Skip(eliteCount).Take(contenderKeepCount).ToList();
@@ -364,6 +408,13 @@ namespace ChineseChessAI.Training
                         $"DNA:S{replacement.MctsSimulations}/C{replacement.Cpuct:F1}/T{replacement.Temperature:F1}");
                 }
 
+                foreach (var traditionalAgent in traditionalAgents)
+                {
+                    if (!_agents.Any(a => a.Id == traditionalAgent.Id))
+                        _agents.Add(traditionalAgent);
+                }
+
+                _agents = _agents.OrderBy(a => a.Id).ToList();
                 _waitList = _agents.Select(a => a.Id).OrderBy(_ => rnd.Next()).ToList();
                 SaveMetadata();
 
@@ -395,6 +446,12 @@ namespace ChineseChessAI.Training
                     agent.Losses++;
                 else
                     agent.Draws++;
+                if (string.Equals(agent.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase))
+                {
+                    agent.LastActive = DateTime.Now;
+                    return;
+                }
+
                 double expectedScore = 1.0 / (1.0 + Math.Pow(10, (opponentElo - agent.Elo) / 400.0));
                 double actualScore = (result + 1.0) / 2.0;
                 double kFactor = agent.GamesPlayed <= 20 ? 48.0 : 32.0;
@@ -427,8 +484,7 @@ namespace ChineseChessAI.Training
 
         private static void CopyModelFromParent(string parentPath, string childPath)
         {
-            // 模型权重和优化器状态必须配套迁移：后代继承父代的 Adam 动量，
-            // 移民则要把同 Id 旧 agent 残留的优化器文件一并清掉。
+            // Offspring inherit weights only; stale optimizer/LR schedule files are removed.
             string[] companionSuffixes = { ".optim", ".optim.json" };
 
             if (File.Exists(parentPath))
@@ -436,11 +492,8 @@ namespace ChineseChessAI.Training
                 File.Copy(parentPath, childPath, overwrite: true);
                 foreach (string suffix in companionSuffixes)
                 {
-                    string parentCompanion = parentPath + suffix;
                     string childCompanion = childPath + suffix;
-                    if (File.Exists(parentCompanion))
-                        File.Copy(parentCompanion, childCompanion, overwrite: true);
-                    else if (File.Exists(childCompanion))
+                    if (File.Exists(childCompanion))
                         File.Delete(childCompanion);
                 }
                 return;

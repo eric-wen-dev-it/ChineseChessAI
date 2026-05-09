@@ -107,6 +107,7 @@ namespace ChineseChessAI.Training
             int MaxMoves,
             int ExploreMoves,
             float MaterialBias,
+            int TraditionalAgentCount,
             int PopulationRefreshInterval,
             int? MaxPopulationRefreshCycles);
 
@@ -435,6 +436,7 @@ namespace ChineseChessAI.Training
                 options.MaxMoves,
                 options.ExploreMoves,
                 options.MaterialBias,
+                options.TraditionalAgentCount,
                 options.PopulationRefreshInterval,
                 options.MaxPopulationRefreshCycles).ConfigureAwait(false);
         }
@@ -473,6 +475,7 @@ namespace ChineseChessAI.Training
             int maxMoves = 150,
             int exploreMoves = 40,
             float materialBias = 0.1f,
+            int traditionalAgentCount = 0,
             int populationRefreshInterval = 0,
             int? maxPopulationRefreshCycles = null)
         {
@@ -480,6 +483,7 @@ namespace ChineseChessAI.Training
                 throw new ArgumentException("出于内存限制与并发安全考量，联赛人口数量不能超过 100。", nameof(populationSize));
             if (populationSize < 2)
                 throw new ArgumentException("联赛人口数量必须大于等于 2。", nameof(populationSize));
+            traditionalAgentCount = Math.Clamp(traditionalAgentCount, 0, populationSize - 1);
 
             if (populationRefreshInterval <= 0)
                 populationRefreshInterval = populationSize * 25;
@@ -491,6 +495,7 @@ namespace ChineseChessAI.Training
                 maxMoves,
                 exploreMoves,
                 materialBias,
+                traditionalAgentCount,
                 populationRefreshInterval,
                 maxPopulationRefreshCycles);
 
@@ -519,7 +524,7 @@ namespace ChineseChessAI.Training
             StartLeagueWatchdog(runOptions, runCts.Token);
             var runWatchdogCts = _watchdogCts;
 
-            _leagueManager = new LeagueManager(populationSize);
+            _leagueManager = new LeagueManager(populationSize, traditionalAgentCount);
             if (_skipAgentDisposeOnNextStart)
             {
                 Log("[Watchdog] 跳过本次启动前的旧 agent dispose；旧联赛任务可能仍在退出。");
@@ -546,7 +551,7 @@ namespace ChineseChessAI.Training
             {
                 try
                 {
-                    Log($"=== 万王之王：{populationSize} 智能体联赛启动 ===");
+                    Log($"=== 万王之王：{populationSize} 智能体联赛启动（传统搜索 {traditionalAgentCount} 个）===");
 
                     // 将数据装载放入独立的后台任务，不阻塞联赛和对局的立即启动
                     _backgroundLoadTask = Task.Run(async () =>
@@ -1331,14 +1336,6 @@ namespace ChineseChessAI.Training
             });
         }
 
-        public static float CalculateMaterialScore(Board board, bool isRed) => isRed ? board.RedMaterial : board.BlackMaterial;
-        public static float GetBoardAdvantage(Board board)
-        {
-            float diff = board.RedMaterial - board.BlackMaterial;
-            // 【BUG 10 优化】：降低阈值至 0.5 (约半个兵)，提高 PGN 数据标注灵敏度
-            return diff > 0.5f ? 1.0f : (diff < -0.5f ? -1.0f : 0.0f);
-        }
-
         public async Task ProcessDatasetAsync(string filePath)
         {
             if (IsTraining)
@@ -1513,11 +1510,11 @@ namespace ChineseChessAI.Training
             // 【数据质量修复】：如果对局截断，则不再信任整局结果，改用当前的材料差估分
             if (!isComplete)
             {
-                resultValue = GetBoardAdvantage(session.Board);
+                resultValue = BoardEvaluation.AdjudicateDrawByMaterial(session.Board);
             }
             else if (!hasExplicitResult)
             {
-                resultValue = GetBoardAdvantage(session.Board);
+                resultValue = BoardEvaluation.AdjudicateDrawByMaterial(session.Board);
             }
 
             if (isComplete && gameHistory.Count > 10)
@@ -1572,9 +1569,7 @@ namespace ChineseChessAI.Training
             }
             if (isComplete && gameHistory.Count > 10)
             {
-                float resultValue = GetBoardAdvantage(session.Board);
-                // 注意：对于 CSV，我们本身就没有 Header Result，所以始终使用 GetBoardAdvantage 是安全的。
-                // 但为了逻辑一致性，我们在这里显式体现。
+                float resultValue = BoardEvaluation.AdjudicateDrawByMaterial(session.Board);
                 var examples = gameHistory.Select(step =>
                 {
                     var sparse = step.policy.Select((p, i) => new ActionProb(i, p)).Where(x => x.Prob > 0).ToArray();

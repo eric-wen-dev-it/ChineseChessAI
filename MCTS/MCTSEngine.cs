@@ -103,8 +103,8 @@ namespace ChineseChessAI.MCTS
 
             if (currentMoves + depth >= maxMoves)
             {
-                float advantage = BoardEvaluation.GetBoardAdvantage(board);
-                node.Update(board.IsRedTurn ? advantage * 0.5 : -advantage * 0.5);
+                float adjudicatedResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
+                node.Update(board.IsRedTurn ? adjudicatedResult : -adjudicatedResult);
                 return;
             }
 

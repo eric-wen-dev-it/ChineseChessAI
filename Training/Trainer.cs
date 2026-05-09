@@ -14,7 +14,9 @@ namespace ChineseChessAI.Training
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
         private LRScheduler _scheduler;
-        private readonly double _learningRate = 0.0002;
+        private const double InitialLearningRate = 0.0002;
+        private const double MinLearningRate = 0.00001;
+        private const float HardValueTarget = 0.95f;
         private int _iterationCount = 0;
 
         public Trainer(CChessNet model)
@@ -32,8 +34,9 @@ namespace ChineseChessAI.Training
             (_scheduler as IDisposable)?.Dispose(); // 安全清理旧的调度器
             _optimizer?.Dispose(); // 清理旧的优化器
 
-            _optimizer = torch.optim.Adam(parameters, _learningRate, weight_decay: 1e-4);
+            _optimizer = torch.optim.Adam(parameters, InitialLearningRate, weight_decay: 1e-4);
             _scheduler = StepLR(_optimizer, step_size: 500, gamma: 0.5);
+            ClampLearningRate();
         }
 
         // 【核心审计修复】：彻底释放底层 C++ 动量张量池
@@ -72,7 +75,7 @@ namespace ChineseChessAI.Training
                         densePolicy[p.Index] = p.Prob;
 
                     policiesList.Add(tensor(densePolicy));
-                    valuesList.Add(tensor(ex.Value));
+                    valuesList.Add(tensor(SmoothValueTarget(ex.Value)));
                 }
 
                 // MoveToOuterDisposeScope：将 stacked 张量移出 buildScope，
@@ -92,6 +95,7 @@ namespace ChineseChessAI.Training
 
                 _iterationCount++;
                 _scheduler.step();
+                ClampLearningRate();
             }
             finally
             {
@@ -139,10 +143,32 @@ namespace ChineseChessAI.Training
             });
         }
 
+        private static float SmoothValueTarget(float value)
+        {
+            if (value >= 1.0f)
+                return HardValueTarget;
+            if (value <= -1.0f)
+                return -HardValueTarget;
+            return value;
+        }
+
         public double GetCurrentLR()
         {
             var groups = _optimizer.ParamGroups;
-            return groups != null && groups.Any() ? groups.First().LearningRate : _learningRate;
+            return groups != null && groups.Any() ? groups.First().LearningRate : InitialLearningRate;
+        }
+
+        private void ClampLearningRate()
+        {
+            var groups = _optimizer.ParamGroups;
+            if (groups == null)
+                return;
+
+            foreach (var group in groups)
+            {
+                if (group.LearningRate < MinLearningRate)
+                    group.LearningRate = MinLearningRate;
+            }
         }
 
         // 持久化 Adam 动量缓冲区 + 调度器步数，避免 agent 卸载/重载时退化为"全新优化器"。
@@ -159,7 +185,7 @@ namespace ChineseChessAI.Training
                 File.WriteAllText(sidecarPath, JsonSerializer.Serialize(new OptimizerSidecar
                 {
                     IterationCount = _iterationCount,
-                    LearningRate = _learningRate
+                    LearningRate = GetCurrentLR()
                 }));
             }
             catch (Exception ex)
@@ -192,7 +218,10 @@ namespace ChineseChessAI.Training
                 // StepLR 没有 last_epoch 直接 setter；用 step() 推进到对应位置。
                 // step_size=500，所以这是 O(restoredIterations) 但每次只读一个 int + 调一次 LR 更新，毫秒级。
                 for (int i = 0; i < restoredIterations; i++)
+                {
                     _scheduler.step();
+                    ClampLearningRate();
+                }
 
                 return true;
             }

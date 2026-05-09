@@ -72,6 +72,11 @@
                         <TextBlock Text="种群规模 (Population):" Foreground="#CCC" VerticalAlignment="Center"/>
                         <TextBox Text="{Binding PopulationSize, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0" Height="22"/>
                     </Grid>
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="80"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Traditional agents:" Foreground="#CCC" VerticalAlignment="Center"/>
+                        <TextBox Text="{Binding TraditionalAgentCount, UpdateSourceTrigger=PropertyChanged}" Grid.Column="1" VerticalContentAlignment="Center" HorizontalContentAlignment="Center" Background="#444" Foreground="White" BorderThickness="0" Height="22"/>
+                    </Grid>
                 </StackPanel>
             </Border>
 

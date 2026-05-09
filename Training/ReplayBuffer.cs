@@ -65,7 +65,8 @@ namespace ChineseChessAI.Training
             Action<string>? logAction = null,
             Action<List<Move>, Move, string>? onAuditFailure = null,
             CancellationToken cancellationToken = default,
-            DateTime? cutoffTime = null)
+            DateTime? cutoffTime = null,
+            bool allowLegacyListFormat = false)
         {
             if (!Directory.Exists(_dataDir))
                 return (0, 0);
@@ -128,12 +129,20 @@ namespace ChineseChessAI.Training
                     }
                     else if (json.StartsWith("["))
                     {
-                        try
+                        if (!allowLegacyListFormat)
                         {
-                            examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                            auditPassed = false;
+                            logAction?.Invoke($"[AuditRejected] {fileName}: legacy List<TrainingExample> format has no move history/version and is excluded from training.");
                         }
-                        catch
+                        else
                         {
+                            try
+                            {
+                                examples = JsonSerializer.Deserialize<List<TrainingExample>>(json);
+                            }
+                            catch
+                            {
+                            }
                         }
                     }
 

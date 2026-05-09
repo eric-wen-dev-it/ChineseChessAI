@@ -423,12 +423,25 @@ namespace ChineseChessAI
                     return;
                 }
 
+                if (!int.TryParse(config.TraditionalAgentCount, out int traditionalAgentCount) || traditionalAgentCount < 0)
+                {
+                    MessageBox.Show("Traditional agents must be zero or greater.", "Input Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                if (traditionalAgentCount >= populationSize)
+                {
+                    MessageBox.Show("Traditional agents must be fewer than the total population.", "Input Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
                 StartLeagueBtn.IsEnabled = false;
                 await _orchestrator.StartLeagueTrainingAsync(
                     populationSize: populationSize,
                     maxMoves: 150,
                     exploreMoves: 40,
-                    materialBias: 0.1f);
+                    materialBias: 0.1f,
+                    traditionalAgentCount: traditionalAgentCount);
             }
             catch (Exception ex)
             {
@@ -440,6 +453,7 @@ namespace ChineseChessAI
         public class TrainingConfig
         {
             public string PopulationSize { get; set; } = "50";
+            public string TraditionalAgentCount { get; set; } = "4";
         }
 
         public void OnReplayLastClick(object sender, RoutedEventArgs e)

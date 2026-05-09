@@ -40,11 +40,8 @@ namespace ChineseChessAI.NeuralNetwork
         public static float[] FlipPolicy(float[] originalPi)
         {
             float[] flippedPi = new float[8100];
-            // 依然保留稠密版以兼容旧接口，但逻辑相同
             for (int i = 0; i < 8100; i++)
             {
-                if (originalPi[i] <= 0)
-                    continue;
                 int from = i / 90, to = i % 90;
                 int r1 = from / 9, c1 = from % 9, r2 = to / 9, c2 = to % 9;
                 int idx_f = ((9 - r1) * 9 + (8 - c1)) * 90 + ((9 - r2) * 9 + (8 - c2));
