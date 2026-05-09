@@ -1,6 +1,8 @@
 ﻿using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Utils;
+using System.IO;
+using System.Text.Json;
 using TorchSharp;
 using static TorchSharp.torch;
 using static TorchSharp.torch.optim.lr_scheduler;
@@ -141,6 +143,73 @@ namespace ChineseChessAI.Training
         {
             var groups = _optimizer.ParamGroups;
             return groups != null && groups.Any() ? groups.First().LearningRate : _learningRate;
+        }
+
+        // 持久化 Adam 动量缓冲区 + 调度器步数，避免 agent 卸载/重载时退化为"全新优化器"。
+        // optimizerPath: TorchSharp 二进制；sidecarPath: JSON，存 _iterationCount。
+        public void SaveOptimizerState(string optimizerPath, string sidecarPath)
+        {
+            try
+            {
+                string? dir = Path.GetDirectoryName(optimizerPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+
+                ((TorchSharp.Modules.OptimizerHelper)_optimizer).save_state_dict(optimizerPath);
+                File.WriteAllText(sidecarPath, JsonSerializer.Serialize(new OptimizerSidecar
+                {
+                    IterationCount = _iterationCount,
+                    LearningRate = _learningRate
+                }));
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Trainer] 优化器状态保存失败: {ex.Message}");
+            }
+        }
+
+        // 调用前提：调用方已经先 model.load() 完毕、CompleteInit() 也已执行（即 _optimizer/_scheduler 已重建）。
+        // 文件不存在时静默 no-op，等价于"全新优化器"——保留之前的行为。
+        public bool TryLoadOptimizerState(string optimizerPath, string sidecarPath)
+        {
+            if (!File.Exists(optimizerPath))
+                return false;
+
+            try
+            {
+                ((TorchSharp.Modules.OptimizerHelper)_optimizer).load_state_dict(optimizerPath);
+
+                int restoredIterations = 0;
+                if (File.Exists(sidecarPath))
+                {
+                    string json = File.ReadAllText(sidecarPath);
+                    var sidecar = JsonSerializer.Deserialize<OptimizerSidecar>(json);
+                    if (sidecar != null)
+                        restoredIterations = sidecar.IterationCount;
+                }
+
+                _iterationCount = restoredIterations;
+                // StepLR 没有 last_epoch 直接 setter；用 step() 推进到对应位置。
+                // step_size=500，所以这是 O(restoredIterations) 但每次只读一个 int + 调一次 LR 更新，毫秒级。
+                for (int i = 0; i < restoredIterations; i++)
+                    _scheduler.step();
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Trainer] 优化器状态加载失败，回退为全新优化器: {ex.Message}");
+                // 失败时把已经被部分 load 的优化器清理重建，避免半 load 状态。
+                ResetOptimizer();
+                _iterationCount = 0;
+                return false;
+            }
+        }
+
+        private sealed class OptimizerSidecar
+        {
+            public int IterationCount { get; set; }
+            public double LearningRate { get; set; }
         }
     }
 }

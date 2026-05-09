@@ -27,7 +27,7 @@ namespace ChineseChessAI.Play
         private const int DefaultMaxMoves = 150;
         private const int EvaluationGameCount = 100;
         private const double EvaluationPromotionThreshold = 0.55;
-        private const float EvaluationMaterialAdjudicationThreshold = 1.5f;
+        private const float EvaluationMaterialAdjudicationThreshold = BoardEvaluation.MaterialAdjudicationThreshold;
 
         private sealed record EvaluationGameResult(
             int RedResult,

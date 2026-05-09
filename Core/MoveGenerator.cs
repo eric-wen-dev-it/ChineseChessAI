@@ -614,6 +614,8 @@ namespace ChineseChessAI.Core
 
         // 长杀禁手入口：检查攻击方是否已形成强制杀势（最多向前搜索 MateSearchDepth 步攻击）
         private const int MateSearchDepth = 5;
+        private const int MateSearchNodeLimit = 20_000;
+        private static readonly TimeSpan MateSearchTimeLimit = TimeSpan.FromMilliseconds(250);
 
         public bool IsThreateningToMate(Board board, bool isRedAttacker, CancellationToken cancellationToken = default)
         {
@@ -625,6 +627,7 @@ namespace ChineseChessAI.Core
             if (_mateMemo.Count > MateMemoMaxSize)
                 _mateMemo.Clear();
 
+            var budget = new MateSearchBudget(MateSearchNodeLimit, MateSearchTimeLimit);
             var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
             if (defenderMoves.Count == 0)
                 return true;
@@ -632,10 +635,13 @@ namespace ChineseChessAI.Core
             foreach (var defenderMove in defenderMoves)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!budget.TryConsume())
+                    return false;
+
                 board.Push(defenderMove.From, defenderMove.To);
                 try
                 {
-                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, cancellationToken))
+                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, budget, cancellationToken))
                         return false;
                 }
                 finally
@@ -651,9 +657,13 @@ namespace ChineseChessAI.Core
             Board board,
             bool isRedAttacker,
             int depth,
+            MateSearchBudget budget,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (!budget.TryConsume())
+                return false;
+
             if (depth <= 0)
                 return false;
 
@@ -664,6 +674,9 @@ namespace ChineseChessAI.Core
             foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!budget.TryConsume())
+                    return false;
+
                 board.Push(attackerMove.From, attackerMove.To);
                 try
                 {
@@ -678,10 +691,13 @@ namespace ChineseChessAI.Core
                     foreach (var defenderMove in defenderMoves)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
+                        if (!budget.TryConsume())
+                            return false;
+
                         board.Push(defenderMove.From, defenderMove.To);
                         try
                         {
-                            if (!HasForcedKill(board, isRedAttacker, depth - 1, cancellationToken))
+                            if (!HasForcedKill(board, isRedAttacker, depth - 1, budget, cancellationToken))
                             {
                                 defenderHasEscape = true;
                                 break;
@@ -711,6 +727,28 @@ namespace ChineseChessAI.Core
 
         // 棋例分值（亚洲象棋联合会规则，用于"捉/兑/闲"判定，与子力评估分离）
         // 车=4，马=炮=2（等价子互捉判兑），过河兵卒=1，将帅特殊高分
+        private sealed class MateSearchBudget
+        {
+            private readonly int _nodeLimit;
+            private readonly TimeSpan _timeLimit;
+            private readonly System.Diagnostics.Stopwatch _stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            private int _nodes;
+
+            public MateSearchBudget(int nodeLimit, TimeSpan timeLimit)
+            {
+                _nodeLimit = nodeLimit;
+                _timeLimit = timeLimit;
+            }
+
+            public bool TryConsume()
+            {
+                if (Interlocked.Increment(ref _nodes) > _nodeLimit)
+                    return false;
+
+                return _stopwatch.Elapsed <= _timeLimit;
+            }
+        }
+
         private int GetPieceValue(sbyte piece)
         {
             switch (Math.Abs(piece))

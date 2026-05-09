@@ -187,8 +187,8 @@ namespace ChineseChessAI.Training
                         if (onMovePerformed != null)
                             await Task.Delay(1000);
 
-                        endReason = "姝ユ暟闄愬埗(寮哄埗骞冲眬)";
-                        finalResult = 0.0f;
+                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
+                        endReason = ComposeAdjudicationReason("步数限制", finalResult);
                         break;
                     }
 
@@ -260,15 +260,15 @@ namespace ChineseChessAI.Training
 
                     if (positionHistory[currentHash] >= 3)
                     {
-                        endReason = "涓夋閲嶅灞€闈?骞冲眬)";
-                        finalResult = 0.0f;
+                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
+                        endReason = ComposeAdjudicationReason("三次重复局面", finalResult);
                         break;
                     }
 
                     if (noProgressCount >= 100)
                     {
-                        endReason = "鑷劧闄愮潃鐧炬鏃犺繘灞?骞冲眬)";
-                        finalResult = 0.0f;
+                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
+                        endReason = ComposeAdjudicationReason("自然限着百步无进展", finalResult);
                         break;
                     }
                 }
@@ -328,35 +328,25 @@ namespace ChineseChessAI.Training
 
         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
         {
+            // 三循/百步无进展/步数限制已在 RunGameAsync 内按 GUI 评估器口径裁判:
+            //   材料差 >= 1.5 兵 -> finalResult = ±1.0
+            //   材料差 <  1.5 兵 -> finalResult = 0 (真平局)
+            // 因此到这里 finalResult==0 即真平局，可走 early/late draw 惩罚路径。
             var examples = new List<TrainingExample>(history.Count);
-            float adjustedResult = finalResult;
-            bool isSymmetricDrawPenalty = false;
-
-            if (Math.Abs(finalResult) < 0.001f)
-            {
-                float redMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, true);
-                float blackMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, false);
-
-                if (redMaterial > blackMaterial)
-                    adjustedResult = _materialBias;
-                else if (blackMaterial > redMaterial)
-                    adjustedResult = -_materialBias;
-                else
-                    isSymmetricDrawPenalty = true;
-            }
+            bool isTrueDraw = Math.Abs(finalResult) < 0.001f;
 
             for (int i = 0; i < history.Count; i++)
             {
                 var step = history[i];
                 float valueForCurrentPlayer;
-                if (isSymmetricDrawPenalty)
+                if (isTrueDraw)
                 {
                     float progress = (float)i / Math.Max(1, history.Count - 1);
                     valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty;
                 }
                 else
                 {
-                    valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
+                    valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
                 }
 
                 var sparsePolicy = step.policy
@@ -368,6 +358,15 @@ namespace ChineseChessAI.Training
             }
 
             return examples;
+        }
+
+        private static string ComposeAdjudicationReason(string baseReason, float adjudicatedResult)
+        {
+            if (adjudicatedResult > 0.5f)
+                return $"{baseReason}(子力裁判红胜)";
+            if (adjudicatedResult < -0.5f)
+                return $"{baseReason}(子力裁判黑胜)";
+            return $"{baseReason}(平局)";
         }
     }
 }

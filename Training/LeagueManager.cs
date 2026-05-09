@@ -427,15 +427,34 @@ namespace ChineseChessAI.Training
 
         private static void CopyModelFromParent(string parentPath, string childPath)
         {
+            // 模型权重和优化器状态必须配套迁移：后代继承父代的 Adam 动量，
+            // 移民则要把同 Id 旧 agent 残留的优化器文件一并清掉。
+            string[] companionSuffixes = { ".optim", ".optim.json" };
+
             if (File.Exists(parentPath))
             {
                 File.Copy(parentPath, childPath, overwrite: true);
+                foreach (string suffix in companionSuffixes)
+                {
+                    string parentCompanion = parentPath + suffix;
+                    string childCompanion = childPath + suffix;
+                    if (File.Exists(parentCompanion))
+                        File.Copy(parentCompanion, childCompanion, overwrite: true);
+                    else if (File.Exists(childCompanion))
+                        File.Delete(childCompanion);
+                }
                 return;
             }
 
             if (File.Exists(childPath))
             {
                 File.Delete(childPath);
+            }
+            foreach (string suffix in companionSuffixes)
+            {
+                string childCompanion = childPath + suffix;
+                if (File.Exists(childCompanion))
+                    File.Delete(childCompanion);
             }
         }
     }

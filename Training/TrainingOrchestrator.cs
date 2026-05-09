@@ -846,6 +846,7 @@ namespace ChineseChessAI.Training
                 // 【关键修复】：load() 必须在 CompleteInit()（即 Trainer/Adam 创建）之前完成。
                 // TorchSharp 的 load() 会替换参数张量包装器对象；若 Adam 已创建，
                 // 其持有的旧引用 handle 变为 IntPtr.Zero，下次 zero_grad() 即崩溃。
+                bool modelLoaded = false;
                 lock (GetFileLock(meta.ModelPath))
                 {
                     if (File.Exists(meta.ModelPath))
@@ -853,6 +854,7 @@ namespace ChineseChessAI.Training
                         try
                         {
                             pa.Model.load(meta.ModelPath);
+                            modelLoaded = true;
                         }
                         catch (EndOfStreamException ex)
                         {
@@ -860,15 +862,72 @@ namespace ChineseChessAI.Training
                             Log($"[模型损坏] Agent_{meta.Id} 模型文件已截断或损坏: {meta.ModelPath}");
                             Log($"[模型损坏] 已隔离到: {quarantinedPath}");
                             Log($"[模型损坏-堆栈] {ex}");
+                            // 模型损坏后，旧优化器状态对应的是失效的参数，必须一起隔离。
+                            QuarantineOptimizerStateFiles(meta.ModelPath);
                         }
                     }
                 }
 
                 pa.CompleteInit(); // to(CUDA) + new Trainer(Model)，必须在 load() 之后
+
+                if (modelLoaded)
+                {
+                    // 【优化器状态持久化】：模型权重和 Adam 动量必须配套使用，
+                    // 否则 agent 每次重载会回到"高 LR + 无动量"的状态，长期训练高噪声。
+                    string optimizerPath = GetOptimizerStatePath(meta.ModelPath);
+                    string sidecarPath = GetOptimizerSidecarPath(meta.ModelPath);
+                    lock (GetFileLock(meta.ModelPath))
+                    {
+                        if (pa.Trainer.TryLoadOptimizerState(optimizerPath, sidecarPath))
+                        {
+                            Log($"[优化器恢复] Agent_{meta.Id}: {Path.GetFileName(optimizerPath)}");
+                        }
+                    }
+                }
+
                 return pa;
             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
             TouchAgent(meta.Id);
             return agent;
+        }
+
+        // 优化器状态文件与模型文件同目录共存，命名规则：foo.pt → foo.optim, foo.optim.json
+        internal static string GetOptimizerStatePath(string modelPath) => modelPath + ".optim";
+        internal static string GetOptimizerSidecarPath(string modelPath) => modelPath + ".optim.json";
+
+        private void QuarantineOptimizerStateFiles(string modelPath)
+        {
+            foreach (string path in new[] { GetOptimizerStatePath(modelPath), GetOptimizerSidecarPath(modelPath) })
+            {
+                if (!File.Exists(path))
+                    continue;
+                try
+                {
+                    string quarantined = path + $".corrupt_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
+                    File.Move(path, quarantined, overwrite: false);
+                    Log($"[优化器隔离] {Path.GetFileName(path)} → {Path.GetFileName(quarantined)}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"[优化器隔离失败] {path}: {ex.Message}");
+                    try
+                    {
+                        File.Delete(path);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+
+        private void SaveAgentModelAndOptimizer(PersistentAgent pa, AgentMetadata meta)
+        {
+            lock (GetFileLock(meta.ModelPath))
+            {
+                ModelManager.SaveModel(pa.Model, meta.ModelPath);
+                pa.Trainer.SaveOptimizerState(GetOptimizerStatePath(meta.ModelPath), GetOptimizerSidecarPath(meta.ModelPath));
+            }
         }
 
         private string QuarantineCorruptModelFile(string modelPath)
@@ -993,10 +1052,7 @@ namespace ChineseChessAI.Training
                     continue;
                 }
 
-                lock (GetFileLock(meta.ModelPath))
-                {
-                    ModelManager.SaveModel(agentEntry.Value.Value.Model, meta.ModelPath);
-                }
+                SaveAgentModelAndOptimizer(agentEntry.Value.Value, meta);
             }
         }
 
@@ -1228,10 +1284,7 @@ namespace ChineseChessAI.Training
                                 trainedAgents++;
                                 totalSamples += mixedBatch.Count * trainingEpochs;
                                 totalLoss += loss;
-                                lock (GetFileLock(meta.ModelPath))
-                                {
-                                    ModelManager.SaveModel(pa.Model, meta.ModelPath);
-                                }
+                                SaveAgentModelAndOptimizer(pa, meta);
                             }
                             else
                             {
