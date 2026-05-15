@@ -16,7 +16,8 @@ namespace ChineseChessAI.Training
         DateTimeOffset StartedAt,
         DateTimeOffset EndedAt,
         TimeSpan Elapsed,
-        bool IsSuccess = true);
+        bool IsSuccess = true,
+        float RatingResultForRed = 0.0f);
 
     public class SelfPlay
     {
@@ -34,6 +35,9 @@ namespace ChineseChessAI.Training
         private readonly double _lowTempB;
         private readonly int _simsA;
         private readonly int _simsB;
+        private const int PikafishTeacherNodes = 2000;
+        private const int PikafishTeacherStride = 4;
+        private const int PikafishTeacherTailPlies = 12;
         private readonly RuntimeDiagnostics.RollingCounter _legalMoveMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayLegalMovesMs", 50);
         private readonly RuntimeDiagnostics.RollingCounter _stateEncodeMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayStateEncodeMs", 50);
         private readonly RuntimeDiagnostics.RollingCounter _searchMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlaySearchMs", 50);
@@ -50,7 +54,7 @@ namespace ChineseChessAI.Training
             int simsA = 400,
             int simsB = 400,
             float earlyDrawPenalty = 0.0f,
-            float lateDrawPenalty = 0.0f)
+            float lateDrawPenalty = -0.05f)
         {
             _engineA = new MctsGameEngineAdapter(engineA);
             _engineB = new MctsGameEngineAdapter(engineB);
@@ -77,7 +81,7 @@ namespace ChineseChessAI.Training
             int simsA = 400,
             int simsB = 400,
             float earlyDrawPenalty = 0.0f,
-            float lateDrawPenalty = 0.0f)
+            float lateDrawPenalty = -0.05f)
         {
             _engineA = engineA;
             _engineB = engineB;
@@ -100,8 +104,9 @@ namespace ChineseChessAI.Training
             board.Reset();
 
             var moveHistory = new List<Move>();
-            var gameHistoryA = new List<(float[] state, float[] policy, bool isRedTurn)>();
-            var gameHistoryB = new List<(float[] state, float[] policy, bool isRedTurn)>();
+            var moveHistoryUcci = new List<string>();
+            var gameHistoryA = new List<PendingTrainingStep>();
+            var gameHistoryB = new List<PendingTrainingStep>();
 
             int moveCount = 0;
             float finalResult = 0;
@@ -147,13 +152,15 @@ namespace ChineseChessAI.Training
                         instantPiData[instantKillMove.Value.ToNetworkIndex()] = 1.0f;
                         float[] instantTrainingPi = isRed ? instantPiData : StateEncoder.FlipPolicy(instantPiData);
 
+                        var ucciBefore = moveHistoryUcci.ToArray();
                         if (isEngineA)
-                            gameHistoryA.Add((instantStateData, instantTrainingPi, isRed));
+                            gameHistoryA.Add(new PendingTrainingStep(instantStateData, instantTrainingPi, isRed, ucciBefore));
                         else
-                            gameHistoryB.Add((instantStateData, instantTrainingPi, isRed));
+                            gameHistoryB.Add(new PendingTrainingStep(instantStateData, instantTrainingPi, isRed, ucciBefore));
 
                         Console.WriteLine($"[瑙勫垯瑁佸垽] 鍙戠幇閫佸皢/鏈簲灏嗭紝鎵ц缁濇潃: {instantKillMove.Value}");
                         moveHistory.Add(instantKillMove.Value);
+                        moveHistoryUcci.Add(NotationConverter.MoveToUcci(instantKillMove.Value));
                         board.Push(instantKillMove.Value.From, instantKillMove.Value.To);
 
                         if (onMovePerformed != null)
@@ -187,8 +194,7 @@ namespace ChineseChessAI.Training
                         if (onMovePerformed != null)
                             await Task.Delay(1000);
 
-                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
-                        endReason = ComposeAdjudicationReason("步数限制", finalResult);
+                        (finalResult, endReason) = await AdjudicateQuietEndAsync(board, moveHistory, "步数限制", cancellationToken);
                         break;
                     }
 
@@ -219,13 +225,14 @@ namespace ChineseChessAI.Training
                     _searchMsCounter.AddSample(searchStopwatch.ElapsedMilliseconds);
 
                     float[] trainingPi = isRed ? piData : StateEncoder.FlipPolicy(piData);
+                    var historyBeforeMove = moveHistoryUcci.ToArray();
                     if (isEngineA)
-                        gameHistoryA.Add((stateData, trainingPi, isRed));
+                        gameHistoryA.Add(new PendingTrainingStep(stateData, trainingPi, isRed, historyBeforeMove));
                     else
-                        gameHistoryB.Add((stateData, trainingPi, isRed));
+                        gameHistoryB.Add(new PendingTrainingStep(stateData, trainingPi, isRed, historyBeforeMove));
 
                     double temperature = moveCount < _exploreMoves ? 1.0 : activeLowTemp;
-                    Move move = SelectMoveByTemperature(piData, temperature, legalMoves);
+                    Move move = SelectMoveByTemperature(board, piData, temperature, legalMoves);
 
                     if (move.From == move.To || move.From < 0 || !legalMoves.Any(m => m.From == move.From && m.To == move.To))
                     {
@@ -234,6 +241,7 @@ namespace ChineseChessAI.Training
                     }
 
                     moveHistory.Add(move);
+                    moveHistoryUcci.Add(NotationConverter.MoveToUcci(move));
                     board.Push(move.From, move.To);
 
                     if (onMovePerformed != null)
@@ -260,15 +268,13 @@ namespace ChineseChessAI.Training
 
                     if (positionHistory[currentHash] >= 3)
                     {
-                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
-                        endReason = ComposeAdjudicationReason("三次重复局面", finalResult);
+                        (finalResult, endReason) = await AdjudicateQuietEndAsync(board, moveHistory, "三次重复局面", cancellationToken);
                         break;
                     }
 
                     if (noProgressCount >= 100)
                     {
-                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
-                        endReason = ComposeAdjudicationReason("自然限着百步无进展", finalResult);
+                        (finalResult, endReason) = await AdjudicateQuietEndAsync(board, moveHistory, "自然限着百步无进展", cancellationToken);
                         break;
                     }
                 }
@@ -288,16 +294,27 @@ namespace ChineseChessAI.Training
             }
 
             string resultStr = isSuccess ? (finalResult == 0 ? "平局" : (finalResult > 0 ? "红胜" : "黑胜")) : "异常中断";
-            var examplesA = FinalizeData(gameHistoryA, finalResult, board);
-            var examplesB = FinalizeData(gameHistoryB, finalResult, board);
+            float ratingResultForRed = isSuccess ? GetRatingResult(finalResult, endReason) : 0.0f;
+            if (isSuccess)
+            {
+                await EnrichWithPikafishTeacherAsync(gameHistoryA, cancellationToken).ConfigureAwait(false);
+                await EnrichWithPikafishTeacherAsync(gameHistoryB, cancellationToken).ConfigureAwait(false);
+            }
+
+            var examplesA = FinalizeData(gameHistoryA, ratingResultForRed, board);
+            var examplesB = FinalizeData(gameHistoryB, ratingResultForRed, board);
             DateTimeOffset endedAt = DateTimeOffset.Now;
-            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory, startedAt, endedAt, endedAt - startedAt, isSuccess);
+            return new GameResult(examplesA, examplesB, endReason, resultStr, moveCount, moveHistory, startedAt, endedAt, endedAt - startedAt, isSuccess, ratingResultForRed);
         }
 
-        private Move SelectMoveByTemperature(float[] piData, double temperature, List<Move> legalMoves)
+        private Move SelectMoveByTemperature(Board board, float[] piData, double temperature, List<Move> legalMoves)
         {
+            var selectableMoves = legalMoves.Where(move => !board.WillRepeatPosition(move.From, move.To)).ToList();
+            if (selectableMoves.Count == 0)
+                selectableMoves = legalMoves;
+
             var validMoves = new List<(Move move, double prob)>();
-            foreach (var move in legalMoves)
+            foreach (var move in selectableMoves)
             {
                 int idx = move.ToNetworkIndex();
                 if (idx >= 0 && idx < 8100)
@@ -305,7 +322,7 @@ namespace ChineseChessAI.Training
             }
 
             if (validMoves.Count == 0)
-                return legalMoves[Random.Shared.Next(legalMoves.Count)];
+                return selectableMoves[Random.Shared.Next(selectableMoves.Count)];
             if (temperature < 0.1)
                 return validMoves.OrderByDescending(x => x.prob).First().move;
 
@@ -326,7 +343,45 @@ namespace ChineseChessAI.Training
             return validMoves.Last().move;
         }
 
-        private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
+        private async Task EnrichWithPikafishTeacherAsync(List<PendingTrainingStep> history, CancellationToken cancellationToken)
+        {
+            if (history.Count == 0)
+                return;
+
+            for (int i = 0; i < history.Count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                bool shouldAnalyze = i % PikafishTeacherStride == 0 || i >= history.Count - PikafishTeacherTailPlies;
+                if (!shouldAnalyze)
+                    continue;
+
+                PendingTrainingStep step = history[i];
+                PikafishTeacherAnalysis? analysis = await PikafishAdjudicator.TryAnalyzeAsync(
+                    step.UcciHistoryBefore,
+                    step.IsRedTurn,
+                    PikafishTeacherNodes,
+                    cancellationToken).ConfigureAwait(false);
+
+                if (analysis == null)
+                    continue;
+
+                step.TeacherValue = analysis.ValueForCurrentPlayer;
+
+                Move? teacherMove = NotationConverter.UcciToMove(analysis.BestMove);
+                if (teacherMove.HasValue)
+                {
+                    float[] teacherPolicy = new float[8100];
+                    int idx = teacherMove.Value.ToNetworkIndex();
+                    if (idx >= 0 && idx < teacherPolicy.Length)
+                    {
+                        teacherPolicy[idx] = 1.0f;
+                        step.TeacherPolicy = step.IsRedTurn ? teacherPolicy : StateEncoder.FlipPolicy(teacherPolicy);
+                    }
+                }
+            }
+        }
+
+        private List<TrainingExample> FinalizeData(List<PendingTrainingStep> history, float finalResult, Board finalBoard)
         {
             // 三循/百步无进展/步数限制已在 RunGameAsync 内按 GUI 评估器口径裁判:
             //   材料差 >= 1.5 兵 -> finalResult = ±1.0
@@ -346,18 +401,46 @@ namespace ChineseChessAI.Training
                 }
                 else
                 {
-                    valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
+                    valueForCurrentPlayer = step.IsRedTurn ? finalResult : -finalResult;
                 }
 
-                var sparsePolicy = step.policy
+                var sparsePolicy = step.Policy
                     .Select((p, idx) => new ActionProb(idx, p))
                     .Where(x => x.Prob > 0)
                     .ToArray();
 
-                examples.Add(new TrainingExample(step.state, sparsePolicy, valueForCurrentPlayer));
+                ActionProb[]? teacherSparsePolicy = step.TeacherPolicy?
+                    .Select((p, idx) => new ActionProb(idx, p))
+                    .Where(x => x.Prob > 0)
+                    .ToArray();
+
+                examples.Add(new TrainingExample(
+                    step.State,
+                    sparsePolicy,
+                    valueForCurrentPlayer,
+                    step.TeacherValue,
+                    teacherSparsePolicy));
             }
 
             return examples;
+        }
+
+        private sealed class PendingTrainingStep
+        {
+            public PendingTrainingStep(float[] state, float[] policy, bool isRedTurn, string[] ucciHistoryBefore)
+            {
+                State = state;
+                Policy = policy;
+                IsRedTurn = isRedTurn;
+                UcciHistoryBefore = ucciHistoryBefore;
+            }
+
+            public float[] State { get; }
+            public float[] Policy { get; }
+            public bool IsRedTurn { get; }
+            public string[] UcciHistoryBefore { get; }
+            public float? TeacherValue { get; set; }
+            public float[]? TeacherPolicy { get; set; }
         }
 
         private static string ComposeAdjudicationReason(string baseReason, float adjudicatedResult)
@@ -367,6 +450,61 @@ namespace ChineseChessAI.Training
             if (adjudicatedResult < -0.5f)
                 return $"{baseReason}(子力裁判黑胜)";
             return $"{baseReason}(平局)";
+        }
+
+        private static string ComposePikafishAdjudicationReason(string baseReason, PikafishAdjudication adjudication)
+        {
+            string source = adjudication.IsMate ? "Pikafish杀棋裁判" : "Pikafish评估裁判";
+            string detail = $"score {adjudication.ScoreText}";
+            if (adjudication.Depth.HasValue)
+                detail += $", depth {adjudication.Depth.Value}";
+            if (!string.IsNullOrWhiteSpace(adjudication.BestMove))
+                detail += $", best {adjudication.BestMove}";
+
+            if (adjudication.ResultForRed > 0.5f)
+                return $"{baseReason}({source}红胜: {detail})";
+            if (adjudication.ResultForRed < -0.5f)
+                return $"{baseReason}({source}黑胜: {detail})";
+            return $"{baseReason}({source}平局: {detail})";
+        }
+
+        private static async Task<(float Result, string Reason)> AdjudicateQuietEndAsync(
+            Board board,
+            List<Move> moveHistory,
+            string baseReason,
+            CancellationToken cancellationToken)
+        {
+            var ucciHistory = moveHistory.Select(NotationConverter.MoveToUcci).ToArray();
+            PikafishAdjudication? pikafish = await PikafishAdjudicator.TryAdjudicateAsync(
+                ucciHistory,
+                board.IsRedTurn,
+                cancellationToken).ConfigureAwait(false);
+
+            if (pikafish != null)
+                return (pikafish.ResultForRed, ComposePikafishAdjudicationReason(baseReason, pikafish));
+
+            float materialResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
+            return (materialResult, ComposeAdjudicationReason(baseReason, materialResult));
+        }
+
+        private float GetRatingResult(float finalResult, string endReason)
+        {
+            if (Math.Abs(finalResult) < 0.001f)
+                return 0.0f;
+
+            if (!IsWeakAdjudication(endReason))
+                return finalResult;
+
+            // An adjudicated win is useful, but it should not train or rate
+            // like a completed kill. This pushes agents toward finishing won games.
+            float adjudicatedWinValue = Math.Clamp(_materialBias, 0.05f, 0.5f);
+            return MathF.CopySign(adjudicatedWinValue, finalResult);
+        }
+
+        private static bool IsWeakAdjudication(string endReason)
+        {
+            return endReason.Contains("子力裁判", StringComparison.Ordinal)
+                || endReason.Contains("Pikafish评估裁判", StringComparison.Ordinal);
         }
     }
 }

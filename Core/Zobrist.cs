@@ -11,8 +11,15 @@
             var rnd = new Random(42);
             for (int i = 0; i < 90; i++)
                 for (int j = 0; j < 15; j++)
-                    PieceKeys[i, j] = (ulong)rnd.NextInt64();
-            SideKey = (ulong)rnd.NextInt64();
+                    PieceKeys[i, j] = NextUInt64(rnd);
+            SideKey = NextUInt64(rnd);
+        }
+
+        private static ulong NextUInt64(Random rnd)
+        {
+            Span<byte> bytes = stackalloc byte[sizeof(ulong)];
+            rnd.NextBytes(bytes);
+            return BitConverter.ToUInt64(bytes);
         }
 
         public static ulong GetPieceKey(int pos, sbyte piece)

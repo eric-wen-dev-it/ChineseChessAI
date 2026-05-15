@@ -8,6 +8,8 @@ namespace ChineseChessAI.Traditional
 
         public bool SkipPerpetualCheckInsideSearch { get; init; } = true;
 
+        public bool SkipPerpetualCheckAtRoot { get; init; } = false;
+
         public int TranspositionTableEntries { get; init; } = 1_048_576;
 
         public int MateSearchPly { get; init; } = 5;

@@ -13,6 +13,7 @@ namespace ChineseChessAI.Traditional
 
     public sealed class TranspositionTable
     {
+        private const int MateScoreWindow = 10_000;
         private readonly TTEntry[] _entries;
 
         public TranspositionTable(int entryCount)
@@ -20,13 +21,20 @@ namespace ChineseChessAI.Traditional
             _entries = new TTEntry[Math.Max(1024, entryCount)];
         }
 
-        public bool TryGet(ulong hash, out TTEntry entry)
+        public bool TryGet(ulong hash, int ply, int mateScore, out TTEntry entry)
         {
             entry = _entries[GetIndex(hash)];
-            return entry.Hash == hash;
+            if (entry.Hash != hash)
+                return false;
+
+            entry = entry with
+            {
+                Score = ScoreFromTable(entry.Score, ply, mateScore)
+            };
+            return true;
         }
 
-        public void Store(ulong hash, int depth, int score, Move bestMove, TTBound bound)
+        public void Store(ulong hash, int depth, int score, Move bestMove, TTBound bound, int ply, int mateScore)
         {
             int index = GetIndex(hash);
             var existing = _entries[index];
@@ -37,12 +45,30 @@ namespace ChineseChessAI.Traditional
             {
                 Hash = hash,
                 Depth = depth,
-                Score = score,
+                Score = ScoreToTable(score, ply, mateScore),
                 BestMove = bestMove,
                 Bound = bound
             };
         }
 
         private int GetIndex(ulong hash) => (int)(hash % (ulong)_entries.Length);
+
+        private static int ScoreToTable(int score, int ply, int mateScore)
+        {
+            if (score >= mateScore - MateScoreWindow)
+                return score + ply;
+            if (score <= -mateScore + MateScoreWindow)
+                return score - ply;
+            return score;
+        }
+
+        private static int ScoreFromTable(int score, int ply, int mateScore)
+        {
+            if (score >= mateScore - MateScoreWindow)
+                return score - ply;
+            if (score <= -mateScore + MateScoreWindow)
+                return score + ply;
+            return score;
+        }
     }
 }

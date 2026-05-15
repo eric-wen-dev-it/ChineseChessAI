@@ -294,6 +294,18 @@ namespace ChineseChessAI.Training
                 return _agents.OrderByDescending(a => a.Elo).Take(count).ToList();
         }
 
+        public List<AgentMetadata> GetTopNeuralAgents(int count = 10)
+        {
+            lock (_lock)
+            {
+                return _agents
+                    .Where(a => !string.Equals(a.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase))
+                    .OrderByDescending(a => a.Elo)
+                    .Take(count)
+                    .ToList();
+            }
+        }
+
         public PopulationRefreshResult RefreshPopulation(
             int eliteCount,
             int contenderKeepCount,
@@ -440,9 +452,9 @@ namespace ChineseChessAI.Training
                 if (agent == null)
                     return;
                 agent.GamesPlayed++;
-                if (result > 0.5f)
+                if (result > 0.001f)
                     agent.Wins++;
-                else if (result < -0.5f)
+                else if (result < -0.001f)
                     agent.Losses++;
                 else
                     agent.Draws++;

@@ -50,7 +50,7 @@ namespace ChineseChessAI.Traditional
 
             try
             {
-                var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false);
+                var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: _options.SkipPerpetualCheckAtRoot);
                 if (rootMoves.Count == 0)
                 {
                     return new SearchResult(default, -_options.MateScore, 0, 0, _stopwatch.Elapsed, Array.Empty<Move>(), true);
@@ -145,7 +145,7 @@ namespace ChineseChessAI.Traditional
             if (board.GetRepetitionCount() >= 3)
                 return 0;
 
-            if (_table.TryGet(board.CurrentHash, out var entry) && entry.Depth >= depth)
+            if (_table.TryGet(board.CurrentHash, ply, _options.MateScore, out var entry) && entry.Depth >= depth)
             {
                 ttMove = entry.BestMove;
                 if (entry.Bound == TTBound.Exact)
@@ -200,14 +200,14 @@ namespace ChineseChessAI.Traditional
             if (TryFindImmediateMate(board, moves, out var mateMove, cancellationToken))
             {
                 principalVariation.Add(mateMove);
-                _table.Store(board.CurrentHash, depth, _options.MateScore - ply, mateMove, TTBound.Exact);
+                _table.Store(board.CurrentHash, depth, _options.MateScore - ply, mateMove, TTBound.Exact, ply, _options.MateScore);
                 return _options.MateScore - ply;
             }
 
             if (_options.MateSearchPly >= 3 && TryFindForcedCheckmate(board, Math.Min(_options.MateSearchPly, depth + 2), out var forcedMateMove, cancellationToken))
             {
                 principalVariation.Add(forcedMateMove);
-                _table.Store(board.CurrentHash, depth, _options.MateScore - ply - 2, forcedMateMove, TTBound.Exact);
+                _table.Store(board.CurrentHash, depth, _options.MateScore - ply - 2, forcedMateMove, TTBound.Exact, ply, _options.MateScore);
                 return _options.MateScore - ply - 2;
             }
 
@@ -318,7 +318,7 @@ namespace ChineseChessAI.Traditional
             }
 
             TTBound bound = alpha <= originalAlpha ? TTBound.Upper : (alpha >= beta ? TTBound.Lower : TTBound.Exact);
-            _table.Store(board.CurrentHash, depth, alpha, bestMove, bound);
+            _table.Store(board.CurrentHash, depth, alpha, bestMove, bound, ply, _options.MateScore);
 
             principalVariation.Add(bestMove);
             principalVariation.AddRange(bestChildPv);

@@ -28,4 +28,9 @@
     <Folder Include="Protocols\" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="D:\Pikafish.2026-01-02\pikafish.nnue" Link="Pikafish\pikafish.nnue" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('D:\Pikafish.2026-01-02\pikafish.nnue')" />
+    <Content Include="D:\Pikafish.2026-01-02\Windows\*.exe" Link="Pikafish\Windows\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('D:\Pikafish.2026-01-02\Windows')" />
+  </ItemGroup>
+
 </Project>

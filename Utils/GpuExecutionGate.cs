@@ -1,5 +1,3 @@
-using TorchSharp;
-
 namespace ChineseChessAI.Utils
 {
     internal static class GpuExecutionGate
@@ -8,12 +6,6 @@ namespace ChineseChessAI.Utils
 
         public static void Run(Action action)
         {
-            if (!torch.cuda.is_available())
-            {
-                action();
-                return;
-            }
-
             Gate.Wait();
             try
             {
@@ -27,11 +19,6 @@ namespace ChineseChessAI.Utils
 
         public static T Run<T>(Func<T> action)
         {
-            if (!torch.cuda.is_available())
-            {
-                return action();
-            }
-
             Gate.Wait();
             try
             {

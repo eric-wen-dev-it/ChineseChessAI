@@ -48,6 +48,8 @@ namespace ChineseChessAI.MCTS
 
         public bool IsLeaf => Children.IsEmpty;
 
+        public bool IsExpanding => Volatile.Read(ref _isExpanding) != 0;
+
         public double GetPUCTValue(double cPuct, int parentN)
         {
             // 【核心修复】：快照式读取，确保在计算过程中 vl, n, w 是一致的

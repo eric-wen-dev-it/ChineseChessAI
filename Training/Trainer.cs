@@ -17,6 +17,8 @@ namespace ChineseChessAI.Training
         private const double InitialLearningRate = 0.0002;
         private const double MinLearningRate = 0.00001;
         private const float HardValueTarget = 0.95f;
+        private const float TeacherValueWeight = 0.65f;
+        private const float TeacherPolicyWeight = 0.35f;
         private int _iterationCount = 0;
 
         public Trainer(CChessNet model)
@@ -70,12 +72,13 @@ namespace ChineseChessAI.Training
                     statesList.Add(tensor(ex.State).view(14, 10, 9));
 
                     // 将节约内存的稀疏策略，在训练这一刻还原为稠密 Tensor (用完即抛，不占常驻内存)
-                    float[] densePolicy = new float[8100];
-                    foreach (var p in ex.SparsePolicy)
-                        densePolicy[p.Index] = p.Prob;
+                    float[] densePolicy = BuildPolicyTarget(ex);
 
                     policiesList.Add(tensor(densePolicy));
-                    valuesList.Add(tensor(SmoothValueTarget(ex.Value)));
+                    float valueTarget = ex.TeacherValue.HasValue
+                        ? Lerp(ex.Value, ex.TeacherValue.Value, TeacherValueWeight)
+                        : ex.Value;
+                    valuesList.Add(tensor(SmoothValueTarget(valueTarget)));
                 }
 
                 // MoveToOuterDisposeScope：将 stacked 张量移出 buildScope，
@@ -150,6 +153,53 @@ namespace ChineseChessAI.Training
             if (value <= -1.0f)
                 return -HardValueTarget;
             return value;
+        }
+
+        private static float[] BuildPolicyTarget(TrainingExample ex)
+        {
+            float[] densePolicy = new float[8100];
+            AddSparsePolicy(densePolicy, ex.SparsePolicy, 1.0f);
+
+            if (ex.TeacherSparsePolicy is { Length: > 0 })
+            {
+                for (int i = 0; i < densePolicy.Length; i++)
+                    densePolicy[i] *= 1.0f - TeacherPolicyWeight;
+
+                AddSparsePolicy(densePolicy, ex.TeacherSparsePolicy, TeacherPolicyWeight);
+            }
+
+            NormalizePolicy(densePolicy);
+            return densePolicy;
+        }
+
+        private static void AddSparsePolicy(float[] densePolicy, ActionProb[]? sparsePolicy, float weight)
+        {
+            if (sparsePolicy == null)
+                return;
+
+            foreach (var p in sparsePolicy)
+            {
+                if (p.Index >= 0 && p.Index < densePolicy.Length && float.IsFinite(p.Prob) && p.Prob > 0)
+                    densePolicy[p.Index] += p.Prob * weight;
+            }
+        }
+
+        private static void NormalizePolicy(float[] densePolicy)
+        {
+            float sum = 0f;
+            for (int i = 0; i < densePolicy.Length; i++)
+                sum += densePolicy[i];
+
+            if (sum <= 0 || !float.IsFinite(sum))
+                return;
+
+            for (int i = 0; i < densePolicy.Length; i++)
+                densePolicy[i] /= sum;
+        }
+
+        private static float Lerp(float from, float to, float weight)
+        {
+            return from + (to - from) * Math.Clamp(weight, 0.0f, 1.0f);
         }
 
         public double GetCurrentLR()

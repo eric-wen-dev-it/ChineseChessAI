@@ -2,7 +2,12 @@ namespace ChineseChessAI.Core
 {
     public record struct ActionProb(int Index, float Prob);
 
-    public record TrainingExample(float[] State, ActionProb[] SparsePolicy, float Value);
+    public record TrainingExample(
+        float[] State,
+        ActionProb[] SparsePolicy,
+        float Value,
+        float? TeacherValue = null,
+        ActionProb[]? TeacherSparsePolicy = null);
 
     public record MasterGameData
     {

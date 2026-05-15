@@ -710,8 +710,7 @@ namespace ChineseChessAI.Training
 
                                             if (result.IsSuccess)
                                             {
-                                                float resA = result.ResultStr == "平局" ? 0
-                                                    : (result.ResultStr == (aIsRed ? "红胜" : "黑胜") ? 1.0f : -1.0f);
+                                                float resA = aIsRed ? result.RatingResultForRed : -result.RatingResultForRed;
 
                                                 // 【修复 P1】：捕获赛前 ELO 以确保更新公平
                                                 double eloABefore = agentMetaA.Elo;
@@ -806,8 +805,8 @@ namespace ChineseChessAI.Training
                         {
                             nextLogAt += 10;
                             _leagueManager.SaveMetadata();
-                            var top = _leagueManager.GetTopAgents(5);
-                            Log("--- [当前排名 Top 5] ---");
+                            var top = _leagueManager.GetTopNeuralAgents(5);
+                            Log("--- [当前排名 Top 5 - Neural only] ---");
                             foreach (var t in top)
                                 Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins * 100.0 / Math.Max(1, t.GamesPlayed)):F1}%");
                             // 【优化 P3 #8】：移除阻塞式 GC.Collect()，交给 .NET 自动管理
@@ -1129,7 +1128,9 @@ namespace ChineseChessAI.Training
                     OpeningBook = book,
                     OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
                     MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
-                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120)
+                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
+                    SkipPerpetualCheckAtRoot = true,
+                    MateSearchPly = 3
                 };
                 return new LeagueEngineHandle(new TraditionalGameEngineAdapter(new TraditionalEngine(options)));
             }

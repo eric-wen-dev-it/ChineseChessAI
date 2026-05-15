@@ -157,6 +157,30 @@ namespace ChineseChessAI.Core
             return count >= 2;
         }
 
+        public bool WillRepeatPosition(int from, int to)
+        {
+            return GetProjectedRepetitionCount(from, to) > 0;
+        }
+
+        public int GetProjectedRepetitionCount(int from, int to)
+        {
+            sbyte piece = _cells[from];
+            if (piece == 0)
+                return 0;
+
+            sbyte captured = _cells[to];
+            ulong nextHash = CurrentHash;
+
+            nextHash ^= Zobrist.GetPieceKey(from, piece);
+            if (captured != 0)
+                nextHash ^= Zobrist.GetPieceKey(to, captured);
+            nextHash ^= Zobrist.GetPieceKey(to, piece);
+            nextHash ^= Zobrist.SideKey;
+
+            _hashCounts.TryGetValue(nextHash, out int count);
+            return count;
+        }
+
         public void Push(int from, int to)
         {
             sbyte piece = _cells[from];
@@ -244,6 +268,8 @@ namespace ChineseChessAI.Core
             _hashCounts.TryGetValue(CurrentHash, out int count);
             return count;
         }
+
+        public int HistoryCount => _history.Count;
 
         public IEnumerable<GameState> GetHistory() => _history;
 

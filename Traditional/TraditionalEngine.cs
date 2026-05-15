@@ -41,7 +41,7 @@ namespace ChineseChessAI.Traditional
         private SearchResult SearchParallelRoot(Board board, SearchLimits limits, CancellationToken cancellationToken)
         {
             var stopwatch = Stopwatch.StartNew();
-            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false);
+            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: _options.SkipPerpetualCheckAtRoot);
             if (rootMoves.Count == 0)
                 return new SearchResult(default, -_options.MateScore, 0, 0, stopwatch.Elapsed, Array.Empty<Move>(), true);
 
@@ -139,6 +139,7 @@ namespace ChineseChessAI.Traditional
                 MateScore = _options.MateScore,
                 UseQuiescenceSearch = _options.UseQuiescenceSearch,
                 SkipPerpetualCheckInsideSearch = _options.SkipPerpetualCheckInsideSearch,
+                SkipPerpetualCheckAtRoot = _options.SkipPerpetualCheckAtRoot,
                 TranspositionTableEntries = Math.Max(16_384, _options.TranspositionTableEntries / Math.Max(1, _options.RootParallelism)),
                 MateSearchPly = _options.MateSearchPly,
                 UseNullMovePruning = _options.UseNullMovePruning,
