@@ -24,7 +24,7 @@ namespace ChineseChessAI.Training
         {
             int depth = Math.Clamp(searchBudget, 1, 12);
             var policy = new float[8100];
-            var legalMoves = _rules.GetLegalMoves(board, skipPerpetualCheck: true, cancellationToken: cancellationToken);
+            var legalMoves = _rules.GetLegalMoves(board, skipPerpetualCheck: false, cancellationToken: cancellationToken);
             if (legalMoves.Count == 0)
                 return Task.FromResult((default(Move), policy));
 

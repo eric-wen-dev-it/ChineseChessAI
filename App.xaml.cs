@@ -77,8 +77,8 @@ namespace ChineseChessAI
             if (!_suppressErrorDialogs)
             {
                 MessageBox.Show(
-                    $"绋嬪簭鎹曡幏鍒版湭澶勭悊寮傚父锛岃鎯呭凡鍐欏叆锛歕n{CrashLogPath}",
-                    "杩愯寮傚父",
+                    $"程序遇到未处理异常，已写入崩溃日志:\n{CrashLogPath}",
+                    "未处理异常",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }

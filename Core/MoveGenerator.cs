@@ -641,7 +641,7 @@ namespace ChineseChessAI.Core
                 board.Push(defenderMove.From, defenderMove.To);
                 try
                 {
-                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, budget, cancellationToken))
+                    if (HasForcedKill(board, isRedAttacker, MateSearchDepth, budget, cancellationToken) != true)
                         return false;
                 }
                 finally
@@ -653,7 +653,7 @@ namespace ChineseChessAI.Core
             return true;
         }
 
-        private bool HasForcedKill(
+        private bool? HasForcedKill(
             Board board,
             bool isRedAttacker,
             int depth,
@@ -662,7 +662,7 @@ namespace ChineseChessAI.Core
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!budget.TryConsume())
-                return false;
+                return null;
 
             if (depth <= 0)
                 return false;
@@ -671,11 +671,12 @@ namespace ChineseChessAI.Core
             if (_mateMemo.TryGetValue(key, out bool cached))
                 return cached;
 
+            bool sawBudgetExhaustedLine = false;
             foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 if (!budget.TryConsume())
-                    return false;
+                    return null;
 
                 board.Push(attackerMove.From, attackerMove.To);
                 try
@@ -688,16 +689,24 @@ namespace ChineseChessAI.Core
                     }
 
                     bool defenderHasEscape = false;
+                    bool defenderLineUnknown = false;
                     foreach (var defenderMove in defenderMoves)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         if (!budget.TryConsume())
-                            return false;
+                            return null;
 
                         board.Push(defenderMove.From, defenderMove.To);
                         try
                         {
-                            if (!HasForcedKill(board, isRedAttacker, depth - 1, budget, cancellationToken))
+                            bool? childResult = HasForcedKill(board, isRedAttacker, depth - 1, budget, cancellationToken);
+                            if (childResult == null)
+                            {
+                                defenderLineUnknown = true;
+                                break;
+                            }
+
+                            if (childResult != true)
                             {
                                 defenderHasEscape = true;
                                 break;
@@ -707,6 +716,12 @@ namespace ChineseChessAI.Core
                         {
                             board.Pop();
                         }
+                    }
+
+                    if (defenderLineUnknown)
+                    {
+                        sawBudgetExhaustedLine = true;
+                        continue;
                     }
 
                     if (!defenderHasEscape)
@@ -720,6 +735,9 @@ namespace ChineseChessAI.Core
                     board.Pop();
                 }
             }
+
+            if (sawBudgetExhaustedLine)
+                return null;
 
             _mateMemo[key] = false;
             return false;

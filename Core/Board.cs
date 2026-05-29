@@ -98,9 +98,9 @@ namespace ChineseChessAI.Core
                 1 => 0,
                 2 => 2,
                 3 => 2,
-                4 => 4,
+                4 => 4.5f,
                 5 => 9,
-                6 => 4.5f,
+                6 => 4,
                 7 => 1,
                 _ => 0
             };
@@ -384,6 +384,19 @@ namespace ChineseChessAI.Core
             _hashCounts.Clear();
             _hashCounts[CurrentHash] = 1; // 载入新局面时初始化计数
             LastMove = null;
+        }
+
+        public void SwitchTurnPreservingHistory()
+        {
+            CurrentHash ^= Zobrist.SideKey;
+            IsRedTurn = !IsRedTurn;
+
+            if (!_hashCounts.TryGetValue(CurrentHash, out int count))
+                count = 0;
+            _hashCounts[CurrentHash] = count + 1;
+
+            LastMove = null;
+            LastMoveWasIrreversible = false;
         }
 
     }

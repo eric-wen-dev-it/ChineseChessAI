@@ -20,7 +20,7 @@ namespace ChineseChessAI.Training
         public int ParentId { get; set; } = -1;
 
         public double Temperature { get; set; } = 1.0;
-        public double Cpuct { get; set; } = 2.5;
+        public double Cpuct { get; set; } = 1.6;
         public int MctsSimulations { get; set; } = 400;
         public string EngineKind { get; set; } = "Mcts";
         public int TraditionalDepth { get; set; } = 5;
@@ -29,7 +29,7 @@ namespace ChineseChessAI.Training
         {
             var rnd = customRnd ?? Random.Shared;
             Temperature = 0.1 + rnd.NextDouble() * 1.9;
-            Cpuct = 1.0 + rnd.NextDouble() * 4.0;
+            Cpuct = 1.0 + rnd.NextDouble() * 2.0;
             MctsSimulations = 100 + rnd.Next(701);
             EngineKind = "Mcts";
             TraditionalDepth = 4 + rnd.Next(3);
@@ -43,7 +43,7 @@ namespace ChineseChessAI.Training
             int simSpan = wideMutation ? 180 : 90;
 
             Temperature = Math.Clamp(parent.Temperature + ((rnd.NextDouble() * 2.0) - 1.0) * tempSpan, 0.1, 2.0);
-            Cpuct = Math.Clamp(parent.Cpuct + ((rnd.NextDouble() * 2.0) - 1.0) * cpuctSpan, 1.0, 5.0);
+            Cpuct = Math.Clamp(parent.Cpuct + ((rnd.NextDouble() * 2.0) - 1.0) * cpuctSpan, 0.8, 3.0);
             MctsSimulations = Math.Clamp(parent.MctsSimulations + rnd.Next(-simSpan, simSpan + 1), 100, 800);
             EngineKind = parent.EngineKind;
             TraditionalDepth = Math.Clamp(parent.TraditionalDepth + rnd.Next(-1, 2), 3, 8);
@@ -126,6 +126,15 @@ namespace ChineseChessAI.Training
                     }
                     catch
                     {
+                        try
+                        {
+                            string corruptPath = _metadataPath + $".corrupt_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
+                            File.Move(_metadataPath, corruptPath, overwrite: false);
+                        }
+                        catch
+                        {
+                        }
+
                         _agents = new List<AgentMetadata>();
                     }
                 }
@@ -183,7 +192,13 @@ namespace ChineseChessAI.Training
             lock (_lock)
             {
                 string json = JsonSerializer.Serialize(_agents, new JsonSerializerOptions { WriteIndented = true });
-                File.WriteAllText(_metadataPath, json);
+                string? directory = Path.GetDirectoryName(_metadataPath);
+                if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                    Directory.CreateDirectory(directory);
+
+                string tempPath = _metadataPath + $".tmp_{Guid.NewGuid():N}";
+                File.WriteAllText(tempPath, json);
+                File.Move(tempPath, _metadataPath, overwrite: true);
             }
         }
 
@@ -501,7 +516,9 @@ namespace ChineseChessAI.Training
 
             if (File.Exists(parentPath))
             {
-                File.Copy(parentPath, childPath, overwrite: true);
+                string tempChildPath = childPath + $".tmp_{Guid.NewGuid():N}";
+                File.Copy(parentPath, tempChildPath, overwrite: true);
+                File.Move(tempChildPath, childPath, overwrite: true);
                 foreach (string suffix in companionSuffixes)
                 {
                     string childCompanion = childPath + suffix;
@@ -509,17 +526,6 @@ namespace ChineseChessAI.Training
                         File.Delete(childCompanion);
                 }
                 return;
-            }
-
-            if (File.Exists(childPath))
-            {
-                File.Delete(childPath);
-            }
-            foreach (string suffix in companionSuffixes)
-            {
-                string childCompanion = childPath + suffix;
-                if (File.Exists(childCompanion))
-                    File.Delete(childCompanion);
             }
         }
     }

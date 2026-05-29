@@ -67,12 +67,12 @@ namespace ChineseChessAI.Traditional
                 return true;
             }
 
-            int total = candidates.Sum(x => x.Value);
+            int total = candidates.Sum(x => WeightedCount(x.Value));
             int roll = Random.Shared.Next(total);
             int cumulative = 0;
             foreach (var candidate in candidates)
             {
-                cumulative += candidate.Value;
+                cumulative += WeightedCount(candidate.Value);
                 if (roll < cumulative)
                 {
                     move = candidate.Key;
@@ -98,7 +98,12 @@ namespace ChineseChessAI.Traditional
             if (count <= 0)
                 return 0;
 
-            return Math.Min(90_000, 5_000 + (int)(Math.Log2(count + 1) * 12_000));
+            return Math.Min(30_000, 3_000 + (int)(Math.Log2(count + 1) * 6_000));
+        }
+
+        private static int WeightedCount(int count)
+        {
+            return Math.Max(1, (int)Math.Sqrt(Math.Max(1, count)));
         }
 
         public IReadOnlyList<(Move Move, int Count)> GetBookMoves(Board board, int limit = 16)

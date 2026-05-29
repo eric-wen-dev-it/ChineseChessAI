@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Utils;
@@ -28,8 +28,6 @@ namespace ChineseChessAI.Training
         private readonly int _maxMoves;
         private readonly int _exploreMoves;
         private readonly float _materialBias;
-        private readonly float _earlyDrawPenalty;
-        private readonly float _lateDrawPenalty;
 
         private readonly double _lowTempA;
         private readonly double _lowTempB;
@@ -38,6 +36,8 @@ namespace ChineseChessAI.Training
         private const int PikafishTeacherNodes = 2000;
         private const int PikafishTeacherStride = 4;
         private const int PikafishTeacherTailPlies = 12;
+        private const int PikafishTeacherMaxAnalysesPerSide = 6;
+        private static readonly TimeSpan PikafishTeacherAnalysisTimeout = TimeSpan.FromSeconds(3);
         private readonly RuntimeDiagnostics.RollingCounter _legalMoveMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayLegalMovesMs", 50);
         private readonly RuntimeDiagnostics.RollingCounter _stateEncodeMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlayStateEncodeMs", 50);
         private readonly RuntimeDiagnostics.RollingCounter _searchMsCounter = new RuntimeDiagnostics.RollingCounter("SelfPlaySearchMs", 50);
@@ -48,13 +48,11 @@ namespace ChineseChessAI.Training
             MCTSEngine engineB,
             int maxMoves = 150,
             int exploreMoves = 40,
-            float materialBias = 0.4f,
+            float materialBias = 0.1f,
             double lowTempA = 0.1,
             double lowTempB = 0.1,
             int simsA = 400,
-            int simsB = 400,
-            float earlyDrawPenalty = 0.0f,
-            float lateDrawPenalty = -0.05f)
+            int simsB = 400)
         {
             _engineA = new MctsGameEngineAdapter(engineA);
             _engineB = new MctsGameEngineAdapter(engineB);
@@ -66,8 +64,6 @@ namespace ChineseChessAI.Training
             _lowTempB = lowTempB;
             _simsA = simsA;
             _simsB = simsB;
-            _earlyDrawPenalty = earlyDrawPenalty;
-            _lateDrawPenalty = lateDrawPenalty;
         }
 
         public SelfPlay(
@@ -75,13 +71,11 @@ namespace ChineseChessAI.Training
             IGameEngine engineB,
             int maxMoves = 150,
             int exploreMoves = 40,
-            float materialBias = 0.4f,
+            float materialBias = 0.1f,
             double lowTempA = 0.1,
             double lowTempB = 0.1,
             int simsA = 400,
-            int simsB = 400,
-            float earlyDrawPenalty = 0.0f,
-            float lateDrawPenalty = -0.05f)
+            int simsB = 400)
         {
             _engineA = engineA;
             _engineB = engineB;
@@ -93,8 +87,6 @@ namespace ChineseChessAI.Training
             _lowTempB = lowTempB;
             _simsA = simsA;
             _simsB = simsB;
-            _earlyDrawPenalty = earlyDrawPenalty;
-            _lateDrawPenalty = lateDrawPenalty;
         }
 
         public async Task<GameResult> RunGameAsync(bool engineAIsRed, Func<Board, Task>? onMovePerformed = null, System.Threading.CancellationToken cancellationToken = default)
@@ -323,7 +315,7 @@ namespace ChineseChessAI.Training
 
             if (validMoves.Count == 0)
                 return selectableMoves[Random.Shared.Next(selectableMoves.Count)];
-            if (temperature < 0.1)
+            if (temperature <= 0.1)
                 return validMoves.OrderByDescending(x => x.prob).First().move;
 
             double[] poweredPi = validMoves.Select(x => Math.Pow(x.prob, 1.0 / temperature)).ToArray();
@@ -348,19 +340,28 @@ namespace ChineseChessAI.Training
             if (history.Count == 0)
                 return;
 
-            for (int i = 0; i < history.Count; i++)
+            foreach (int i in SelectPikafishTeacherIndexes(history.Count))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                bool shouldAnalyze = i % PikafishTeacherStride == 0 || i >= history.Count - PikafishTeacherTailPlies;
-                if (!shouldAnalyze)
-                    continue;
 
                 PendingTrainingStep step = history[i];
-                PikafishTeacherAnalysis? analysis = await PikafishAdjudicator.TryAnalyzeAsync(
-                    step.UcciHistoryBefore,
-                    step.IsRedTurn,
-                    PikafishTeacherNodes,
-                    cancellationToken).ConfigureAwait(false);
+                PikafishTeacherAnalysis? analysis;
+                using (var analysisCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+                {
+                    analysisCts.CancelAfter(PikafishTeacherAnalysisTimeout);
+                    try
+                    {
+                        analysis = await PikafishAdjudicator.TryAnalyzeAsync(
+                            step.UcciHistoryBefore,
+                            step.IsRedTurn,
+                            PikafishTeacherNodes,
+                            analysisCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        continue;
+                    }
+                }
 
                 if (analysis == null)
                     continue;
@@ -381,12 +382,32 @@ namespace ChineseChessAI.Training
             }
         }
 
+        private static List<int> SelectPikafishTeacherIndexes(int historyCount)
+        {
+            var selected = new SortedSet<int>();
+            for (int i = 0; i < historyCount; i += PikafishTeacherStride)
+                selected.Add(i);
+
+            int tailStart = Math.Max(0, historyCount - PikafishTeacherTailPlies);
+            for (int i = tailStart; i < historyCount; i++)
+                selected.Add(i);
+
+            if (selected.Count <= PikafishTeacherMaxAnalysesPerSide)
+                return selected.ToList();
+
+            var values = selected.ToList();
+            var capped = new SortedSet<int>();
+            for (int i = 0; i < PikafishTeacherMaxAnalysesPerSide; i++)
+            {
+                int sourceIndex = (int)Math.Round(i * (values.Count - 1) / (double)(PikafishTeacherMaxAnalysesPerSide - 1));
+                capped.Add(values[sourceIndex]);
+            }
+
+            return capped.ToList();
+        }
+
         private List<TrainingExample> FinalizeData(List<PendingTrainingStep> history, float finalResult, Board finalBoard)
         {
-            // 三循/百步无进展/步数限制已在 RunGameAsync 内按 GUI 评估器口径裁判:
-            //   材料差 >= 1.5 兵 -> finalResult = ±1.0
-            //   材料差 <  1.5 兵 -> finalResult = 0 (真平局)
-            // 因此到这里 finalResult==0 即真平局，可走 early/late draw 惩罚路径。
             var examples = new List<TrainingExample>(history.Count);
             bool isTrueDraw = Math.Abs(finalResult) < 0.001f;
 
@@ -396,8 +417,7 @@ namespace ChineseChessAI.Training
                 float valueForCurrentPlayer;
                 if (isTrueDraw)
                 {
-                    float progress = (float)i / Math.Max(1, history.Count - 1);
-                    valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty;
+                    valueForCurrentPlayer = 0.0f;
                 }
                 else
                 {
@@ -452,37 +472,13 @@ namespace ChineseChessAI.Training
             return $"{baseReason}(平局)";
         }
 
-        private static string ComposePikafishAdjudicationReason(string baseReason, PikafishAdjudication adjudication)
-        {
-            string source = adjudication.IsMate ? "Pikafish杀棋裁判" : "Pikafish评估裁判";
-            string detail = $"score {adjudication.ScoreText}";
-            if (adjudication.Depth.HasValue)
-                detail += $", depth {adjudication.Depth.Value}";
-            if (!string.IsNullOrWhiteSpace(adjudication.BestMove))
-                detail += $", best {adjudication.BestMove}";
-
-            if (adjudication.ResultForRed > 0.5f)
-                return $"{baseReason}({source}红胜: {detail})";
-            if (adjudication.ResultForRed < -0.5f)
-                return $"{baseReason}({source}黑胜: {detail})";
-            return $"{baseReason}({source}平局: {detail})";
-        }
-
         private static async Task<(float Result, string Reason)> AdjudicateQuietEndAsync(
             Board board,
             List<Move> moveHistory,
             string baseReason,
             CancellationToken cancellationToken)
         {
-            var ucciHistory = moveHistory.Select(NotationConverter.MoveToUcci).ToArray();
-            PikafishAdjudication? pikafish = await PikafishAdjudicator.TryAdjudicateAsync(
-                ucciHistory,
-                board.IsRedTurn,
-                cancellationToken).ConfigureAwait(false);
-
-            if (pikafish != null)
-                return (pikafish.ResultForRed, ComposePikafishAdjudicationReason(baseReason, pikafish));
-
+            await Task.CompletedTask.ConfigureAwait(false);
             float materialResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
             return (materialResult, ComposeAdjudicationReason(baseReason, materialResult));
         }

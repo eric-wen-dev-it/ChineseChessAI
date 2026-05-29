@@ -20,9 +20,13 @@ namespace ChineseChessAI.Training
     {
         private const int DefaultNodes = 5000;
         private const int WinThresholdCentipawns = 250;
-        private static readonly SemaphoreSlim ClientLock = new(1, 1);
-        private static PikafishEvaluationClient? _client;
+        private const int MaxClientCount = 4;
+        private static readonly SemaphoreSlim ClientSlots = new(MaxClientCount, MaxClientCount);
+        private static readonly ConcurrentBag<PikafishEvaluationClient> Clients = new();
+        private static readonly TimeSpan InitializationRetryDelay = TimeSpan.FromSeconds(30);
+        private static readonly object InitializationStateLock = new();
         private static bool _initializationFailed;
+        private static DateTimeOffset _nextInitializationAttemptUtc = DateTimeOffset.MinValue;
 
         public static async Task<PikafishAdjudication?> TryAdjudicateAsync(
             IReadOnlyList<string> ucciHistory,
@@ -69,24 +73,40 @@ namespace ChineseChessAI.Training
             int nodes,
             CancellationToken cancellationToken)
         {
-            if (_initializationFailed)
+            if (!CanAttemptInitialization())
                 return null;
 
-            await ClientLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await ClientSlots.WaitAsync(cancellationToken).ConfigureAwait(false);
+            PikafishEvaluationClient? client = null;
+            bool returnClientToPool = false;
             try
             {
-                _client ??= await CreateClientAsync(cancellationToken).ConfigureAwait(false);
-                if (_client == null)
+                client = await RentClientAsync(cancellationToken).ConfigureAwait(false);
+                if (client == null)
                     return null;
 
-                PikafishSearchScore? score = await _client.EvaluateAsync(
+                PikafishSearchScore? score = await client.EvaluateAsync(
                     ucciHistory,
                     redToMove,
                     nodes,
                     cancellationToken).ConfigureAwait(false);
+                returnClientToPool = true;
 
                 if (score == null)
                     return null;
+
+                if (score.BestMove == "0000" || score.BestMove == "(none)")
+                {
+                    const float valueForCurrentPlayer = -1.0f;
+                    float valueForRed = redToMove ? valueForCurrentPlayer : -valueForCurrentPlayer;
+                    return new PikafishTeacherAnalysis(
+                        valueForCurrentPlayer,
+                        valueForRed,
+                        score.BestMove,
+                        "bestmove none",
+                        score.Depth,
+                        IsMate: true);
+                }
 
                 if (score.MatePly.HasValue)
                 {
@@ -118,18 +138,56 @@ namespace ChineseChessAI.Training
             }
             catch (OperationCanceledException)
             {
+                client?.Dispose();
+                returnClientToPool = false;
                 throw;
             }
             catch (Exception ex)
             {
                 RuntimeDiagnostics.Log($"[Pikafish裁判] 不可用，回退子力裁判: {ex.Message}");
-                _client?.Dispose();
-                _client = null;
+                client?.Dispose();
+                returnClientToPool = false;
                 return null;
             }
             finally
             {
-                ClientLock.Release();
+                if (returnClientToPool && client != null)
+                    Clients.Add(client);
+                ClientSlots.Release();
+            }
+        }
+
+        private static async Task<PikafishEvaluationClient?> RentClientAsync(CancellationToken cancellationToken)
+        {
+            if (Clients.TryTake(out var client))
+                return client;
+
+            return await CreateClientAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        private static bool CanAttemptInitialization()
+        {
+            lock (InitializationStateLock)
+            {
+                return !_initializationFailed || DateTimeOffset.UtcNow >= _nextInitializationAttemptUtc;
+            }
+        }
+
+        private static void MarkInitializationSucceeded()
+        {
+            lock (InitializationStateLock)
+            {
+                _initializationFailed = false;
+                _nextInitializationAttemptUtc = DateTimeOffset.MinValue;
+            }
+        }
+
+        private static void MarkInitializationFailed()
+        {
+            lock (InitializationStateLock)
+            {
+                _initializationFailed = true;
+                _nextInitializationAttemptUtc = DateTimeOffset.UtcNow + InitializationRetryDelay;
             }
         }
 
@@ -144,7 +202,7 @@ namespace ChineseChessAI.Training
             if (enginePaths.Count == 0)
             {
                 RuntimeDiagnostics.Log("[Pikafish裁判] 未找到 Pikafish 可执行文件，回退子力裁判。");
-                _initializationFailed = true;
+                MarkInitializationFailed();
                 return null;
             }
 
@@ -157,6 +215,7 @@ namespace ChineseChessAI.Training
                     client = new PikafishEvaluationClient(enginePath);
                     await client.InitializeAsync(cancellationToken).ConfigureAwait(false);
                     RuntimeDiagnostics.Log($"[Pikafish裁判] 已加载: {enginePath}");
+                    MarkInitializationSucceeded();
                     return client;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -167,7 +226,7 @@ namespace ChineseChessAI.Training
                 }
             }
 
-            _initializationFailed = true;
+            MarkInitializationFailed();
             if (lastError != null)
                 RuntimeDiagnostics.Log($"[Pikafish裁判] 全部候选启动失败，回退子力裁判: {lastError.Message}");
             return null;

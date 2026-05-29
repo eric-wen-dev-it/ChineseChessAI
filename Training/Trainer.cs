@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Utils;
 using System.IO;
@@ -231,12 +231,18 @@ namespace ChineseChessAI.Training
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                     Directory.CreateDirectory(dir);
 
-                ((TorchSharp.Modules.OptimizerHelper)_optimizer).save_state_dict(optimizerPath);
-                File.WriteAllText(sidecarPath, JsonSerializer.Serialize(new OptimizerSidecar
+                string tempOptimizerPath = optimizerPath + $".tmp_{Guid.NewGuid():N}";
+                string tempSidecarPath = sidecarPath + $".tmp_{Guid.NewGuid():N}";
+
+                ((TorchSharp.Modules.OptimizerHelper)_optimizer).save_state_dict(tempOptimizerPath);
+                File.WriteAllText(tempSidecarPath, JsonSerializer.Serialize(new OptimizerSidecar
                 {
                     IterationCount = _iterationCount,
                     LearningRate = GetCurrentLR()
                 }));
+
+                File.Move(tempOptimizerPath, optimizerPath, overwrite: true);
+                File.Move(tempSidecarPath, sidecarPath, overwrite: true);
             }
             catch (Exception ex)
             {
@@ -256,12 +262,17 @@ namespace ChineseChessAI.Training
                 ((TorchSharp.Modules.OptimizerHelper)_optimizer).load_state_dict(optimizerPath);
 
                 int restoredIterations = 0;
+                double? restoredLearningRate = null;
                 if (File.Exists(sidecarPath))
                 {
                     string json = File.ReadAllText(sidecarPath);
                     var sidecar = JsonSerializer.Deserialize<OptimizerSidecar>(json);
                     if (sidecar != null)
+                    {
                         restoredIterations = sidecar.IterationCount;
+                        if (double.IsFinite(sidecar.LearningRate) && sidecar.LearningRate > 0)
+                            restoredLearningRate = sidecar.LearningRate;
+                    }
                 }
 
                 _iterationCount = restoredIterations;
@@ -270,6 +281,13 @@ namespace ChineseChessAI.Training
                 for (int i = 0; i < restoredIterations; i++)
                 {
                     _scheduler.step();
+                    ClampLearningRate();
+                }
+
+                if (restoredLearningRate.HasValue)
+                {
+                    foreach (var group in _optimizer.ParamGroups)
+                        group.LearningRate = restoredLearningRate.Value;
                     ClampLearningRate();
                 }
 

@@ -10,10 +10,10 @@ from pathlib import Path
 
 
 LINE_TS = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) (?P<msg>.*)$")
-LEAGUE_START = re.compile(r"=== .*?(\d+) 智能体联赛启动 ===")
+LEAGUE_START = re.compile(r"=== .*?(\d+) 智能体联赛启动")
 GAME_START = re.compile(
-    r"\[对局 #(?P<id>\d+) 开始\] Agent_(?P<a>\d+)\(ELO:(?P<aelo>-?\d+(?:\.\d+)?) DNA:S(?P<asim>\d+)/C(?P<acpuct>\d+(?:\.\d+)?)/T(?P<atemp>\d+(?:\.\d+)?)\) "
-    r"VS Agent_(?P<b>\d+)\(ELO:(?P<belo>-?\d+(?:\.\d+)?) DNA:S(?P<bsim>\d+)/C(?P<bcpuct>\d+(?:\.\d+)?)/T(?P<btemp>\d+(?:\.\d+)?)\)"
+    r"\[对局 #(?P<id>\d+) 开始\] Agent_(?P<a>\d+)\(ELO:(?P<aelo>-?\d+(?:\.\d+)?) (?P<adna>[^)]*)\) "
+    r"VS Agent_(?P<b>\d+)\(ELO:(?P<belo>-?\d+(?:\.\d+)?) (?P<bdna>[^)]*)\)"
 )
 GAME_END = re.compile(
     r"\[对局 #(?P<id>\d+) 结束\] Agent_(?P<a>\d+)\(ELO:(?P<aelo>-?\d+(?:\.\d+)?)\) "
@@ -24,12 +24,14 @@ TRAIN_START = re.compile(r"\[周期训练\] 开始：.*?大师样本 (?P<master>
 TRAIN_DONE = re.compile(r"\[周期训练\] 完成：训练 (?P<agents>\d+) 个智能体，使用 (?P<samples>\d+) 条样本，平均损失 (?P<loss>-?\d+(?:\.\d+)?)")
 TRAIN_CLEAN = re.compile(r"\[周期训练\] 联赛样本清理：保留最近 (?P<games>\d+) 局（(?P<samples>\d+) 条），删除 (?P<deleted>\d+) 局旧对局。")
 TOP_ID = re.compile(r"ID:(?P<id>\d+) ELO:(?P<elo>-?\d+(?:\.\d+)?) 胜率:(?P<wr>\d+(?:\.\d+)?)%")
+DNA_MCTS = re.compile(r"DNA:S(?P<sims>\d+)/C(?P<cpuct>\d+(?:\.\d+)?)/T(?P<temp>\d+(?:\.\d+)?)")
+DNA_TRADITIONAL = re.compile(r"Traditional:D(?P<depth>\d+)")
 COUNTER = re.compile(r"\[(?P<name>[A-Za-z][A-Za-z0-9]+)(?:/[0-9a-f]+)?\] samples=(?P<samples>\d+) avg=(?P<avg>-?\d+(?:\.\d+)?) max=(?P<max>-?\d+(?:\.\d+)?)")
 EVAL_START = re.compile(
     r"Evaluation started: candidate=(?P<candidate>[^,]+), baseline=(?P<baseline>[^,]+), games=(?P<games>\d+), sims=(?P<sims>\d+), c_puct=(?P<cpuct>\d+(?:\.\d+)?), root_noise=(?P<noise>true|false)"
 )
 EVAL_RESULT = re.compile(
-    r"\[Eval (?P<idx>\d+)/(?P<total>\d+)\] result=(?P<result>[^,]+), plies=(?P<plies>\d+), reason=(?P<reason>.*?), game_time=(?P<minutes>\d+(?:\.\d+)?)m, score=(?P<score>\d+(?:\.\d+)?)/(?P<played>\d+) \((?P<pct>\d+(?:\.\d+)?)%\)"
+    r"\[Eval (?P<idx>\d+)/(?P<total>\d+)\] result=(?P<result>[^,]+), plies=(?P<plies>\d+), reason=(?P<reason>.*?), game_time=(?P<minutes>\d+(?:\.\d+)?)m, score=(?P<score>\d+(?:\.\d+)?)/(?P<played>\d+) \((?P<pct>\d+(?:\.\d+)?)\s*%\)"
 )
 
 
@@ -72,6 +74,19 @@ def median(values):
     if len(ordered) % 2:
         return ordered[mid]
     return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def note_dna(stats: AgentStats, dna: str) -> None:
+    if m := DNA_MCTS.search(dna):
+        stats.sim_values.append(int(m.group("sims")))
+        stats.cpuct_values.append(float(m.group("cpuct")))
+        stats.temp_values.append(float(m.group("temp")))
+        return
+
+    if m := DNA_TRADITIONAL.search(dna):
+        # Traditional agents do not have MCTS cpuct/temperature. Keep their
+        # depth in sim_values so mixed runs still show a non-empty budget field.
+        stats.sim_values.append(int(m.group("depth")))
 
 
 def analyze(log_path: Path, tail_games: int):
@@ -126,12 +141,8 @@ def analyze(log_path: Path, tail_games: int):
                 b = int(gs.group("b"))
                 totals["games_started"] += 1
                 active_games[gid] = (ts, a, b)
-                agent_stats[a].sim_values.append(int(gs.group("asim")))
-                agent_stats[a].cpuct_values.append(float(gs.group("acpuct")))
-                agent_stats[a].temp_values.append(float(gs.group("atemp")))
-                agent_stats[b].sim_values.append(int(gs.group("bsim")))
-                agent_stats[b].cpuct_values.append(float(gs.group("bcpuct")))
-                agent_stats[b].temp_values.append(float(gs.group("btemp")))
+                note_dna(agent_stats[a], gs.group("adna"))
+                note_dna(agent_stats[b], gs.group("bdna"))
                 agent_stats[a].note_elo(float(gs.group("aelo")))
                 agent_stats[b].note_elo(float(gs.group("belo")))
                 continue

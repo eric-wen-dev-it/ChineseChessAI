@@ -18,6 +18,7 @@ namespace ChineseChessAI.MCTS
         private readonly RuntimeDiagnostics.RollingCounter _batchSizeCounter;
         private readonly RuntimeDiagnostics.RollingCounter _batchLatencyMsCounter;
         private readonly RuntimeDiagnostics.RollingCounter _gpuWaitMsCounter;
+        private readonly object _lifecycleLock = new();
         private long _lastMultiQueueTick;
         private volatile bool _isDisposed;
 
@@ -57,11 +58,15 @@ namespace ChineseChessAI.MCTS
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (_isDisposed)
-                return (new float[8100], 0f);
-
             var tcs = new TaskCompletionSource<(float[], float)>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _taskQueue.Enqueue(new InferenceTask(inputData, tcs, cancellationToken));
+            lock (_lifecycleLock)
+            {
+                if (_isDisposed)
+                    return (new float[8100], 0f);
+
+                _taskQueue.Enqueue(new InferenceTask(inputData, tcs, cancellationToken));
+            }
+
             int queueDepth = _taskQueue.Count;
             _queueDepthCounter.AddSample(queueDepth);
             if (queueDepth > 1)
@@ -221,6 +226,8 @@ namespace ChineseChessAI.MCTS
 
                             float[] policy = policyFloat.data<float>().ToArray();
                             float value = valueFloat.item<float>();
+                            if (!float.IsFinite(value))
+                                value = 0f;
                             tasks[i].Tcs.TrySetResult((policy, value));
                         }
                     }
@@ -242,7 +249,14 @@ namespace ChineseChessAI.MCTS
 
         public void Dispose()
         {
-            _isDisposed = true;
+            lock (_lifecycleLock)
+            {
+                if (_isDisposed)
+                    return;
+
+                _isDisposed = true;
+            }
+
             try
             {
                 _signal.Set();
@@ -253,11 +267,13 @@ namespace ChineseChessAI.MCTS
 
             try
             {
-                _workerTask.Wait(1000);
+                _workerTask.Wait();
             }
             catch
             {
             }
+
+            _signal.Dispose();
         }
 
         private record InferenceTask(

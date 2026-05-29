@@ -38,7 +38,7 @@ namespace ChineseChessAI.Utils
             public RollingCounter(string name, int emitEvery)
             {
                 _name = name;
-                _emitEvery = emitEvery;
+                _emitEvery = Math.Max(1, emitEvery);
             }
 
             public void AddSample(long value)

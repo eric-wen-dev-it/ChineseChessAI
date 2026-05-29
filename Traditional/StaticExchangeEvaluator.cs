@@ -5,7 +5,7 @@ namespace ChineseChessAI.Traditional
     internal static class StaticExchangeEvaluator
     {
         private const int MaxSeeDepth = 4;
-        private static readonly int[] PieceValues = { 0, 10_000, 200, 200, 400, 900, 450, 100 };
+        private static readonly int[] PieceValues = { 0, 10_000, 200, 200, 450, 900, 400, 100 };
 
         public static int Evaluate(Board board, Move firstMove, MoveGenerator generator)
         {

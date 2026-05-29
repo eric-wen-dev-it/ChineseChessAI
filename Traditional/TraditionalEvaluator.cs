@@ -4,7 +4,7 @@ namespace ChineseChessAI.Traditional
 {
     public sealed class TraditionalEvaluator
     {
-        private static readonly int[] PieceValues = { 0, 0, 200, 200, 400, 900, 450, 100 };
+        private static readonly int[] PieceValues = { 0, 0, 200, 200, 450, 900, 400, 100 };
         public int Evaluate(Board board)
         {
             int redScore = 0;
@@ -36,8 +36,6 @@ namespace ChineseChessAI.Traditional
 
             redScore += GetKingSafety(board, true);
             blackScore += GetKingSafety(board, false);
-            redScore += GetEndgameKingPressure(board, true, totalMaterial);
-            blackScore += GetEndgameKingPressure(board, false, totalMaterial);
             redScore += GetCoordinationBonus(board, true, redProfile, blackProfile);
             blackScore += GetCoordinationBonus(board, false, blackProfile, redProfile);
             redScore += GetEndgameMaterialBonus(redProfile, blackProfile, totalMaterial);
@@ -130,7 +128,6 @@ namespace ChineseChessAI.Traditional
                 score += 12;
             if (HasPressureLineToKing(board, row, col, red, maxScreens: 1))
                 score += 55;
-            score += CountUsefulCannonScreens(board, red, row, col) * 14;
             return score;
         }
 
@@ -370,28 +367,12 @@ namespace ChineseChessAI.Traditional
             if (board.GetPiece(red ? 9 : 0, 6) == (red ? 3 : -3))
                 score += 12;
             if (CountAttackers(board, king, !red) > 0)
-                score -= 120;
-            score -= CountKingZoneAttackers(board, red, king) * 34;
-            score -= CountKingFilePressure(board, red) * 45;
+                score -= 90;
+            score -= CountKingZoneAttackers(board, red, king) * 22;
+            score -= CountKingFilePressure(board, red) * 28;
             score -= Math.Abs(col - 4) * 10;
             score -= red ? Math.Max(0, 9 - row) * 6 : row * 6;
             return score;
-        }
-
-        private static int GetEndgameKingPressure(Board board, bool red, int totalMaterial)
-        {
-            if (totalMaterial > 3200)
-                return 0;
-
-            int ownKing = FindKing(board, red);
-            int enemyKing = FindKing(board, !red);
-            if (ownKing < 0 || enemyKing < 0)
-                return 0;
-
-            int ownRow = ownKing / 9, ownCol = ownKing % 9;
-            int enemyRow = enemyKing / 9, enemyCol = enemyKing % 9;
-            int distance = Math.Abs(ownRow - enemyRow) + Math.Abs(ownCol - enemyCol);
-            return Math.Max(0, 60 - distance * 8);
         }
 
         private static int GetCoordinationBonus(Board board, bool red, SideProfile own, SideProfile enemy)
@@ -437,37 +418,6 @@ namespace ChineseChessAI.Traditional
                 score -= 80;
 
             return score;
-        }
-
-        private static int CountUsefulCannonScreens(Board board, bool red, int row, int col)
-        {
-            int screens = 0;
-            foreach (var (dr, dc) in Directions())
-            {
-                bool foundScreen = false;
-                for (int step = 1; step < 10; step++)
-                {
-                    int nr = row + dr * step;
-                    int nc = col + dc * step;
-                    if (!InBoard(nr, nc))
-                        break;
-
-                    sbyte target = board.GetPiece(nr, nc);
-                    if (target == 0)
-                        continue;
-
-                    if (!foundScreen)
-                    {
-                        foundScreen = true;
-                        continue;
-                    }
-
-                    if ((red && target < 0) || (!red && target > 0))
-                        screens++;
-                    break;
-                }
-            }
-            return screens;
         }
 
         private static bool HasPressureLineToKing(Board board, int row, int col, bool red, int maxScreens)

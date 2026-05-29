@@ -1,0 +1,508 @@
+commit af109145b0dae2e0e2a55157bd4741f4c04ac6a9
+Author: eric.wen.dev.it <eric.wen.dev.it@gmail.com>
+Date:   Sat May 9 00:05:55 2026 -0700
+
+    对齐训练目标与评估口径，持久化优化器状态
+    
+    训练/评估口径对齐：三循/百步无进展/步数限制不再用 ±0.1 materialBias
+    小偏置标 value，改为按 ±1.5 兵阈值裁成 ±1.0/0（与 GUI 评估器一致），
+    SelfPlay 的 finalResult 直接变 ±1，联赛 ELO 自动跟随。修掉了
+    "模型学到主动接受子力略劣三循、评估却判输"导致的 candidate 翻盘失败。
+    - Core/BoardEvaluation: 新增 MaterialAdjudicationThreshold + AdjudicateDrawByMaterial
+    - SelfPlay/agent_match/MainWindow 三处共用同一裁判
+    - 顺手把 SelfPlay.cs 三条相关字符串的 mojibake 修回正常中文
+    
+    优化器状态持久化：模型 .pt 旁边落 .optim (Adam state_dict 二进制) +
+    .optim.json (sidecar，存 _iterationCount/LR)，agent 进出 _agentPool
+    不再回到"高 LR + 无动量"。
+    - Trainer: SaveOptimizerState / TryLoadOptimizerState，底层用
+      TorchSharp OptimizerHelper.save_state_dict / load_state_dict
+    - TrainingOrchestrator: GetOrAddAgent 加载、FlushLoadedModelsToDisk
+      和周期训练保存路径都通过新的 SaveAgentModelAndOptimizer
+    - LeagueManager.CopyModelFromParent: 后代/移民迁移时把 .optim 配套
+      搬运/清理，避免新生 agent 继承陌生 momentum
+    - 模型损坏隔离时一并隔离 .optim/.optim.json
+    
+    其它：
+    - MoveGenerator.IsThreateningToMate 加 250ms / 20K 节点预算，避免长杀
+      搜索阻塞主循环（超预算时返回 false，规则上属保守降级）
+    - ChineseChessAI.Tests 新增 agent_match 子命令，做 head-to-head 模型
+      对照测试
+    - Tools/analyze_runtime_log.py: 解析 runtime.log，生成训练/评估指标
+      报告
+    
+    Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+diff --git a/Core/BoardEvaluation.cs b/Core/BoardEvaluation.cs
+index b58b5e8..c494b70 100644
+--- a/Core/BoardEvaluation.cs
++++ b/Core/BoardEvaluation.cs
+@@ -2,6 +2,10 @@ namespace ChineseChessAI.Core
+ {
+     public static class BoardEvaluation
+     {
++        // 训练目标与 GUI 评估器对齐：三循/百步无进展/步数限制时，
++        // 子力差超过此阈值则按材料裁判胜负，否则视为真正平局。
++        public const float MaterialAdjudicationThreshold = 1.5f;
++
+         public static float CalculateMaterialScore(Board board, bool isRed) => isRed ? board.RedMaterial : board.BlackMaterial;
+ 
+         public static float GetBoardAdvantage(Board board)
+@@ -9,5 +13,15 @@ namespace ChineseChessAI.Core
+             float diff = board.RedMaterial - board.BlackMaterial;
+             return diff > 0.5f ? 1.0f : (diff < -0.5f ? -1.0f : 0.0f);
+         }
++
++        public static float AdjudicateDrawByMaterial(Board board)
++        {
++            float diff = board.RedMaterial - board.BlackMaterial;
++            if (diff >= MaterialAdjudicationThreshold)
++                return 1.0f;
++            if (diff <= -MaterialAdjudicationThreshold)
++                return -1.0f;
++            return 0.0f;
++        }
+     }
+ }
+diff --git a/Core/MoveGenerator.cs b/Core/MoveGenerator.cs
+index d1ded6e..bb6a96b 100644
+--- a/Core/MoveGenerator.cs
++++ b/Core/MoveGenerator.cs
+@@ -614,6 +614,8 @@ namespace ChineseChessAI.Core
+ 
+         // 长杀禁手入口：检查攻击方是否已形成强制杀势（最多向前搜索 MateSearchDepth 步攻击）
+         private const int MateSearchDepth = 5;
++        private const int MateSearchNodeLimit = 20_000;
++        private static readonly TimeSpan MateSearchTimeLimit = TimeSpan.FromMilliseconds(250);
+ 
+         public bool IsThreateningToMate(Board board, bool isRedAttacker, CancellationToken cancellationToken = default)
+         {
+@@ -625,6 +627,7 @@ namespace ChineseChessAI.Core
+             if (_mateMemo.Count > MateMemoMaxSize)
+                 _mateMemo.Clear();
+ 
++            var budget = new MateSearchBudget(MateSearchNodeLimit, MateSearchTimeLimit);
+             var defenderMoves = GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken);
+             if (defenderMoves.Count == 0)
+                 return true;
+@@ -632,10 +635,13 @@ namespace ChineseChessAI.Core
+             foreach (var defenderMove in defenderMoves)
+             {
+                 cancellationToken.ThrowIfCancellationRequested();
++                if (!budget.TryConsume())
++                    return false;
++
+                 board.Push(defenderMove.From, defenderMove.To);
+                 try
+                 {
+-                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, cancellationToken))
++                    if (!HasForcedKill(board, isRedAttacker, MateSearchDepth, budget, cancellationToken))
+                         return false;
+                 }
+                 finally
+@@ -651,9 +657,13 @@ namespace ChineseChessAI.Core
+             Board board,
+             bool isRedAttacker,
+             int depth,
++            MateSearchBudget budget,
+             CancellationToken cancellationToken)
+         {
+             cancellationToken.ThrowIfCancellationRequested();
++            if (!budget.TryConsume())
++                return false;
++
+             if (depth <= 0)
+                 return false;
+ 
+@@ -664,6 +674,9 @@ namespace ChineseChessAI.Core
+             foreach (var attackerMove in GenerateLegalMoves(board, skipPerpetualCheck: true, cancellationToken))
+             {
+                 cancellationToken.ThrowIfCancellationRequested();
++                if (!budget.TryConsume())
++                    return false;
++
+                 board.Push(attackerMove.From, attackerMove.To);
+                 try
+                 {
+@@ -678,10 +691,13 @@ namespace ChineseChessAI.Core
+                     foreach (var defenderMove in defenderMoves)
+                     {
+                         cancellationToken.ThrowIfCancellationRequested();
++                        if (!budget.TryConsume())
++                            return false;
++
+                         board.Push(defenderMove.From, defenderMove.To);
+                         try
+                         {
+-                            if (!HasForcedKill(board, isRedAttacker, depth - 1, cancellationToken))
++                            if (!HasForcedKill(board, isRedAttacker, depth - 1, budget, cancellationToken))
+                             {
+                                 defenderHasEscape = true;
+                                 break;
+@@ -711,6 +727,28 @@ namespace ChineseChessAI.Core
+ 
+         // 棋例分值（亚洲象棋联合会规则，用于"捉/兑/闲"判定，与子力评估分离）
+         // 车=4，马=炮=2（等价子互捉判兑），过河兵卒=1，将帅特殊高分
++        private sealed class MateSearchBudget
++        {
++            private readonly int _nodeLimit;
++            private readonly TimeSpan _timeLimit;
++            private readonly System.Diagnostics.Stopwatch _stopwatch = System.Diagnostics.Stopwatch.StartNew();
++            private int _nodes;
++
++            public MateSearchBudget(int nodeLimit, TimeSpan timeLimit)
++            {
++                _nodeLimit = nodeLimit;
++                _timeLimit = timeLimit;
++            }
++
++            public bool TryConsume()
++            {
++                if (Interlocked.Increment(ref _nodes) > _nodeLimit)
++                    return false;
++
++                return _stopwatch.Elapsed <= _timeLimit;
++            }
++        }
++
+         private int GetPieceValue(sbyte piece)
+         {
+             switch (Math.Abs(piece))
+diff --git a/Training/LeagueManager.cs b/Training/LeagueManager.cs
+index a07f14a..a6f3a2d 100644
+--- a/Training/LeagueManager.cs
++++ b/Training/LeagueManager.cs
+@@ -427,9 +427,22 @@ namespace ChineseChessAI.Training
+ 
+         private static void CopyModelFromParent(string parentPath, string childPath)
+         {
++            // 模型权重和优化器状态必须配套迁移：后代继承父代的 Adam 动量，
++            // 移民则要把同 Id 旧 agent 残留的优化器文件一并清掉。
++            string[] companionSuffixes = { ".optim", ".optim.json" };
++
+             if (File.Exists(parentPath))
+             {
+                 File.Copy(parentPath, childPath, overwrite: true);
++                foreach (string suffix in companionSuffixes)
++                {
++                    string parentCompanion = parentPath + suffix;
++                    string childCompanion = childPath + suffix;
++                    if (File.Exists(parentCompanion))
++                        File.Copy(parentCompanion, childCompanion, overwrite: true);
++                    else if (File.Exists(childCompanion))
++                        File.Delete(childCompanion);
++                }
+                 return;
+             }
+ 
+@@ -437,6 +450,12 @@ namespace ChineseChessAI.Training
+             {
+                 File.Delete(childPath);
+             }
++            foreach (string suffix in companionSuffixes)
++            {
++                string childCompanion = childPath + suffix;
++                if (File.Exists(childCompanion))
++                    File.Delete(childCompanion);
++            }
+         }
+     }
+ }
+diff --git a/Training/SelfPlay.cs b/Training/SelfPlay.cs
+index c18a47b..ed37b97 100644
+--- a/Training/SelfPlay.cs
++++ b/Training/SelfPlay.cs
+@@ -187,8 +187,8 @@ namespace ChineseChessAI.Training
+                         if (onMovePerformed != null)
+                             await Task.Delay(1000);
+ 
+-                        endReason = "姝ユ暟闄愬埗(寮哄埗骞冲眬)";
+-                        finalResult = 0.0f;
++                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
++                        endReason = ComposeAdjudicationReason("步数限制", finalResult);
+                         break;
+                     }
+ 
+@@ -260,15 +260,15 @@ namespace ChineseChessAI.Training
+ 
+                     if (positionHistory[currentHash] >= 3)
+                     {
+-                        endReason = "涓夋閲嶅灞€闈?骞冲眬)";
+-                        finalResult = 0.0f;
++                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
++                        endReason = ComposeAdjudicationReason("三次重复局面", finalResult);
+                         break;
+                     }
+ 
+                     if (noProgressCount >= 100)
+                     {
+-                        endReason = "鑷劧闄愮潃鐧炬鏃犺繘灞?骞冲眬)";
+-                        finalResult = 0.0f;
++                        finalResult = BoardEvaluation.AdjudicateDrawByMaterial(board);
++                        endReason = ComposeAdjudicationReason("自然限着百步无进展", finalResult);
+                         break;
+                     }
+                 }
+@@ -328,35 +328,25 @@ namespace ChineseChessAI.Training
+ 
+         private List<TrainingExample> FinalizeData(List<(float[] state, float[] policy, bool isRedTurn)> history, float finalResult, Board finalBoard)
+         {
++            // 三循/百步无进展/步数限制已在 RunGameAsync 内按 GUI 评估器口径裁判:
++            //   材料差 >= 1.5 兵 -> finalResult = ±1.0
++            //   材料差 <  1.5 兵 -> finalResult = 0 (真平局)
++            // 因此到这里 finalResult==0 即真平局，可走 early/late draw 惩罚路径。
+             var examples = new List<TrainingExample>(history.Count);
+-            float adjustedResult = finalResult;
+-            bool isSymmetricDrawPenalty = false;
+-
+-            if (Math.Abs(finalResult) < 0.001f)
+-            {
+-                float redMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, true);
+-                float blackMaterial = TrainingOrchestrator.CalculateMaterialScore(finalBoard, false);
+-
+-                if (redMaterial > blackMaterial)
+-                    adjustedResult = _materialBias;
+-                else if (blackMaterial > redMaterial)
+-                    adjustedResult = -_materialBias;
+-                else
+-                    isSymmetricDrawPenalty = true;
+-            }
++            bool isTrueDraw = Math.Abs(finalResult) < 0.001f;
+ 
+             for (int i = 0; i < history.Count; i++)
+             {
+                 var step = history[i];
+                 float valueForCurrentPlayer;
+-                if (isSymmetricDrawPenalty)
++                if (isTrueDraw)
+                 {
+                     float progress = (float)i / Math.Max(1, history.Count - 1);
+                     valueForCurrentPlayer = progress > 0.5f ? _lateDrawPenalty : _earlyDrawPenalty;
+                 }
+                 else
+                 {
+-                    valueForCurrentPlayer = step.isRedTurn ? adjustedResult : -adjustedResult;
++                    valueForCurrentPlayer = step.isRedTurn ? finalResult : -finalResult;
+                 }
+ 
+                 var sparsePolicy = step.policy
+@@ -369,5 +359,14 @@ namespace ChineseChessAI.Training
+ 
+             return examples;
+         }
++
++        private static string ComposeAdjudicationReason(string baseReason, float adjudicatedResult)
++        {
++            if (adjudicatedResult > 0.5f)
++                return $"{baseReason}(子力裁判红胜)";
++            if (adjudicatedResult < -0.5f)
++                return $"{baseReason}(子力裁判黑胜)";
++            return $"{baseReason}(平局)";
++        }
+     }
+ }
+diff --git a/Training/Trainer.cs b/Training/Trainer.cs
+index 186c23a..355940a 100644
+--- a/Training/Trainer.cs
++++ b/Training/Trainer.cs
+@@ -1,6 +1,8 @@
+ ﻿using ChineseChessAI.Core;
+ using ChineseChessAI.NeuralNetwork;
+ using ChineseChessAI.Utils;
++using System.IO;
++using System.Text.Json;
+ using TorchSharp;
+ using static TorchSharp.torch;
+ using static TorchSharp.torch.optim.lr_scheduler;
+@@ -142,5 +144,72 @@ namespace ChineseChessAI.Training
+             var groups = _optimizer.ParamGroups;
+             return groups != null && groups.Any() ? groups.First().LearningRate : _learningRate;
+         }
++
++        // 持久化 Adam 动量缓冲区 + 调度器步数，避免 agent 卸载/重载时退化为"全新优化器"。
++        // optimizerPath: TorchSharp 二进制；sidecarPath: JSON，存 _iterationCount。
++        public void SaveOptimizerState(string optimizerPath, string sidecarPath)
++        {
++            try
++            {
++                string? dir = Path.GetDirectoryName(optimizerPath);
++                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
++                    Directory.CreateDirectory(dir);
++
++                ((TorchSharp.Modules.OptimizerHelper)_optimizer).save_state_dict(optimizerPath);
++                File.WriteAllText(sidecarPath, JsonSerializer.Serialize(new OptimizerSidecar
++                {
++                    IterationCount = _iterationCount,
++                    LearningRate = _learningRate
++                }));
++            }
++            catch (Exception ex)
++            {
++                Console.WriteLine($"[Trainer] 优化器状态保存失败: {ex.Message}");
++            }
++        }
++
++        // 调用前提：调用方已经先 model.load() 完毕、CompleteInit() 也已执行（即 _optimizer/_scheduler 已重建）。
++        // 文件不存在时静默 no-op，等价于"全新优化器"——保留之前的行为。
++        public bool TryLoadOptimizerState(string optimizerPath, string sidecarPath)
++        {
++            if (!File.Exists(optimizerPath))
++                return false;
++
++            try
++            {
++                ((TorchSharp.Modules.OptimizerHelper)_optimizer).load_state_dict(optimizerPath);
++
++                int restoredIterations = 0;
++                if (File.Exists(sidecarPath))
++                {
++                    string json = File.ReadAllText(sidecarPath);
++                    var sidecar = JsonSerializer.Deserialize<OptimizerSidecar>(json);
++                    if (sidecar != null)
++                        restoredIterations = sidecar.IterationCount;
++                }
++
++                _iterationCount = restoredIterations;
++                // StepLR 没有 last_epoch 直接 setter；用 step() 推进到对应位置。
++                // step_size=500，所以这是 O(restoredIterations) 但每次只读一个 int + 调一次 LR 更新，毫秒级。
++                for (int i = 0; i < restoredIterations; i++)
++                    _scheduler.step();
++
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Console.WriteLine($"[Trainer] 优化器状态加载失败，回退为全新优化器: {ex.Message}");
++                // 失败时把已经被部分 load 的优化器清理重建，避免半 load 状态。
++                ResetOptimizer();
++                _iterationCount = 0;
++                return false;
++            }
++        }
++
++        private sealed class OptimizerSidecar
++        {
++            public int IterationCount { get; set; }
++            public double LearningRate { get; set; }
++        }
+     }
+ }
+diff --git a/Training/TrainingOrchestrator.cs b/Training/TrainingOrchestrator.cs
+index c232a55..325825e 100644
+--- a/Training/TrainingOrchestrator.cs
++++ b/Training/TrainingOrchestrator.cs
+@@ -846,6 +846,7 @@ namespace ChineseChessAI.Training
+                 // 【关键修复】：load() 必须在 CompleteInit()（即 Trainer/Adam 创建）之前完成。
+                 // TorchSharp 的 load() 会替换参数张量包装器对象；若 Adam 已创建，
+                 // 其持有的旧引用 handle 变为 IntPtr.Zero，下次 zero_grad() 即崩溃。
++                bool modelLoaded = false;
+                 lock (GetFileLock(meta.ModelPath))
+                 {
+                     if (File.Exists(meta.ModelPath))
+@@ -853,6 +854,7 @@ namespace ChineseChessAI.Training
+                         try
+                         {
+                             pa.Model.load(meta.ModelPath);
++                            modelLoaded = true;
+                         }
+                         catch (EndOfStreamException ex)
+                         {
+@@ -860,17 +862,74 @@ namespace ChineseChessAI.Training
+                             Log($"[模型损坏] Agent_{meta.Id} 模型文件已截断或损坏: {meta.ModelPath}");
+                             Log($"[模型损坏] 已隔离到: {quarantinedPath}");
+                             Log($"[模型损坏-堆栈] {ex}");
++                            // 模型损坏后，旧优化器状态对应的是失效的参数，必须一起隔离。
++                            QuarantineOptimizerStateFiles(meta.ModelPath);
+                         }
+                     }
+                 }
+ 
+                 pa.CompleteInit(); // to(CUDA) + new Trainer(Model)，必须在 load() 之后
++
++                if (modelLoaded)
++                {
++                    // 【优化器状态持久化】：模型权重和 Adam 动量必须配套使用，
++                    // 否则 agent 每次重载会回到"高 LR + 无动量"的状态，长期训练高噪声。
++                    string optimizerPath = GetOptimizerStatePath(meta.ModelPath);
++                    string sidecarPath = GetOptimizerSidecarPath(meta.ModelPath);
++                    lock (GetFileLock(meta.ModelPath))
++                    {
++                        if (pa.Trainer.TryLoadOptimizerState(optimizerPath, sidecarPath))
++                        {
++                            Log($"[优化器恢复] Agent_{meta.Id}: {Path.GetFileName(optimizerPath)}");
++                        }
++                    }
++                }
++
+                 return pa;
+             }, LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+             TouchAgent(meta.Id);
+             return agent;
+         }
+ 
++        // 优化器状态文件与模型文件同目录共存，命名规则：foo.pt → foo.optim, foo.optim.json
++        internal static string GetOptimizerStatePath(string modelPath) => modelPath + ".optim";
++        internal static string GetOptimizerSidecarPath(string modelPath) => modelPath + ".optim.json";
++
++        private void QuarantineOptimizerStateFiles(string modelPath)
++        {
++            foreach (string path in new[] { GetOptimizerStatePath(modelPath), GetOptimizerSidecarPath(modelPath) })
++            {
++                if (!File.Exists(path))
++                    continue;
++                try
++                {
++                    string quarantined = path + $".corrupt_{DateTime.Now:yyyyMMdd_HHmmss}_{Guid.NewGuid():N}";
++                    File.Move(path, quarantined, overwrite: false);
++                    Log($"[优化器隔离] {Path.GetFileName(path)} → {Path.GetFileName(quarantined)}");
++                }
++                catch (Exception ex)
++                {
++                    Log($"[优化器隔离失败] {path}: {ex.Message}");
++                    try
++                    {
++                        File.Delete(path);
++                    }
++                    catch
++                    {
++                    }
++                }
++            }
++        }
++
++        private void SaveAgentModelAndOptimizer(PersistentAgent pa, AgentMetadata meta)
++        {
++            lock (GetFileLock(meta.ModelPath))
++            {
++                ModelManager.SaveModel(pa.Model, meta.ModelPath);
++                pa.Trainer.SaveOptimizerState(GetOptimizerStatePath(meta.ModelPath), GetOptimizerSidecarPath(meta.ModelPath));
++            }
++        }
++
+         private string QuarantineCorruptModelFile(string modelPath)
+         {
+             string directory = Path.GetDirectoryName(modelPath) ?? AppDomain.CurrentDomain.BaseDirectory;
+@@ -993,10 +1052,7 @@ namespace ChineseChessAI.Training
+                     continue;
+                 }
+ 
+-                lock (GetFileLock(meta.ModelPath))
+-                {
+-                    ModelManager.SaveModel(agentEntry.Value.Value.Model, meta.ModelPath);
+-                }
++                SaveAgentModelAndOptimizer(agentEntry.Value.Value, meta);
+             }
+         }
+ 
+@@ -1228,10 +1284,7 @@ namespace ChineseChessAI.Training
+                                 trainedAgents++;
+                                 totalSamples += mixedBatch.Count * trainingEpochs;
+                                 totalLoss += loss;
+-                                lock (GetFileLock(meta.ModelPath))
+-                                {
+-                                    ModelManager.SaveModel(pa.Model, meta.ModelPath);
+-                                }
++                                SaveAgentModelAndOptimizer(pa, meta);
+                             }
+                             else
+                             {

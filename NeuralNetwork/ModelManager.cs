@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using TorchSharp;
 
 namespace ChineseChessAI.NeuralNetwork
@@ -32,9 +32,11 @@ namespace ChineseChessAI.NeuralNetwork
 
                 try
                 {
+                    string tempPath = filePath + $".tmp_{Guid.NewGuid():N}";
                     // Reuse a shared CPU shadow model so saving only incurs one CUDA->CPU state copy.
                     _cpuShadowModel.load_state_dict(model.state_dict());
-                    _cpuShadowModel.save(filePath);
+                    _cpuShadowModel.save(tempPath);
+                    File.Move(tempPath, filePath, overwrite: true);
                     Console.WriteLine($"[ModelManager] 模型参数已成功保存至: {filePath}");
                 }
                 catch (Exception ex)

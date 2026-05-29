@@ -32,11 +32,11 @@ namespace ChineseChessAI.Training
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string filePath = Path.Combine(_dataDir, $"game_{timestamp}_{Guid.NewGuid():N}.json");
                 string json = JsonSerializer.Serialize(examples);
-                File.WriteAllText(filePath, json);
+                WriteTextAtomic(filePath, json);
             }
             catch (Exception ex)
             {
-                string msg = $"[ReplayBuffer] 磁盘写入失败: {ex.Message}";
+                string msg = $"[ReplayBuffer] 样本保存失败: {ex.Message}";
                 Console.WriteLine(msg);
                 OnSaveError?.Invoke(msg);
             }
@@ -49,14 +49,25 @@ namespace ChineseChessAI.Training
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string filePath = Path.Combine(_dataDir, $"game_{timestamp}_{Guid.NewGuid():N}.json");
                 string json = JsonSerializer.Serialize(gameData);
-                File.WriteAllText(filePath, json);
+                WriteTextAtomic(filePath, json);
             }
             catch (Exception ex)
             {
-                string msg = $"[ReplayBuffer] 纾佺洏鍐欏叆澶辫触: {ex.Message}";
+                string msg = $"[ReplayBuffer] 对局保存失败: {ex.Message}";
                 Console.WriteLine(msg);
                 OnSaveError?.Invoke(msg);
             }
+        }
+
+        internal static void WriteTextAtomic(string filePath, string contents)
+        {
+            string? directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+                Directory.CreateDirectory(directory);
+
+            string tempPath = filePath + $".tmp_{Guid.NewGuid():N}";
+            File.WriteAllText(tempPath, contents);
+            File.Move(tempPath, filePath, overwrite: true);
         }
 
         public async Task<(int samples, int games)> LoadOldSamplesAsync(
@@ -97,7 +108,7 @@ namespace ChineseChessAI.Training
 
                 if (processedCount % 1000 == 0)
                 {
-                    logAction?.Invoke($"[装载进度] '{Path.GetFileName(_dataDir)}': 已处理 {processedCount}/{totalFiles} 文件, 有效 {totalGames} 局 ({totalLoaded} 条)");
+                    logAction?.Invoke($"[瑁呰浇杩涘害] '{Path.GetFileName(_dataDir)}': 宸插鐞?{processedCount}/{totalFiles} 鏂囦欢, 鏈夋晥 {totalGames} 灞€ ({totalLoaded} 鏉?");
                     await Task.Yield();
                 }
 
@@ -123,7 +134,7 @@ namespace ChineseChessAI.Training
                             else
                             {
                                 auditPassed = false;
-                                logAction?.Invoke($"[审计拒绝] {fileName}: 缺少 MoveHistoryUcci，无法验证数据合法性。");
+                                logAction?.Invoke($"[AuditRejected] {fileName}: missing MoveHistoryUcci; cannot validate game legality.");
                             }
                         }
                     }
@@ -157,12 +168,12 @@ namespace ChineseChessAI.Training
                     }
                     else if (!auditPassed)
                     {
-                        logAction?.Invoke($"[审计拒绝] {fileName}: 存在非法走法，已从训练集中排除。");
+                        logAction?.Invoke($"[AuditRejected] {fileName}: illegal move found; excluded from training.");
                     }
                 }
                 catch (Exception ex)
                 {
-                    logAction?.Invoke($"[装载故障] {fileName}: {ex.Message}");
+                    logAction?.Invoke($"[瑁呰浇鏁呴殰] {fileName}: {ex.Message}");
                 }
             }
 
@@ -206,7 +217,7 @@ namespace ChineseChessAI.Training
                 }
                 catch (Exception ex)
                 {
-                    logAction?.Invoke($"[ReplayBuffer] 清理旧对局失败 {file.Name}: {ex.Message}");
+                    logAction?.Invoke($"[ReplayBuffer] 娓呯悊鏃у灞€澶辫触 {file.Name}: {ex.Message}");
                 }
             }
 
@@ -228,16 +239,16 @@ namespace ChineseChessAI.Training
 
             foreach (var ucci in ucciHistory)
             {
-                // 审计时允许跳过长打/长捉检测，因为外部棋谱可能遵循不同细则。
-                // 但物理走法与送将判断仍必须合法。
+                // 瀹¤鏃跺厑璁歌烦杩囬暱鎵?闀挎崏妫€娴嬶紝鍥犱负澶栭儴妫嬭氨鍙兘閬靛惊涓嶅悓缁嗗垯銆?
+                // 浣嗙墿鐞嗚蛋娉曚笌閫佸皢鍒ゆ柇浠嶅繀椤诲悎娉曘€?
                 if (!session.TryResolveUcci(ucci, out var move, out string validationResult, skipPerpetualCheck: true))
                 {
-                    string pieceName = validationResult == "无效UCCI"
-                        ? "未知棋子"
+                    string pieceName = validationResult == "鏃犳晥UCCI"
+                        ? "鏈煡妫嬪瓙"
                         : Board.GetPieceName(session.Board.GetPiece(move.From));
-                    string msg = $"第{moveIdx}步 {ucci} 疑似非法 ({pieceName} {validationResult})";
+                    string msg = $"Move {moveIdx} {ucci} appears illegal ({pieceName} {validationResult})";
 
-                    logAction?.Invoke($"[审计警告] {fileName} {msg}");
+                    logAction?.Invoke($"[瀹¤璀﹀憡] {fileName} {msg}");
                     onAuditFailure?.Invoke(session.MoveHistory.ToList(), move, msg);
                     return false;
                 }

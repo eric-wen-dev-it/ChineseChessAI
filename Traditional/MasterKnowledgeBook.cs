@@ -47,10 +47,10 @@ namespace ChineseChessAI.Traditional
             if (!moves.TryGetValue(move, out var knowledge))
                 return 0;
 
-            int countBonus = Math.Min(120_000, 8_000 + (int)(Math.Log2(knowledge.Count + 1) * 14_000));
+            int countBonus = Math.Min(35_000, 4_000 + (int)(Math.Log2(knowledge.Count + 1) * 6_000));
             int confidence = Math.Min(knowledge.Count, 40);
             int scoreBonus = knowledge.ScoreFromSideToMove * confidence / 40;
-            return countBonus + scoreBonus;
+            return Math.Clamp(countBonus + scoreBonus, -30_000, 50_000);
         }
 
         public IReadOnlyList<MasterMoveKnowledge> GetMoves(Board board, int limit = 16)

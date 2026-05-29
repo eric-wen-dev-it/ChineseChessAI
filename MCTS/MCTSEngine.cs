@@ -15,9 +15,8 @@ namespace ChineseChessAI.MCTS
         private readonly ChineseChessRuleEngine _rules;
         private readonly InferenceService.Lease _inferenceLease;
         private readonly double _cPuct;
-        private readonly BoundedCache<Move[]> _legalMovesCache = new(LegalMovesCacheCapacity);
         private readonly BoundedCache<CachedInference> _inferenceCache = new(InferenceCacheCapacity);
-        private readonly ConcurrentDictionary<ulong, Lazy<Task<CachedInference>>> _inferenceInFlight = new();
+        private readonly ConcurrentDictionary<PositionCacheKey, Lazy<Task<CachedInference>>> _inferenceInFlight = new();
 
         private static readonly RuntimeDiagnostics.RollingCounter LegalMovesCacheHitCounter = new("LegalMovesCacheHit", 500);
         private static readonly RuntimeDiagnostics.RollingCounter LegalMovesCacheMissCounter = new("LegalMovesCacheMiss", 500);
@@ -29,7 +28,7 @@ namespace ChineseChessAI.MCTS
         private static readonly RuntimeDiagnostics.RollingCounter LegalMovesCacheTrimCounter = new("LegalMovesCacheTrim", 50);
         private static readonly RuntimeDiagnostics.RollingCounter InferenceCacheTrimCounter = new("InferenceCacheTrim", 50);
 
-        public MCTSEngine(CChessNet model, int batchSize = 64, double cPuct = 2.5, Action<string>? statusChanged = null)
+        public MCTSEngine(CChessNet model, int batchSize = 64, double cPuct = 1.6, Action<string>? statusChanged = null)
         {
             _model = model;
             _cPuct = cPuct;
@@ -83,9 +82,9 @@ namespace ChineseChessAI.MCTS
 
             var rootChildren = root.Children.ToArray();
             var selectableChildren = PreferNonRepeatingRootMoves(board, rootChildren);
-            double totalVisits = selectableChildren.Sum(x => x.Value.N);
+            double totalVisits = rootChildren.Sum(x => x.Value.N);
 
-            foreach (var child in selectableChildren)
+            foreach (var child in rootChildren)
             {
                 int moveIdx = child.Key.ToNetworkIndex();
                 if (moveIdx >= 0 && moveIdx < 8100)
@@ -207,6 +206,13 @@ namespace ChineseChessAI.MCTS
                 double sample = GammaSample(alpha, 1.0);
                 samples[i] = sample;
                 sum += sample;
+            }
+
+            if (sum <= 0 || !double.IsFinite(sum))
+            {
+                double uniform = count > 0 ? 1.0 / count : 0.0;
+                Array.Fill(samples, uniform);
+                return samples;
             }
 
             for (int i = 0; i < count; i++)
@@ -337,21 +343,8 @@ namespace ChineseChessAI.MCTS
         private List<Move> GetLegalMoves(Board board, ulong boardHash, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            bool canUseCache = board.HistoryCount == 0;
-            if (canUseCache && _legalMovesCache.TryGet(boardHash, out Move[] cachedMoves))
-            {
-                LegalMovesCacheHitCounter.AddSample(1);
-                return new List<Move>(cachedMoves);
-            }
-
             LegalMovesCacheMissCounter.AddSample(1);
-            var legalMoves = _rules.GetLegalMoves(board, cancellationToken: cancellationToken);
-            if (canUseCache && _legalMovesCache.TryAdd(boardHash, legalMoves.ToArray()))
-            {
-                TrimLegalMovesCacheIfNeeded();
-            }
-
-            return legalMoves;
+            return _rules.GetLegalMoves(board, cancellationToken: cancellationToken);
         }
 
         private static KeyValuePair<Move, MCTSNode>[] PreferNonRepeatingRootMoves(
@@ -371,16 +364,23 @@ namespace ChineseChessAI.MCTS
 
         private async Task<CachedInference> GetInferenceAsync(Board board, ulong boardHash, CancellationToken cancellationToken)
         {
+            sbyte[] position = board.GetState();
             if (_inferenceCache.TryGet(boardHash, out CachedInference cached))
             {
-                InferenceCacheHitCounter.AddSample(1);
-                return cached;
+                if (cached.Matches(position))
+                {
+                    InferenceCacheHitCounter.AddSample(1);
+                    return cached;
+                }
+
+                _inferenceCache.TryRemove(boardHash);
             }
 
             InferenceCacheMissCounter.AddSample(1);
+            var cacheKey = new PositionCacheKey(boardHash, position);
             Lazy<Task<CachedInference>> lazyTask = _inferenceInFlight.GetOrAdd(
-                boardHash,
-                _ => CreateInferenceTask(board, boardHash));
+                cacheKey,
+                _ => CreateInferenceTask(board, cacheKey));
 
             CachedInference result = await lazyTask.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
             if (_inferenceCache.TryAdd(boardHash, result))
@@ -391,13 +391,13 @@ namespace ChineseChessAI.MCTS
             return result;
         }
 
-        private Lazy<Task<CachedInference>> CreateInferenceTask(Board board, ulong boardHash)
+        private Lazy<Task<CachedInference>> CreateInferenceTask(Board board, PositionCacheKey cacheKey)
         {
             return new Lazy<Task<CachedInference>>(() =>
             {
-                Task<CachedInference> task = EvaluateBoardAsync(board, CancellationToken.None);
+                Task<CachedInference> task = EvaluateBoardAsync(board, cacheKey.Position, CancellationToken.None);
                 task.ContinueWith(
-                    _ => _inferenceInFlight.TryRemove(boardHash, out Lazy<Task<CachedInference>> _),
+                    _ => _inferenceInFlight.TryRemove(cacheKey, out Lazy<Task<CachedInference>>? _),
                     CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously,
                     TaskScheduler.Default);
@@ -406,7 +406,7 @@ namespace ChineseChessAI.MCTS
             }, LazyThreadSafetyMode.ExecutionAndPublication);
         }
 
-        private async Task<CachedInference> EvaluateBoardAsync(Board board, CancellationToken cancellationToken)
+        private async Task<CachedInference> EvaluateBoardAsync(Board board, sbyte[] position, CancellationToken cancellationToken)
         {
             float[] inputData;
             bool isRed = board.IsRedTurn;
@@ -423,16 +423,7 @@ namespace ChineseChessAI.MCTS
                 policyLogits = StateEncoder.FlipPolicy(policyLogits);
             }
 
-            return new CachedInference(policyLogits, value);
-        }
-
-        private void TrimLegalMovesCacheIfNeeded()
-        {
-            int removed = _legalMovesCache.TrimIfNeeded();
-            if (removed > 0)
-            {
-                LegalMovesCacheTrimCounter.AddSample(removed);
-            }
+            return new CachedInference(position, policyLogits, value);
         }
 
         private void TrimInferenceCacheIfNeeded()
@@ -449,7 +440,26 @@ namespace ChineseChessAI.MCTS
             _inferenceLease?.Dispose();
         }
 
-        private sealed record CachedInference(float[] PolicyLogits, double Value);
+        private sealed record CachedInference(sbyte[] Position, float[] PolicyLogits, double Value)
+        {
+            public bool Matches(sbyte[] position)
+            {
+                return Position.AsSpan().SequenceEqual(position);
+            }
+        }
+
+        private readonly record struct PositionCacheKey(ulong Hash, sbyte[] Position)
+        {
+            public bool Equals(PositionCacheKey other)
+            {
+                return Hash == other.Hash && Position.AsSpan().SequenceEqual(other.Position);
+            }
+
+            public override int GetHashCode()
+            {
+                return HashCode.Combine(Hash, Position.Length);
+            }
+        }
 
         private sealed class BoundedCache<TValue> where TValue : class
         {
@@ -480,6 +490,11 @@ namespace ChineseChessAI.MCTS
             {
                 long tick = Interlocked.Increment(ref _tick);
                 return _entries.TryAdd(key, new CacheEntry<TValue>(value, tick));
+            }
+
+            public bool TryRemove(ulong key)
+            {
+                return _entries.TryRemove(key, out _);
             }
 
             public int TrimIfNeeded()

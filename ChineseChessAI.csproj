@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -7,6 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <PlatformTarget>x64</PlatformTarget>
+    <PikafishSourceDir Condition="'$(PikafishSourceDir)' == '' and '$(PIKAFISH_HOME)' != ''">$(PIKAFISH_HOME)</PikafishSourceDir>
+    <PikafishSourceDir Condition="'$(PikafishSourceDir)' == ''">$(MSBuildProjectDirectory)\Pikafish.2026-01-02</PikafishSourceDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,8 +31,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="D:\Pikafish.2026-01-02\pikafish.nnue" Link="Pikafish\pikafish.nnue" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('D:\Pikafish.2026-01-02\pikafish.nnue')" />
-    <Content Include="D:\Pikafish.2026-01-02\Windows\*.exe" Link="Pikafish\Windows\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('D:\Pikafish.2026-01-02\Windows')" />
+    <Content Include="$(PikafishSourceDir)\pikafish.nnue" Link="Pikafish\pikafish.nnue" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('$(PikafishSourceDir)\pikafish.nnue')" />
+    <Content Include="$(PikafishSourceDir)\Windows\*.exe" Link="Pikafish\Windows\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Condition="Exists('$(PikafishSourceDir)\Windows')" />
   </ItemGroup>
 
 </Project>

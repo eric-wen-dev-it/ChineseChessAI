@@ -9,6 +9,7 @@ namespace ChineseChessAI.Play
         private readonly Process _process;
         private readonly ConcurrentQueue<string> _lines = new();
         private readonly SemaphoreSlim _lineSignal = new(0);
+        private readonly SemaphoreSlim _requestLock = new(1, 1);
         private readonly CancellationTokenSource _readerCts = new();
         private readonly Task _stdoutTask;
         private readonly Task _stderrTask;
@@ -69,36 +70,70 @@ namespace ChineseChessAI.Play
             int moveTimeMs,
             CancellationToken cancellationToken)
         {
-            string moves = ucciHistory.Count == 0 ? string.Empty : " moves " + string.Join(' ', ucciHistory);
-            SendLine("position startpos" + moves);
-
-            if (moveTimeMs > 0)
-                SendLine($"go movetime {moveTimeMs}");
-            else
-                SendLine($"go depth {Math.Max(1, depth)}");
-
-            using var cancelRegistration = cancellationToken.Register(() =>
+            await _requestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
+                ClearPendingLines();
+
+                string moves = ucciHistory.Count == 0 ? string.Empty : " moves " + string.Join(' ', ucciHistory);
+                SendLine("position startpos" + moves);
+
+                if (moveTimeMs > 0)
+                    SendLine($"go movetime {moveTimeMs}");
+                else
+                    SendLine($"go depth {Math.Max(1, depth)}");
+
+                using var cancelRegistration = cancellationToken.Register(() =>
+                {
+                    try
+                    {
+                        SendLine("stop");
+                    }
+                    catch
+                    {
+                        // Process may already be gone.
+                    }
+                });
+
+                string line;
                 try
                 {
-                    SendLine("stop");
+                    line = await WaitForLineAsync(
+                        text => text.StartsWith("bestmove ", StringComparison.OrdinalIgnoreCase),
+                        TimeSpan.FromSeconds(Math.Max(15, moveTimeMs / 1000 + 10)),
+                        cancellationToken).ConfigureAwait(false);
                 }
-                catch
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
                 {
-                    // Process may already be gone.
+                    await DrainBestMoveAfterStopAsync().ConfigureAwait(false);
+                    throw;
                 }
-            });
 
-            string line = await WaitForLineAsync(
-                text => text.StartsWith("bestmove ", StringComparison.OrdinalIgnoreCase),
-                TimeSpan.FromSeconds(Math.Max(15, moveTimeMs / 1000 + 10)),
-                cancellationToken);
+                string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 2 || parts[1] == "0000" || parts[1] == "(none)")
+                    throw new InvalidOperationException($"Pikafish returned no move: {line}");
 
-            string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2 || parts[1] == "0000" || parts[1] == "(none)")
-                throw new InvalidOperationException($"Pikafish returned no move: {line}");
+                return parts[1];
+            }
+            finally
+            {
+                _requestLock.Release();
+            }
+        }
 
-            return parts[1];
+        private async Task DrainBestMoveAfterStopAsync()
+        {
+            try
+            {
+                await WaitForLineAsync(
+                    text => text.StartsWith("bestmove ", StringComparison.OrdinalIgnoreCase),
+                    TimeSpan.FromSeconds(2),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                ClearPendingLines();
+            }
         }
 
         private async Task WaitReadyAsync(CancellationToken cancellationToken)
@@ -114,6 +149,13 @@ namespace ChineseChessAI.Play
 
             _process.StandardInput.WriteLine(command);
             _process.StandardInput.Flush();
+        }
+
+        private void ClearPendingLines()
+        {
+            while (_lines.TryDequeue(out _))
+            {
+            }
         }
 
         private async Task<string> WaitForLineAsync(
@@ -202,6 +244,7 @@ namespace ChineseChessAI.Play
 
             _readerCts.Dispose();
             _lineSignal.Dispose();
+            _requestLock.Dispose();
             _process.Dispose();
         }
     }

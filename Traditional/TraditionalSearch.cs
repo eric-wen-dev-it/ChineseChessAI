@@ -162,7 +162,7 @@ namespace ChineseChessAI.Traditional
             if (depth <= 0)
             {
                 return _options.UseQuiescenceSearch
-                    ? Quiescence(board, _limits.QuiescenceDepth, alpha, beta, cancellationToken)
+                    ? Quiescence(board, _limits.QuiescenceDepth, alpha, beta, ply, cancellationToken)
                     : _evaluator.Evaluate(board);
             }
 
@@ -171,13 +171,13 @@ namespace ChineseChessAI.Traditional
             {
                 int staticScore = _evaluator.Evaluate(board);
                 if (staticScore + 180 <= alpha)
-                    return Quiescence(board, _limits.QuiescenceDepth / 2, alpha, beta, cancellationToken);
+                    return Quiescence(board, _limits.QuiescenceDepth / 2, alpha, beta, ply, cancellationToken);
             }
 
             if (!inCheck && _options.UseNullMovePruning && allowNullMove && depth >= 3 && HasNonPawnMaterial(board, board.IsRedTurn))
             {
                 var nullBoard = board.Clone();
-                nullBoard.LoadState(board.GetState(), !board.IsRedTurn);
+                nullBoard.SwitchTurnPreservingHistory();
                 int reduction = depth >= 5 ? 3 : 2;
                 int nullScore = -Negamax(nullBoard, depth - 1 - reduction, -beta, -beta + 1, ply + 1, checkExtensionsLeft, false, out _, cancellationToken);
                 if (!_stopRequested && nullScore >= beta)
@@ -317,15 +317,15 @@ namespace ChineseChessAI.Traditional
                 moveIndex++;
             }
 
-            TTBound bound = alpha <= originalAlpha ? TTBound.Upper : (alpha >= beta ? TTBound.Lower : TTBound.Exact);
-            _table.Store(board.CurrentHash, depth, alpha, bestMove, bound, ply, _options.MateScore);
+            TTBound bound = bestScore <= originalAlpha ? TTBound.Upper : (bestScore >= beta ? TTBound.Lower : TTBound.Exact);
+            _table.Store(board.CurrentHash, depth, bestScore, bestMove, bound, ply, _options.MateScore);
 
             principalVariation.Add(bestMove);
             principalVariation.AddRange(bestChildPv);
-            return alpha;
+            return bestScore;
         }
 
-        private int Quiescence(Board board, int depth, int alpha, int beta, CancellationToken cancellationToken)
+        private int Quiescence(Board board, int depth, int alpha, int beta, int ply, CancellationToken cancellationToken)
         {
             if (ShouldStop(cancellationToken))
                 return _evaluator.Evaluate(board);
@@ -337,7 +337,7 @@ namespace ChineseChessAI.Traditional
                 skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
 
             if (legalMoves.Count == 0)
-                return -_options.MateScore;
+                return -_options.MateScore + ply;
 
             if (inCheck)
             {
@@ -349,7 +349,7 @@ namespace ChineseChessAI.Traditional
                     board.Push(move.From, move.To);
                     try
                     {
-                        int score = -Quiescence(board, Math.Max(0, depth - 1), -beta, -alpha, cancellationToken);
+                        int score = -Quiescence(board, Math.Max(0, depth - 1), -beta, -alpha, ply + 1, cancellationToken);
                         if (score >= beta)
                             return beta;
                         if (score > alpha)
@@ -365,10 +365,10 @@ namespace ChineseChessAI.Traditional
             }
 
             if (TryFindImmediateMate(board, legalMoves, out _, cancellationToken))
-                return _options.MateScore;
+                return _options.MateScore - ply - 1;
 
             if (OpponentHasImmediateMateAtLeaf(board, cancellationToken))
-                return Math.Min(alpha, -_options.MateScore / 2);
+                return -_options.MateScore + ply + 1;
 
             int standPat = _evaluator.Evaluate(board);
             if (standPat >= beta)
@@ -387,7 +387,7 @@ namespace ChineseChessAI.Traditional
                 board.Push(move.From, move.To);
                 try
                 {
-                    int score = -Quiescence(board, depth - 1, -beta, -alpha, cancellationToken);
+                    int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, cancellationToken);
                     if (score >= beta)
                         return beta;
                     if (score > alpha)
@@ -438,7 +438,7 @@ namespace ChineseChessAI.Traditional
             if (ShouldStop(cancellationToken))
                 return false;
             var opponentBoard = board.Clone();
-            opponentBoard.LoadState(board.GetState(), !board.IsRedTurn);
+            opponentBoard.SwitchTurnPreservingHistory();
             if (!_generator.IsKingSafe(opponentBoard, opponentBoard.IsRedTurn))
                 return false;
 
@@ -565,9 +565,9 @@ namespace ChineseChessAI.Traditional
                 1 => 10_000,
                 2 => 200,
                 3 => 200,
-                4 => 400,
+                4 => 450,
                 5 => 900,
-                6 => 450,
+                6 => 400,
                 7 => 100,
                 _ => 0
             };

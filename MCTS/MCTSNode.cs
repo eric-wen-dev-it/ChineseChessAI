@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using System.Collections.Concurrent;
 
 namespace ChineseChessAI.MCTS
@@ -59,8 +59,8 @@ namespace ChineseChessAI.MCTS
 
             int n = n_raw + vl;
             // Negamax 结构下，父节点评估子节点时需要取 -Q。
-            // Virtual loss 必须让当前边临时变差，因此应加到子节点自身视角的 W 上。
-            double q = n == 0 ? 0 : -(w_raw + vl) / n;
+            // 未访问节点用父节点均值的轻微保守估计，避免 FPU=0 过早压低其它先验较好的候选。
+            double q = n == 0 ? (Parent?.Q ?? 0.0) - 0.20 : -(w_raw + vl) / n;
             double u = cPuct * P * Math.Sqrt(parentN) / (1 + n);
             return q + u;
         }
@@ -77,6 +77,9 @@ namespace ChineseChessAI.MCTS
 
         public void Update(double value)
         {
+            if (!double.IsFinite(value))
+                value = 0.0;
+
             bool lockTaken = false;
             try
             {

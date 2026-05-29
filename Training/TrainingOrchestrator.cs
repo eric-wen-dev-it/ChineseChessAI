@@ -1,4 +1,4 @@
-﻿using ChineseChessAI.Core;
+using ChineseChessAI.Core;
 using ChineseChessAI.MCTS;
 using ChineseChessAI.NeuralNetwork;
 using ChineseChessAI.Traditional;
@@ -71,7 +71,7 @@ namespace ChineseChessAI.Training
         private static readonly TimeSpan LeagueDrainWaitTimeout = LeagueGameTimeout + TimeSpan.FromMinutes(3);
         private static readonly TimeSpan DrainProgressLogInterval = TimeSpan.FromSeconds(30);
         private static readonly TimeSpan WatchdogCheckInterval = TimeSpan.FromMinutes(10);
-        private static readonly TimeSpan WatchdogStaleLogThreshold = TimeSpan.FromMinutes(30);
+        private static readonly TimeSpan WatchdogStaleLogThreshold = TimeSpan.FromMinutes(45);
         private static readonly TimeSpan LeagueShutdownWaitTimeout = TimeSpan.FromMinutes(1);
         private static readonly string _runtimeLogPath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
@@ -524,7 +524,8 @@ namespace ChineseChessAI.Training
             StartLeagueWatchdog(runOptions, runCts.Token);
             var runWatchdogCts = _watchdogCts;
 
-            _leagueManager = new LeagueManager(populationSize, traditionalAgentCount);
+            var leagueManager = new LeagueManager(populationSize, traditionalAgentCount);
+            _leagueManager = leagueManager;
             if (_skipAgentDisposeOnNextStart)
             {
                 Log("[Watchdog] 跳过本次启动前的旧 agent dispose；旧联赛任务可能仍在退出。");
@@ -605,7 +606,7 @@ namespace ChineseChessAI.Training
                         {
                             nextTrainAt += 20;
                             semaphore.Release();
-                            await PerformDiverseTrainingAsync(runCts.Token);
+                            await PerformDiverseTrainingAsync(leagueManager, runCts.Token);
                             if (runCts.Token.IsCancellationRequested || !IsTraining)
                             {
                                 break;
@@ -618,7 +619,7 @@ namespace ChineseChessAI.Training
                         {
                             nextEvolutionAt += populationRefreshInterval;
                             semaphore.Release();
-                            await PerformPopulationRefreshAsync(runCts.Token);
+                            await PerformPopulationRefreshAsync(leagueManager, runCts.Token);
                             if (runCts.Token.IsCancellationRequested || !IsTraining)
                             {
                                 break;
@@ -636,7 +637,7 @@ namespace ChineseChessAI.Training
                         }
 
                         var reservedAgentIds = GetReservedAgentIdsSnapshot();
-                        if (!_leagueManager.TryPickMatch(reservedAgentIds, out var agentMetaA, out var agentMetaB))
+                        if (!leagueManager.TryPickMatch(reservedAgentIds, out var agentMetaA, out var agentMetaB))
                         {
                             semaphore.Release();
                             try
@@ -682,6 +683,7 @@ namespace ChineseChessAI.Training
                                     try
                                     {
                                         await lockSecond.WaitAsync(runCts.Token);
+                                        bool countCompletedGameForSchedule = false;
                                         try
                                         {
                                             using var engineA = CreateLeagueGameEngine(agentMetaA);
@@ -710,16 +712,17 @@ namespace ChineseChessAI.Training
 
                                             if (result.IsSuccess)
                                             {
+                                                countCompletedGameForSchedule = true;
                                                 float resA = aIsRed ? result.RatingResultForRed : -result.RatingResultForRed;
 
                                                 // 【修复 P1】：捕获赛前 ELO 以确保更新公平
                                                 double eloABefore = agentMetaA.Elo;
                                                 double eloBBefore = agentMetaB.Elo;
 
-                                                lock (_leagueManager)
+                                                lock (leagueManager)
                                                 {
-                                                    _leagueManager.UpdateResult(agentMetaA.Id, resA, eloBBefore);
-                                                    _leagueManager.UpdateResult(agentMetaB.Id, -resA, eloABefore);
+                                                    leagueManager.UpdateResult(agentMetaA.Id, resA, eloBBefore);
+                                                    leagueManager.UpdateResult(agentMetaB.Id, -resA, eloABefore);
                                                 }
 
                                                 var combinedExamples = new List<TrainingExample>(result.ExamplesA.Count + result.ExamplesB.Count);
@@ -763,7 +766,8 @@ namespace ChineseChessAI.Training
                                         }
                                         finally
                                         {
-                                            Interlocked.Increment(ref completedGameCounter);
+                                            if (countCompletedGameForSchedule)
+                                                Interlocked.Increment(ref completedGameCounter);
                                             lockSecond.Release();
                                         }
                                     }
@@ -804,8 +808,8 @@ namespace ChineseChessAI.Training
                         if (completedGameCounter >= nextLogAt)
                         {
                             nextLogAt += 10;
-                            _leagueManager.SaveMetadata();
-                            var top = _leagueManager.GetTopNeuralAgents(5);
+                            leagueManager.SaveMetadata();
+                            var top = leagueManager.GetTopNeuralAgents(5);
                             Log("--- [当前排名 Top 5 - Neural only] ---");
                             foreach (var t in top)
                                 Log($"ID:{t.Id} ELO:{t.Elo:F0} 胜率:{(t.Wins * 100.0 / Math.Max(1, t.GamesPlayed)):F1}%");
@@ -836,7 +840,7 @@ namespace ChineseChessAI.Training
                         catch { }
                     }
                     _isTraining = false;
-                    _leagueManager?.SaveMetadata();
+                    leagueManager.SaveMetadata();
                     OnTrainingStopped?.Invoke();
                 }
             });
@@ -860,10 +864,10 @@ namespace ChineseChessAI.Training
                             pa.Model.load(meta.ModelPath);
                             modelLoaded = true;
                         }
-                        catch (EndOfStreamException ex)
+                        catch (Exception ex) when (ex is not OperationCanceledException)
                         {
                             string quarantinedPath = QuarantineCorruptModelFile(meta.ModelPath);
-                            Log($"[模型损坏] Agent_{meta.Id} 模型文件已截断或损坏: {meta.ModelPath}");
+                            Log($"[模型损坏] Agent_{meta.Id} 模型文件无法加载: {meta.ModelPath}");
                             Log($"[模型损坏] 已隔离到: {quarantinedPath}");
                             Log($"[模型损坏-堆栈] {ex}");
                             // 模型损坏后，旧优化器状态对应的是失效的参数，必须一起隔离。
@@ -958,7 +962,7 @@ namespace ChineseChessAI.Training
             return quarantinedPath;
         }
 
-        private async Task PerformPopulationRefreshAsync(CancellationToken token)
+        private async Task PerformPopulationRefreshAsync(LeagueManager leagueManager, CancellationToken token)
         {
             bool maintenanceLockHeld = false;
             var heldLocks = new List<SemaphoreSlim>();
@@ -974,7 +978,7 @@ namespace ChineseChessAI.Training
 
                 Log("[PopulationRefresh] Games drained; waiting for agent activity locks.");
 
-                foreach (int agentId in _leagueManager.GetAllAgentIds())
+                foreach (int agentId in leagueManager.GetAllAgentIds())
                 {
                     var agentLock = GetAgentActiveLock(agentId);
                     await agentLock.WaitAsync(token);
@@ -983,9 +987,9 @@ namespace ChineseChessAI.Training
 
                 lock (_gpuTrainingLock)
                 {
-                    FlushLoadedModelsToDisk();
+                    FlushLoadedModelsToDisk(leagueManager);
 
-                    int populationSize = _leagueManager.GetPopulationSize();
+                    int populationSize = leagueManager.GetPopulationSize();
                     int eliteCount = Math.Clamp(populationSize / 10, 1, Math.Max(1, populationSize - 3));
                     int contenderKeepCount = Math.Clamp(populationSize * 3 / 10, 1, Math.Max(1, populationSize - eliteCount - 2));
                     int diverseKeepCount = Math.Clamp(populationSize / 5, 1, Math.Max(1, populationSize - eliteCount - contenderKeepCount - 1));
@@ -994,7 +998,7 @@ namespace ChineseChessAI.Training
                     int replacementCount = Math.Max(0, populationSize - eliteCount - contenderKeepCount - diverseKeepCount);
                     int immigrantCount = replacementCount > 0 ? Math.Clamp(Math.Max(1, replacementCount / 5), 1, replacementCount) : 0;
 
-                    var refresh = _leagueManager.RefreshPopulation(
+                    var refresh = leagueManager.RefreshPopulation(
                         eliteCount,
                         contenderKeepCount,
                         diverseKeepCount,
@@ -1041,7 +1045,7 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private void FlushLoadedModelsToDisk()
+        private void FlushLoadedModelsToDisk(LeagueManager leagueManager)
         {
             foreach (var agentEntry in _agentPool)
             {
@@ -1050,7 +1054,7 @@ namespace ChineseChessAI.Training
                     continue;
                 }
 
-                var meta = _leagueManager.GetAgentMeta(agentEntry.Key);
+                var meta = leagueManager.GetAgentMeta(agentEntry.Key);
                 if (meta == null)
                 {
                     continue;
@@ -1103,7 +1107,7 @@ namespace ChineseChessAI.Training
 
                 lock (GetFileLock(filePath))
                 {
-                    File.WriteAllText(filePath, JsonSerializer.Serialize(record, new JsonSerializerOptions
+                    ReplayBuffer.WriteTextAtomic(filePath, JsonSerializer.Serialize(record, new JsonSerializerOptions
                     {
                         WriteIndented = true
                     }));
@@ -1210,7 +1214,7 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private async Task PerformDiverseTrainingAsync(CancellationToken token)
+        private async Task PerformDiverseTrainingAsync(LeagueManager leagueManager, CancellationToken token)
         {
             await Task.Run(() =>
             {
@@ -1224,7 +1228,7 @@ namespace ChineseChessAI.Training
                     maintenanceLockHeld = true;
                     WaitForInFlightGamesToDrainWithProgressAsync("周期训练", token).GetAwaiter().GetResult();
 
-                    foreach (int agentId in _leagueManager.GetAllAgentIds())
+                    foreach (int agentId in leagueManager.GetAllAgentIds())
                     {
                         var agentLock = GetAgentActiveLock(agentId);
                         agentLock.Wait(token);
@@ -1249,7 +1253,7 @@ namespace ChineseChessAI.Training
                     int totalSamples = 0;
                     float totalLoss = 0f;
 
-                    int populationSize = _leagueManager.GetPopulationSize();
+                    int populationSize = leagueManager.GetPopulationSize();
                     Log($"[周期训练] 开始：大师样本 {MasterBuffer.Count}，联赛样本 {LeagueBuffer.Count}，训练智能体 {populationSize}");
 
                     lock (_gpuTrainingLock)
@@ -1259,12 +1263,12 @@ namespace ChineseChessAI.Training
                         const float masterRatio = 0.3f;
                         const float leagueRatio = 0.7f;
 
-                        foreach (int agentId in _leagueManager.GetAllAgentIds())
+                        foreach (int agentId in leagueManager.GetAllAgentIds())
                         {
                             if (token.IsCancellationRequested)
                                 return;
 
-                            var meta = _leagueManager.GetAgentMeta(agentId);
+                            var meta = leagueManager.GetAgentMeta(agentId);
                             if (meta == null)
                             {
                                 skippedUninitializedAgents++;
@@ -1518,7 +1522,7 @@ namespace ChineseChessAI.Training
                 resultValue = BoardEvaluation.AdjudicateDrawByMaterial(session.Board);
             }
 
-            if (isComplete && gameHistory.Count > 10)
+            if (gameHistory.Count > 10)
             {
                 var examples = gameHistory.Select(step =>
                 {
@@ -1529,10 +1533,9 @@ namespace ChineseChessAI.Training
                 var masterData = new MasterGameData(examples, standardizedMoves);
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string guid = Guid.NewGuid().ToString("N");
-                File.WriteAllText(
+                ReplayBuffer.WriteTextAtomic(
                     Path.Combine(MasterBuffer.DataDir, $"pgn_game_{timestamp}_{guid}.json"),
-                    JsonSerializer.Serialize(masterData),
-                    Encoding.UTF8);
+                    JsonSerializer.Serialize(masterData));
 
                 totalGames++;
             }
@@ -1555,7 +1558,6 @@ namespace ChineseChessAI.Training
             var session = new GameRuleSession(rules);
             var gameHistory = new List<(float[] state, float[] policy, bool isRedTurn)>();
             var standardizedMoves = new List<string>();
-            bool isComplete = true;
             foreach (var rawMove in rawOrderedMoves)
             {
                 if (ProcessSingleNotationMove(session, rawMove, gameHistory, out string normalizedUcci))
@@ -1564,11 +1566,10 @@ namespace ChineseChessAI.Training
                 }
                 else
                 {
-                    isComplete = false;
                     break;
                 }
             }
-            if (isComplete && gameHistory.Count > 10)
+            if (gameHistory.Count > 10)
             {
                 float resultValue = BoardEvaluation.AdjudicateDrawByMaterial(session.Board);
                 var examples = gameHistory.Select(step =>
@@ -1579,10 +1580,9 @@ namespace ChineseChessAI.Training
 
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string guid = Guid.NewGuid().ToString("N");
-                File.WriteAllText(
+                ReplayBuffer.WriteTextAtomic(
                     Path.Combine(MasterBuffer.DataDir, $"csv_game_{timestamp}_{guid}.json"),
-                    JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)),
-                    Encoding.UTF8);
+                    JsonSerializer.Serialize(new MasterGameData(examples, standardizedMoves)));
                 totalGames++;
             }
         }

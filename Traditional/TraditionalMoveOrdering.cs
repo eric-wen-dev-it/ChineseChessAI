@@ -4,7 +4,7 @@ namespace ChineseChessAI.Traditional
 {
     public sealed class TraditionalMoveOrdering
     {
-        private static readonly int[] VictimValues = { 0, 10_000, 200, 200, 400, 900, 450, 100 };
+        private static readonly int[] VictimValues = { 0, 10_000, 200, 200, 450, 900, 400, 100 };
         private readonly MoveGenerator _generator;
         private readonly OpeningBook? _book;
         private readonly MasterKnowledgeBook? _knowledgeBook;
@@ -39,10 +39,12 @@ namespace ChineseChessAI.Traditional
             int score = 0;
             sbyte attacker = board.GetPiece(move.From);
             sbyte victim = board.GetPiece(move.To);
+            int guidanceBonus = 0;
             if (_book != null)
-                score += _book.GetMoveOrderingBonus(board, move);
+                guidanceBonus += _book.GetMoveOrderingBonus(board, move);
             if (_knowledgeBook != null)
-                score += _knowledgeBook.GetMoveOrderingBonus(board, move);
+                guidanceBonus += _knowledgeBook.GetMoveOrderingBonus(board, move);
+            score += Math.Min(50_000, guidanceBonus);
 
             if (victim != 0)
             {
