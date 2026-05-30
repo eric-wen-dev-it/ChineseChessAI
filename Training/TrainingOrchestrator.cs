@@ -81,7 +81,28 @@ namespace ChineseChessAI.Training
             AppDomain.CurrentDomain.BaseDirectory,
             "data",
             "league_timeout_records");
+        private static readonly string _leaguePendingDataDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "data",
+            "league_pending");
+        private static readonly string _masterTeacherDataDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "data",
+            "master_teacher_data");
+        private static readonly string _masterTeacherBadDir = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "data",
+            "master_teacher_bad");
+        private const int MasterReplayBufferCapacity = 300000;
+        private const int LeagueReplayBufferCapacity = 150000;
+        private const int MaxScoredMasterLoadFiles = 2000;
+        private const int MaxRawMasterLoadFiles = 2000;
+        private const int MaxHistoricalLeagueLoadFiles = 1500;
         private const int MaxLeagueTrainingGames = 5000;
+        private const int TeacherBackfillNodes = 10000;
+        private const int MasterTeacherBackfillNodes = 10000;
+        private static readonly TimeSpan TeacherBackfillIdleDelay = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan TeacherBackfillFileAge = TimeSpan.FromSeconds(3);
         private int _inFlightGameCount = 0;
         private TaskCompletionSource<bool> _gamesDrainedTcs = CreateCompletedTcs();
         private readonly ConcurrentDictionary<int, ActiveLeagueGame> _activeLeagueGames = new();
@@ -98,6 +119,8 @@ namespace ChineseChessAI.Training
         private Task? _backgroundLoadTask;
         private CancellationTokenSource? _watchdogCts;
         private Task? _watchdogTask;
+        private Task? _teacherBackfillTask;
+        private Task? _masterTeacherBackfillTask;
         private long _lastLogUtcTicks = DateTimeOffset.UtcNow.UtcTicks;
         private int _watchdogRestartRequested;
         private volatile bool _skipAgentDisposeOnNextStart;
@@ -457,8 +480,8 @@ namespace ChineseChessAI.Training
         public TrainingOrchestrator()
         {
             ModelPaths.EnsureBestModelsDirectory(AppDomain.CurrentDomain.BaseDirectory);
-            MasterBuffer = new ReplayBuffer(5000000, "data/master_data");
-            LeagueBuffer = new ReplayBuffer(1000000, "data/league_data");
+            MasterBuffer = new ReplayBuffer(MasterReplayBufferCapacity, "data/master_data");
+            LeagueBuffer = new ReplayBuffer(LeagueReplayBufferCapacity, "data/league_data");
 
             MasterBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
             LeagueBuffer.OnSaveError += msg => { Log(msg); OnError?.Invoke(msg); };
@@ -553,6 +576,17 @@ namespace ChineseChessAI.Training
                 try
                 {
                     Log($"=== 万王之王：{populationSize} 智能体联赛启动（传统搜索 {traditionalAgentCount} 个）===");
+                    Directory.CreateDirectory(_leaguePendingDataDir);
+                    Directory.CreateDirectory(LeagueBuffer.DataDir);
+                    Directory.CreateDirectory(_masterTeacherDataDir);
+                    Directory.CreateDirectory(_masterTeacherBadDir);
+
+                    _teacherBackfillTask = Task.Run(
+                        () => RunTeacherBackfillLoopAsync(runCts.Token),
+                        runCts.Token);
+                    _masterTeacherBackfillTask = Task.Run(
+                        () => RunMasterTeacherBackfillLoopAsync(runCts.Token),
+                        runCts.Token);
 
                     // 将数据装载放入独立的后台任务，不阻塞联赛和对局的立即启动
                     _backgroundLoadTask = Task.Run(async () =>
@@ -561,13 +595,19 @@ namespace ChineseChessAI.Training
                         {
                             Log("[后台任务] 正在静默装载大师数据与历史联赛数据...");
 
-                            var masterTask = MasterBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime);
-                            var leagueTask = LeagueBuffer.LoadOldSamplesAsync(int.MaxValue, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime);
+                            var scoredMasterNames = Directory.Exists(_masterTeacherDataDir)
+                                ? Directory.GetFiles(_masterTeacherDataDir, "*.json")
+                                    .Select(Path.GetFileName)
+                                    .Where(name => !string.IsNullOrEmpty(name))
+                                    .ToHashSet(StringComparer.OrdinalIgnoreCase)!
+                                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-                            await Task.WhenAll(masterTask, leagueTask);
-
-                            var (masterSamples, masterGames) = await masterTask;
-                            var (leagueSamples, leagueGames) = await leagueTask;
+                            Log($"[MemoryBudget] master_capacity={MasterReplayBufferCapacity}, league_capacity={LeagueReplayBufferCapacity}, scored_master_files={MaxScoredMasterLoadFiles}, raw_master_files={MaxRawMasterLoadFiles}, league_files={MaxHistoricalLeagueLoadFiles}.");
+                            var (scoredMasterSamples, scoredMasterGames) = await MasterBuffer.LoadOldSamplesAsync(MaxScoredMasterLoadFiles, randomize: true, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime, sourceDataDir: _masterTeacherDataDir);
+                            var (rawMasterSamples, rawMasterGames) = await MasterBuffer.LoadOldSamplesAsync(MaxRawMasterLoadFiles, randomize: true, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime, excludedFileNames: scoredMasterNames);
+                            var (leagueSamples, leagueGames) = await LeagueBuffer.LoadOldSamplesAsync(MaxHistoricalLeagueLoadFiles, randomize: true, logAction: Log, onAuditFailure: (h, m, r) => OnAuditFailureRequested?.Invoke(h, m, r), cancellationToken: runCts.Token, cutoffTime: startTime);
+                            int masterSamples = scoredMasterSamples + rawMasterSamples;
+                            int masterGames = scoredMasterGames + rawMasterGames;
 
                             Log($"[后台装载完成] 大师数据: {masterGames} 局 ({masterSamples} 条) | 联赛数据: {leagueGames} 局 ({leagueSamples} 条)");
                         }
@@ -732,7 +772,7 @@ namespace ChineseChessAI.Training
                                                 if (combinedExamples.Count > 0)
                                                 {
                                                     var moveHistoryUcci = result.MoveHistory.Select(NotationConverter.MoveToUcci).ToList();
-                                                    LeagueBuffer.AddGame(new MasterGameData(combinedExamples, moveHistoryUcci)
+                                                    SavePendingLeagueGame(new MasterGameData(combinedExamples, moveHistoryUcci)
                                                     {
                                                         StartedAt = result.StartedAt,
                                                         EndedAt = result.EndedAt,
@@ -836,6 +876,22 @@ namespace ChineseChessAI.Training
                         try
                         {
                             await _backgroundLoadTask;
+                        }
+                        catch { }
+                    }
+                    if (_teacherBackfillTask != null && !_teacherBackfillTask.IsCompleted)
+                    {
+                        try
+                        {
+                            await _teacherBackfillTask.WaitAsync(TimeSpan.FromSeconds(5));
+                        }
+                        catch { }
+                    }
+                    if (_masterTeacherBackfillTask != null && !_masterTeacherBackfillTask.IsCompleted)
+                    {
+                        try
+                        {
+                            await _masterTeacherBackfillTask.WaitAsync(TimeSpan.FromSeconds(5));
                         }
                         catch { }
                     }
@@ -1179,6 +1235,370 @@ namespace ChineseChessAI.Training
             }
         }
 
+        private void SavePendingLeagueGame(MasterGameData gameData)
+        {
+            try
+            {
+                Directory.CreateDirectory(_leaguePendingDataDir);
+                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                string filePath = Path.Combine(_leaguePendingDataDir, $"game_{timestamp}_{Guid.NewGuid():N}.json");
+                ReplayBuffer.WriteTextAtomic(filePath, JsonSerializer.Serialize(gameData));
+                Log($"[TeacherBackfill] 已入队待打分对局: {Path.GetFileName(filePath)} samples={gameData.Examples.Count}");
+            }
+            catch (Exception ex)
+            {
+                Log($"[TeacherBackfill] 待打分对局保存失败: {ex.Message}");
+                OnError?.Invoke($"[TeacherBackfill] 待打分对局保存失败: {ex.Message}");
+            }
+        }
+
+        private async Task RunTeacherBackfillLoopAsync(CancellationToken token)
+        {
+            Directory.CreateDirectory(_leaguePendingDataDir);
+            Directory.CreateDirectory(LeagueBuffer.DataDir);
+            Log($"[TeacherBackfill] 后台全量打分启动: pending={_leaguePendingDataDir}, final={LeagueBuffer.DataDir}");
+
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    var files = Directory.GetFiles(_leaguePendingDataDir, "*.json")
+                        .Select(path => new FileInfo(path))
+                        .OrderBy(info => info.CreationTimeUtc)
+                        .ThenBy(info => info.Name, StringComparer.Ordinal)
+                        .ToList();
+
+                    bool processedAny = false;
+                    foreach (var file in files)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        if (DateTime.UtcNow - file.LastWriteTimeUtc < TeacherBackfillFileAge)
+                            continue;
+
+                        processedAny = true;
+                        bool success = await TryBackfillTeacherFileAsync(file.FullName, token).ConfigureAwait(false);
+                        if (!success)
+                            await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                    }
+
+                    if (!processedAny)
+                        await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log($"[TeacherBackfill] 后台打分异常: {ex.Message}");
+                    await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                }
+            }
+
+            Log("[TeacherBackfill] 后台全量打分停止。");
+        }
+
+        private async Task<bool> TryBackfillTeacherFileAsync(string pendingPath, CancellationToken token)
+        {
+            string fileName = Path.GetFileName(pendingPath);
+            string json;
+            try
+            {
+                json = File.ReadAllText(pendingPath);
+            }
+            catch (Exception ex)
+            {
+                Log($"[TeacherBackfill] 读取失败 {fileName}: {ex.Message}");
+                return false;
+            }
+
+            MasterGameData? gameData;
+            try
+            {
+                gameData = JsonSerializer.Deserialize<MasterGameData>(json);
+            }
+            catch (Exception ex)
+            {
+                Log($"[TeacherBackfill] JSON 解析失败 {fileName}: {ex.Message}");
+                return MovePendingFileAside(pendingPath, ".invalid");
+            }
+
+            if (gameData?.Examples == null || gameData.Examples.Count == 0)
+            {
+                Log($"[TeacherBackfill] 空对局，跳过 {fileName}");
+                return MovePendingFileAside(pendingPath, ".invalid");
+            }
+
+            var scoredExamples = new List<TrainingExample>(gameData.Examples.Count);
+            int valueLabels = 0;
+            int policyLabels = 0;
+            int skippedLabels = 0;
+            Log($"[TeacherBackfill] 开始全量打分 {fileName}: samples={gameData.Examples.Count}");
+
+            for (int i = 0; i < gameData.Examples.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                TrainingExample example = gameData.Examples[i];
+                if (example.UcciHistoryBefore == null)
+                {
+                    Log($"[TeacherBackfill] 缺少 UcciHistoryBefore，降级保存无教师标签样本 {fileName} sample={i}");
+                    skippedLabels++;
+                    scoredExamples.Add(StripTeacherHistory(example));
+                    continue;
+                }
+
+                bool redToMove = example.UcciHistoryBefore.Length % 2 == 0;
+                PikafishTeacherAnalysis? analysis = await PikafishAdjudicator.TryAnalyzeAsync(
+                    example.UcciHistoryBefore,
+                    redToMove,
+                    TeacherBackfillNodes,
+                    token).ConfigureAwait(false);
+
+                if (analysis == null)
+                {
+                    Log($"[TeacherBackfill] Pikafish 未返回结果，降级保存无教师标签样本 {fileName} sample={i}");
+                    skippedLabels++;
+                    scoredExamples.Add(StripTeacherHistory(example));
+                    continue;
+                }
+
+                ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.BestMove, redToMove);
+                if (teacherPolicy != null)
+                    policyLabels++;
+
+                valueLabels++;
+                scoredExamples.Add(example with
+                {
+                    TeacherValue = analysis.ValueForCurrentPlayer,
+                    TeacherSparsePolicy = teacherPolicy,
+                    UcciHistoryBefore = null
+                });
+            }
+
+            var scoredGame = gameData with
+            {
+                Examples = scoredExamples
+            };
+
+            string finalPath = Path.Combine(LeagueBuffer.DataDir, fileName);
+            try
+            {
+                ReplayBuffer.WriteTextAtomic(finalPath, JsonSerializer.Serialize(scoredGame));
+                File.Delete(pendingPath);
+                LeagueBuffer.AddGame(scoredGame, saveToDisk: false);
+                Log($"[TeacherBackfill] 完成全量打分/降级入库 {fileName}: values={valueLabels}, policies={policyLabels}, skipped={skippedLabels}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[TeacherBackfill] 写入完成目录失败 {fileName}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static ActionProb[]? BuildTeacherSparsePolicy(string bestMove, bool redToMove)
+        {
+            if (string.IsNullOrWhiteSpace(bestMove)
+                || bestMove == "0000"
+                || bestMove.Equals("(none)", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            Move? move = NotationConverter.UcciToMove(bestMove);
+            if (!move.HasValue)
+                return null;
+
+            int idx = move.Value.ToNetworkIndex();
+            if (idx < 0 || idx >= 8100)
+                return null;
+
+            if (redToMove)
+                return new[] { new ActionProb(idx, 1.0f) };
+
+            float[] policy = new float[8100];
+            policy[idx] = 1.0f;
+            return StateEncoder.FlipPolicy(policy)
+                .Select((p, i) => new ActionProb(i, p))
+                .Where(x => x.Prob > 0)
+                .ToArray();
+        }
+
+        private static TrainingExample StripTeacherHistory(TrainingExample example)
+        {
+            return example with { UcciHistoryBefore = null };
+        }
+
+        private bool MovePendingFileAside(string pendingPath, string suffix)
+        {
+            try
+            {
+                string target = pendingPath + suffix;
+                File.Move(pendingPath, target, overwrite: true);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[TeacherBackfill] 隔离待打分文件失败 {Path.GetFileName(pendingPath)}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private async Task RunMasterTeacherBackfillLoopAsync(CancellationToken token)
+        {
+            Directory.CreateDirectory(MasterBuffer.DataDir);
+            Directory.CreateDirectory(_masterTeacherDataDir);
+            Directory.CreateDirectory(_masterTeacherBadDir);
+            Log($"[MasterTeacherBackfill] 后台大师谱全量打分启动: source={MasterBuffer.DataDir}, final={_masterTeacherDataDir}");
+
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    var file = Directory.GetFiles(MasterBuffer.DataDir, "*.json")
+                        .Select(path => new FileInfo(path))
+                        .Where(info =>
+                            !File.Exists(Path.Combine(_masterTeacherDataDir, info.Name)) &&
+                            !File.Exists(Path.Combine(_masterTeacherBadDir, info.Name + ".invalid")))
+                        .OrderBy(info => info.CreationTimeUtc)
+                        .ThenBy(info => info.Name, StringComparer.Ordinal)
+                        .FirstOrDefault();
+
+                    if (file == null)
+                    {
+                        await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    bool success = await TryBackfillMasterTeacherFileAsync(file.FullName, token).ConfigureAwait(false);
+                    if (!success)
+                        await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log($"[MasterTeacherBackfill] 后台大师谱打分异常: {ex.Message}");
+                    await Task.Delay(TeacherBackfillIdleDelay, token).ConfigureAwait(false);
+                }
+            }
+
+            Log("[MasterTeacherBackfill] 后台大师谱全量打分停止。");
+        }
+
+        private async Task<bool> TryBackfillMasterTeacherFileAsync(string sourcePath, CancellationToken token)
+        {
+            string fileName = Path.GetFileName(sourcePath);
+            string finalPath = Path.Combine(_masterTeacherDataDir, fileName);
+            string badPath = Path.Combine(_masterTeacherBadDir, fileName + ".invalid");
+
+            if (File.Exists(finalPath) || File.Exists(badPath))
+                return true;
+
+            MasterGameData? gameData;
+            try
+            {
+                string json = File.ReadAllText(sourcePath);
+                gameData = JsonSerializer.Deserialize<MasterGameData>(json);
+            }
+            catch (Exception ex)
+            {
+                Log($"[MasterTeacherBackfill] 读取/解析失败 {fileName}: {ex.Message}");
+                return WriteMasterBadMarker(badPath, ex.Message);
+            }
+
+            if (gameData?.Examples == null || gameData.Examples.Count == 0)
+            {
+                Log($"[MasterTeacherBackfill] 空大师谱，跳过 {fileName}");
+                return WriteMasterBadMarker(badPath, "empty examples");
+            }
+
+            if (gameData.MoveHistoryUcci == null || gameData.MoveHistoryUcci.Count == 0)
+            {
+                Log($"[MasterTeacherBackfill] 缺少 MoveHistoryUcci，无法打分 {fileName}");
+                return WriteMasterBadMarker(badPath, "missing MoveHistoryUcci");
+            }
+
+            if (gameData.Examples.Count > gameData.MoveHistoryUcci.Count + 1)
+            {
+                Log($"[MasterTeacherBackfill] 样本数超过棋谱长度，无法可靠打分 {fileName}: samples={gameData.Examples.Count}, moves={gameData.MoveHistoryUcci.Count}");
+                return WriteMasterBadMarker(badPath, "examples exceed move history");
+            }
+
+            var scoredExamples = new List<TrainingExample>(gameData.Examples.Count);
+            int valueLabels = 0;
+            int policyLabels = 0;
+            Log($"[MasterTeacherBackfill] 开始大师谱全量打分 {fileName}: samples={gameData.Examples.Count}");
+
+            for (int i = 0; i < gameData.Examples.Count; i++)
+            {
+                token.ThrowIfCancellationRequested();
+                TrainingExample example = gameData.Examples[i];
+                string[] historyBefore = example.UcciHistoryBefore
+                    ?? gameData.MoveHistoryUcci.Take(i).ToArray();
+                bool redToMove = historyBefore.Length % 2 == 0;
+
+                PikafishTeacherAnalysis? analysis = await PikafishAdjudicator.TryAnalyzeAsync(
+                    historyBefore,
+                    redToMove,
+                    MasterTeacherBackfillNodes,
+                    token).ConfigureAwait(false);
+
+                if (analysis == null)
+                {
+                    Log($"[MasterTeacherBackfill] Pikafish 未返回结果，降级保存无教师标签样本 {fileName} sample={i}");
+                    scoredExamples.Add(StripTeacherHistory(example));
+                    continue;
+                }
+
+                ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.BestMove, redToMove);
+                if (teacherPolicy != null)
+                    policyLabels++;
+                valueLabels++;
+
+                scoredExamples.Add(example with
+                {
+                    TeacherValue = analysis.ValueForCurrentPlayer,
+                    TeacherSparsePolicy = teacherPolicy,
+                    UcciHistoryBefore = null
+                });
+            }
+
+            var scoredGame = gameData with
+            {
+                Examples = scoredExamples
+            };
+
+            try
+            {
+                ReplayBuffer.WriteTextAtomic(finalPath, JsonSerializer.Serialize(scoredGame));
+                Log($"[MasterTeacherBackfill] 完成大师谱全量打分 {fileName}: values={valueLabels}, policies={policyLabels}");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[MasterTeacherBackfill] 写入完成目录失败 {fileName}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private bool WriteMasterBadMarker(string badPath, string reason)
+        {
+            try
+            {
+                Directory.CreateDirectory(_masterTeacherBadDir);
+                ReplayBuffer.WriteTextAtomic(badPath, reason);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Log($"[MasterTeacherBackfill] 写入坏文件标记失败 {Path.GetFileName(badPath)}: {ex.Message}");
+                return false;
+            }
+        }
+
         private async Task LogGameTimeoutRequestAsync(
             int gameId,
             int agentIdA,
@@ -1258,7 +1678,7 @@ namespace ChineseChessAI.Training
 
                     lock (_gpuTrainingLock)
                     {
-                        const int batchSize = 192;
+                        const int batchSize = 256;
                         const int trainingEpochs = 2;
                         const float masterRatio = 0.3f;
                         const float leagueRatio = 0.7f;

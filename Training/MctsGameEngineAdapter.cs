@@ -22,6 +22,11 @@ namespace ChineseChessAI.Training
             return _engine.GetMoveWithProbabilitiesAsArrayAsync(board, searchBudget, currentMoves, maxMoves, cancellationToken);
         }
 
+        public void NotifyMovePlayed(Board boardAfterMove, Move move)
+        {
+            _engine.NotifyMovePlayed(boardAfterMove, move);
+        }
+
         public void Dispose()
         {
             _engine.Dispose();

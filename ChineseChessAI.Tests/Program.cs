@@ -91,6 +91,7 @@ static void RunMctsVsTraditionalSmoke(string modelPath)
         }
 
         board.Push(move.From, move.To);
+        mcts.NotifyMovePlayed(board, move);
     }
 }
 
@@ -281,6 +282,11 @@ static async Task<AgentGameResult> RunAgentGame(
         }
 
         board.Push(move.From, move.To);
+        engineA.NotifyMovePlayed(board, move);
+        if (!ReferenceEquals(engineA, engineB))
+        {
+            engineB.NotifyMovePlayed(board, move);
+        }
         string moveUcci = NotationConverter.MoveToUcci(move);
         log($"move game={game} ply={ply + 1} agent={agent} side={side} move={moveUcci} search_ms={elapsed.TotalMilliseconds:F0} hash={board.CurrentHash}");
 

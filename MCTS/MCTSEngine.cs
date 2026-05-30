@@ -9,12 +9,17 @@ namespace ChineseChessAI.MCTS
     public class MCTSEngine : IDisposable
     {
         private const int LegalMovesCacheCapacity = 32768;
-        private const int InferenceCacheCapacity = 16384;
+        private const int InferenceCacheCapacity = 2048;
 
         private readonly CChessNet _model;
         private readonly ChineseChessRuleEngine _rules;
         private readonly InferenceService.Lease _inferenceLease;
         private readonly double _cPuct;
+        private readonly object _rootLock = new();
+        private MCTSNode? _root;
+        private ulong _rootHash;
+        private sbyte[]? _rootPosition;
+        private readonly BoundedCache<CachedLegalMoves> _legalMovesCache = new(LegalMovesCacheCapacity);
         private readonly BoundedCache<CachedInference> _inferenceCache = new(InferenceCacheCapacity);
         private readonly ConcurrentDictionary<PositionCacheKey, Lazy<Task<CachedInference>>> _inferenceInFlight = new();
 
@@ -40,7 +45,7 @@ namespace ChineseChessAI.MCTS
 
         public async Task<(Move move, float[] pi)> GetMoveWithProbabilitiesAsArrayAsync(Board board, int simulations, int currentMoves = 0, int maxMoves = 999, CancellationToken cancellationToken = default, bool addRootNoise = true)
         {
-            var root = new MCTSNode(null, 1.0);
+            var root = GetOrCreateRoot(board);
             await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0, cancellationToken);
 
             if (addRootNoise)
@@ -55,10 +60,11 @@ namespace ChineseChessAI.MCTS
             var tasks = Enumerable.Range(0, numThreads).Select(t => Task.Run(async () =>
             {
                 int taskSims = (t == 0) ? baseSims + extraSims : baseSims;
+                var searchBoard = CloneBoard(board);
                 for (int i = 0; i < taskSims; i++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    await SearchAsync(root, CloneBoard(board), currentMoves, maxMoves, 0, cancellationToken);
+                    await SearchAsync(root, searchBoard, currentMoves, maxMoves, 0, cancellationToken);
                 }
             }));
 
@@ -67,7 +73,7 @@ namespace ChineseChessAI.MCTS
             float[] piData = new float[8100];
             var legalMoves = GetLegalMoves(board, board.CurrentHash, cancellationToken);
 
-            if (root.Children.IsEmpty)
+            if (root.Children.Count == 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -82,19 +88,39 @@ namespace ChineseChessAI.MCTS
 
             var rootChildren = root.Children.ToArray();
             var selectableChildren = PreferNonRepeatingRootMoves(board, rootChildren);
-            double totalVisits = rootChildren.Sum(x => x.Value.N);
+            double totalVisits = rootChildren.Sum(x => x.Node.N);
 
             foreach (var child in rootChildren)
             {
-                int moveIdx = child.Key.ToNetworkIndex();
+                int moveIdx = child.Move.ToNetworkIndex();
                 if (moveIdx >= 0 && moveIdx < 8100)
                 {
-                    piData[moveIdx] = (float)(child.Value.N / (totalVisits > 0 ? totalVisits : 1));
+                    piData[moveIdx] = (float)(child.Node.N / (totalVisits > 0 ? totalVisits : 1));
                 }
             }
 
-            var bestMove = selectableChildren.OrderByDescending(x => x.Value.N).First().Key;
+            Move bestMove = SelectMostVisitedMove(selectableChildren);
             return (bestMove, piData);
+        }
+
+        public void NotifyMovePlayed(Board boardAfterMove, Move move)
+        {
+            sbyte[] position = boardAfterMove.GetState();
+            lock (_rootLock)
+            {
+                if (_root != null && _root.TryGetChild(move, out MCTSNode child))
+                {
+                    child.DetachParent();
+                    _root = child;
+                }
+                else
+                {
+                    _root = new MCTSNode(null, 1.0);
+                }
+
+                _rootHash = boardAfterMove.CurrentHash;
+                _rootPosition = position;
+            }
         }
 
         private async Task SearchAsync(MCTSNode node, Board board, int currentMoves, int maxMoves, int depth, CancellationToken cancellationToken)
@@ -149,30 +175,27 @@ namespace ChineseChessAI.MCTS
                 }
             }
 
-            var childrenSnapshot = node.Children.ToArray();
-            var bestChild = childrenSnapshot
-                .OrderByDescending(x => x.Value.GetPUCTValue(_cPuct, node.N))
-                .First();
+            MCTSChild bestChild = SelectBestChild(node);
 
-            Interlocked.Increment(ref bestChild.Value.VirtualLoss);
+            Interlocked.Increment(ref bestChild.Node.VirtualLoss);
             PushCounter.AddSample(1);
-            board.Push(bestChild.Key.From, bestChild.Key.To);
+            board.Push(bestChild.Move.From, bestChild.Move.To);
 
             try
             {
-                await SearchAsync(bestChild.Value, board, currentMoves, maxMoves, depth + 1, cancellationToken);
+                await SearchAsync(bestChild.Node, board, currentMoves, maxMoves, depth + 1, cancellationToken);
             }
             finally
             {
                 PopCounter.AddSample(1);
                 board.Pop();
-                Interlocked.Decrement(ref bestChild.Value.VirtualLoss);
+                Interlocked.Decrement(ref bestChild.Node.VirtualLoss);
             }
         }
 
         private void ApplyDirichletNoise(MCTSNode root)
         {
-            if (root.Children.IsEmpty)
+            if (root.Children.Count == 0)
             {
                 return;
             }
@@ -183,7 +206,7 @@ namespace ChineseChessAI.MCTS
             var noise = SampleDirichlet(childrenSnapshot.Length, alpha);
             for (int i = 0; i < childrenSnapshot.Length; i++)
             {
-                var node = childrenSnapshot[i].Value;
+                var node = childrenSnapshot[i].Node;
                 node.P = (1 - epsilon) * node.P + epsilon * noise[i];
             }
         }
@@ -343,13 +366,48 @@ namespace ChineseChessAI.MCTS
         private List<Move> GetLegalMoves(Board board, ulong boardHash, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            sbyte[] position = board.GetState();
+            if (_legalMovesCache.TryGet(boardHash, out CachedLegalMoves cached))
+            {
+                if (cached.Matches(position))
+                {
+                    LegalMovesCacheHitCounter.AddSample(1);
+                    return new List<Move>(cached.Moves);
+                }
+
+                _legalMovesCache.TryRemove(boardHash);
+            }
+
             LegalMovesCacheMissCounter.AddSample(1);
-            return _rules.GetLegalMoves(board, cancellationToken: cancellationToken);
+            var moves = _rules.GetLegalMoves(board, cancellationToken: cancellationToken);
+            if (_legalMovesCache.TryAdd(boardHash, new CachedLegalMoves(position, moves.ToArray())))
+            {
+                TrimLegalMovesCacheIfNeeded();
+            }
+
+            return moves;
         }
 
-        private static KeyValuePair<Move, MCTSNode>[] PreferNonRepeatingRootMoves(
+        private MCTSNode GetOrCreateRoot(Board board)
+        {
+            sbyte[] position = board.GetState();
+            lock (_rootLock)
+            {
+                if (_root != null && _rootHash == board.CurrentHash && _rootPosition != null && _rootPosition.AsSpan().SequenceEqual(position))
+                {
+                    return _root;
+                }
+
+                _root = new MCTSNode(null, 1.0);
+                _rootHash = board.CurrentHash;
+                _rootPosition = position;
+                return _root;
+            }
+        }
+
+        private static MCTSChild[] PreferNonRepeatingRootMoves(
             Board board,
-            KeyValuePair<Move, MCTSNode>[] rootChildren)
+            MCTSChild[] rootChildren)
         {
             if (rootChildren.Length <= 1)
             {
@@ -357,9 +415,50 @@ namespace ChineseChessAI.MCTS
             }
 
             var nonRepeating = rootChildren
-                .Where(child => !board.WillRepeatPosition(child.Key.From, child.Key.To))
+                .Where(child => !board.WillRepeatPosition(child.Move.From, child.Move.To))
                 .ToArray();
             return nonRepeating.Length > 0 ? nonRepeating : rootChildren;
+        }
+
+        private MCTSChild SelectBestChild(MCTSNode node)
+        {
+            var children = node.Children;
+            if (children.Count == 0)
+            {
+                throw new InvalidOperationException("Cannot select a child from an unexpanded MCTS node.");
+            }
+
+            MCTSChild bestChild = children[0];
+            double bestScore = bestChild.Node.GetPUCTValue(_cPuct, node.N);
+            for (int i = 1; i < children.Count; i++)
+            {
+                MCTSChild child = children[i];
+                double score = child.Node.GetPUCTValue(_cPuct, node.N);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestChild = child;
+                }
+            }
+
+            return bestChild;
+        }
+
+        private static Move SelectMostVisitedMove(MCTSChild[] children)
+        {
+            MCTSChild bestChild = children[0];
+            int bestVisits = bestChild.Node.N;
+            for (int i = 1; i < children.Length; i++)
+            {
+                int visits = children[i].Node.N;
+                if (visits > bestVisits)
+                {
+                    bestVisits = visits;
+                    bestChild = children[i];
+                }
+            }
+
+            return bestChild.Move;
         }
 
         private async Task<CachedInference> GetInferenceAsync(Board board, ulong boardHash, CancellationToken cancellationToken)
@@ -435,12 +534,29 @@ namespace ChineseChessAI.MCTS
             }
         }
 
+        private void TrimLegalMovesCacheIfNeeded()
+        {
+            int removed = _legalMovesCache.TrimIfNeeded();
+            if (removed > 0)
+            {
+                LegalMovesCacheTrimCounter.AddSample(removed);
+            }
+        }
+
         public void Dispose()
         {
             _inferenceLease?.Dispose();
         }
 
         private sealed record CachedInference(sbyte[] Position, float[] PolicyLogits, double Value)
+        {
+            public bool Matches(sbyte[] position)
+            {
+                return Position.AsSpan().SequenceEqual(position);
+            }
+        }
+
+        private sealed record CachedLegalMoves(sbyte[] Position, Move[] Moves)
         {
             public bool Matches(sbyte[] position)
             {

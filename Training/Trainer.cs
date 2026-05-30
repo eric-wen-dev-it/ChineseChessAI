@@ -14,11 +14,11 @@ namespace ChineseChessAI.Training
         private readonly CChessNet _model;
         private torch.optim.Optimizer _optimizer;
         private LRScheduler _scheduler;
-        private const double InitialLearningRate = 0.0002;
+        private const double InitialLearningRate = 0.00005;
         private const double MinLearningRate = 0.00001;
         private const float HardValueTarget = 0.95f;
-        private const float TeacherValueWeight = 0.65f;
-        private const float TeacherPolicyWeight = 0.35f;
+        private const float TeacherValueWeight = 0.80f;
+        private const float TeacherPolicyWeight = 0.75f;
         private int _iterationCount = 0;
 
         public Trainer(CChessNet model)

@@ -7,7 +7,8 @@ namespace ChineseChessAI.Core
         ActionProb[] SparsePolicy,
         float Value,
         float? TeacherValue = null,
-        ActionProb[]? TeacherSparsePolicy = null);
+        ActionProb[]? TeacherSparsePolicy = null,
+        string[]? UcciHistoryBefore = null);
 
     public record MasterGameData
     {

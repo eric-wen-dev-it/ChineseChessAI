@@ -1,17 +1,19 @@
 using ChineseChessAI.Core;
-using System.Collections.Concurrent;
-
 namespace ChineseChessAI.MCTS
 {
     public class MCTSNode
     {
-        public double Q { get; private set; } = 0;
-        public double W { get; private set; } = 0;
+        private double _q = 0;
+        private double _w = 0;
+        private int _n = 0;
+
+        public double Q => Volatile.Read(ref _q);
+        public double W => Volatile.Read(ref _w);
         public double P
         {
             get; set;
         }
-        public int N { get; private set; } = 0;
+        public int N => Volatile.Read(ref _n);
 
         // 【核心修复】：增加虚拟损失字段，用于多线程防碰撞
         public int VirtualLoss = 0;
@@ -31,9 +33,10 @@ namespace ChineseChessAI.MCTS
 
         public MCTSNode? Parent
         {
-            get;
+            get; private set;
         }
-        public ConcurrentDictionary<Move, MCTSNode> Children { get; } = new ConcurrentDictionary<Move, MCTSNode>();
+        private MCTSChild[] _children = Array.Empty<MCTSChild>();
+        public IReadOnlyList<MCTSChild> Children => _children;
         public Move LastMove
         {
             get;
@@ -46,7 +49,7 @@ namespace ChineseChessAI.MCTS
             LastMove = lastMove;
         }
 
-        public bool IsLeaf => Children.IsEmpty;
+        public bool IsLeaf => Volatile.Read(ref _children).Length == 0;
 
         public bool IsExpanding => Volatile.Read(ref _isExpanding) != 0;
 
@@ -54,8 +57,8 @@ namespace ChineseChessAI.MCTS
         {
             // 【核心修复】：快照式读取，确保在计算过程中 vl, n, w 是一致的
             int vl = VirtualLoss;
-            int n_raw = N;
-            double w_raw = W;
+            int n_raw = Volatile.Read(ref _n);
+            double w_raw = Volatile.Read(ref _w);
 
             int n = n_raw + vl;
             // Negamax 结构下，父节点评估子节点时需要取 -Q。
@@ -67,10 +70,36 @@ namespace ChineseChessAI.MCTS
 
         public void Expand(IEnumerable<(Move move, double prob)> policy)
         {
-            foreach (var (move, prob) in policy)
+            var children = policy
+                .GroupBy(x => x.move)
+                .Select(group =>
+                {
+                    var (move, prob) = group.First();
+                    return new MCTSChild(move, new MCTSNode(this, prob, move));
+                })
+                .ToArray();
+
+            Volatile.Write(ref _children, children);
+        }
+
+        public bool TryGetChild(Move move, out MCTSNode child)
+        {
+            foreach (var candidate in Volatile.Read(ref _children))
             {
-                Children.TryAdd(move, new MCTSNode(this, prob, move));
+                if (candidate.Move.Equals(move))
+                {
+                    child = candidate.Node;
+                    return true;
+                }
             }
+
+            child = default!;
+            return false;
+        }
+
+        public void DetachParent()
+        {
+            Parent = null;
         }
 
         private SpinLock _spinLock = new SpinLock();
@@ -84,9 +113,9 @@ namespace ChineseChessAI.MCTS
             try
             {
                 _spinLock.Enter(ref lockTaken);
-                N++;
-                W += value;
-                Q = W / N;
+                _n++;
+                _w += value;
+                _q = _w / _n;
             }
             finally
             {
@@ -97,4 +126,6 @@ namespace ChineseChessAI.MCTS
             Parent?.Update(-value);
         }
     }
+
+    public readonly record struct MCTSChild(Move Move, MCTSNode Node);
 }

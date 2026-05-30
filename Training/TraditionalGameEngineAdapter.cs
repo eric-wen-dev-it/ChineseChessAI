@@ -67,6 +67,10 @@ namespace ChineseChessAI.Training
             return Task.FromResult((result.BestMove, policy));
         }
 
+        public void NotifyMovePlayed(Board boardAfterMove, Move move)
+        {
+        }
+
         private static (Move Move, float[] Policy) CreateFallbackPolicy(List<Move> legalMoves, float[] policy)
         {
             float uniformProbability = 1.0f / legalMoves.Count;

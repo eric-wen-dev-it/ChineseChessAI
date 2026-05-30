@@ -13,5 +13,7 @@ namespace ChineseChessAI.Training
             int currentMoves,
             int maxMoves,
             CancellationToken cancellationToken);
+
+        void NotifyMovePlayed(Board boardAfterMove, Move move);
     }
 }

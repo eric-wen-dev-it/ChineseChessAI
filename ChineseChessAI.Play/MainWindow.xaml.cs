@@ -705,6 +705,12 @@ namespace ChineseChessAI.Play
         {
             string moveName = _session.Board.GetChineseMoveName(move.From, move.To);
             _session.ApplyMove(move);
+            _redMctsEngine?.NotifyMovePlayed(_session.Board, move);
+            if (!ReferenceEquals(_redMctsEngine, _blackMctsEngine))
+            {
+                _blackMctsEngine?.NotifyMovePlayed(_session.Board, move);
+            }
+
             AppendLog($"{actor}: {moveName} ({move})");
         }
 
@@ -994,6 +1000,11 @@ namespace ChineseChessAI.Play
                 }
 
                 board.Push(move.From, move.To);
+                candidateEngine.NotifyMovePlayed(board, move);
+                if (!ReferenceEquals(candidateEngine, baselineEngine))
+                {
+                    baselineEngine.NotifyMovePlayed(board, move);
+                }
 
                 if (board.LastMoveWasIrreversible)
                 {
