@@ -18,7 +18,7 @@ namespace ChineseChessAI.Training
 
     public static class PikafishAdjudicator
     {
-        private const int DefaultNodes = 5000;
+        private const int DefaultNodes = 10000;
         private const int WinThresholdCentipawns = 250;
         private const int MaxClientCount = 4;
         private static readonly SemaphoreSlim ClientSlots = new(MaxClientCount, MaxClientCount);

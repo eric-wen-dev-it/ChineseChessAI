@@ -9,7 +9,7 @@ namespace ChineseChessAI.MCTS
     public class MCTSEngine : IDisposable
     {
         private const int LegalMovesCacheCapacity = 32768;
-        private const int InferenceCacheCapacity = 16384;
+        private const int InferenceCacheCapacity = 2048;
 
         private readonly CChessNet _model;
         private readonly ChineseChessRuleEngine _rules;
