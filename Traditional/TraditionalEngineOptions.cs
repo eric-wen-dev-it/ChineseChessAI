@@ -30,6 +30,12 @@ namespace ChineseChessAI.Traditional
 
         public MasterKnowledgeBook? MasterKnowledgeBook { get; init; }
 
+        // 直接照谱出着的门槛：该着法至少出现过的大师对局数，以及
+        // 从行棋方视角的最低得分率（胜=1/和=0.5，胜负未知的对局不计入）。
+        public int MasterBookMinCount { get; init; } = 3;
+
+        public double MasterBookMinWinRate { get; init; } = 0.40;
+
         public int RootParallelism { get; init; } = Math.Clamp(Environment.ProcessorCount, 1, 16);
     }
 }

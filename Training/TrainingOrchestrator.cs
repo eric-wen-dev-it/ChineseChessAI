@@ -509,7 +509,7 @@ namespace ChineseChessAI.Training
             traditionalAgentCount = Math.Clamp(traditionalAgentCount, 0, populationSize - 1);
 
             if (populationRefreshInterval <= 0)
-                populationRefreshInterval = populationSize * 25;
+                populationRefreshInterval = populationSize * 100;   // ×4(原 25):每人每轮 ~200 盘,Elo 噪声 ±57→±28,淘汰决策才有信号(50 盘时噪声大于梯队真实差距 15-30)
             populationRefreshInterval = Math.Max(populationRefreshInterval, populationSize * 4);
             if (maxPopulationRefreshCycles.HasValue && maxPopulationRefreshCycles.Value <= 0)
                 throw new ArgumentOutOfRangeException(nameof(maxPopulationRefreshCycles));
@@ -1047,8 +1047,9 @@ namespace ChineseChessAI.Training
 
                     int populationSize = leagueManager.GetPopulationSize();
                     int eliteCount = Math.Clamp(populationSize / 10, 1, Math.Max(1, populationSize - 3));
-                    int contenderKeepCount = Math.Clamp(populationSize * 3 / 10, 1, Math.Max(1, populationSize - eliteCount - 2));
-                    int diverseKeepCount = Math.Clamp(populationSize / 5, 1, Math.Max(1, populationSize - eliteCount - contenderKeepCount - 1));
+                    // 竞争者 3/10→4/10、多样性 1/5→1/4:淘汰率 ~35%→~20%。测量噪声下重淘汰≈随机漂变,轻淘汰+长周期让选择有信号
+                    int contenderKeepCount = Math.Clamp(populationSize * 4 / 10, 1, Math.Max(1, populationSize - eliteCount - 2));
+                    int diverseKeepCount = Math.Clamp(populationSize / 4, 1, Math.Max(1, populationSize - eliteCount - contenderKeepCount - 1));
                     int parentPoolSize = Math.Clamp(Math.Min(10, Math.Max(4, populationSize / 5)), 1, populationSize);
 
                     int replacementCount = Math.Max(0, populationSize - eliteCount - contenderKeepCount - diverseKeepCount);
@@ -1059,14 +1060,15 @@ namespace ChineseChessAI.Training
                         contenderKeepCount,
                         diverseKeepCount,
                         parentPoolSize,
-                        immigrantCount);
+                        immigrantCount,
+                        newbornProtectionGames: 100);
 
                     RefreshAgentPool(refresh.ReplacedAgentIds);
                     TrimIdleAgentPool();
 
                     if (refresh.Replaced > 0)
                     {
-                        Log($"[种群重组] 完成：精英保留 {refresh.EliteKept}，竞争者保留 {refresh.ContenderKept}，多样性保留 {refresh.DiverseKept}，重建 {refresh.Replaced}（后代 {refresh.OffspringCreated}，移民 {refresh.ImmigrantsCreated}）。");
+                        Log($"[种群重组] 完成：精英保留 {refresh.EliteKept}，竞争者保留 {refresh.ContenderKept}，多样性保留 {refresh.DiverseKept}，新生保护 {refresh.NewbornProtected}，重建 {refresh.Replaced}（后代 {refresh.OffspringCreated}，移民 {refresh.ImmigrantsCreated}）。");
                         foreach (string line in refresh.PreviewLines)
                         {
                             Log($"[种群重组] {line}");

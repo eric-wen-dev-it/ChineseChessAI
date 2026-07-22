@@ -22,9 +22,22 @@ namespace ChineseChessAI.Traditional
 
         public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken = default)
         {
-            if (_options.OpeningBook != null && _options.OpeningBook.TryGetMove(board, _options.OpeningBookMode, out var bookMove))
+            // 优先查带胜负统计的知识谱（覆盖 120 步），按胜率下界选着；
+            // 该谱查不到时再退回按流行度统计的开局谱（覆盖 24 步）。
+            if (_options.MasterKnowledgeBook != null && _options.MasterKnowledgeBook.TryGetBookMove(
+                    board,
+                    _options.OpeningBookMode,
+                    _options.MasterBookMinCount,
+                    _options.MasterBookMinWinRate,
+                    out var masterKnowledge))
             {
-                return new SearchResult(bookMove, 0, 0, 0, TimeSpan.Zero, new[] { bookMove }, true);
+                var masterMove = masterKnowledge.Move;
+                return new SearchResult(masterMove, 0, 0, 0, TimeSpan.Zero, new[] { masterMove }, true, FromBook: true);
+            }
+
+            if (_options.OpeningBook != null && _options.OpeningBook.TryGetMove(board, _options.OpeningBookMode, out var bookMove, _options.MasterBookMinCount))
+            {
+                return new SearchResult(bookMove, 0, 0, 0, TimeSpan.Zero, new[] { bookMove }, true, FromBook: true);
             }
 
             if (ShouldUseParallelRoot(limits))
@@ -46,90 +59,161 @@ namespace ChineseChessAI.Traditional
                 return new SearchResult(default, -_options.MateScore, 0, 0, stopwatch.Elapsed, Array.Empty<Move>(), true);
 
             var orderedMoves = _moveOrdering.OrderMoves(board, rootMoves);
+            if (orderedMoves.Count == 1)
+                return new SearchResult(orderedMoves[0], 0, 0, 0, stopwatch.Elapsed, new[] { orderedMoves[0] }, true);
+
             using var timeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeCts.CancelAfter(limits.MoveTimeMs);
             var token = timeCts.Token;
 
-            object sync = new();
-            Move bestMove = orderedMoves[0];
-            int bestScore = int.MinValue + 1;
-            int bestDepth = 0;
-            long totalNodes = 0;
-            int bestOrder = int.MaxValue;
-            bool allCompleted = true;
-            List<Move> bestPv = new() { bestMove };
-
-            try
+            // 每个根着法一个持久工人:置换表跨轮复用,重搜浅层几乎免费。
+            var workers = new TraditionalEngine[orderedMoves.Count];
+            var childBoards = new Board[orderedMoves.Count];
+            for (int i = 0; i < orderedMoves.Count; i++)
             {
-                Parallel.ForEach(
-                    orderedMoves.Select((move, index) => (Move: move, Order: index)),
-                    new ParallelOptions
-                    {
-                        MaxDegreeOfParallelism = Math.Max(1, _options.RootParallelism)
-                    },
-                    item =>
-                    {
-                        if (token.IsCancellationRequested)
+                workers[i] = CreateWorkerWithoutBookMove();
+                var childBoard = board.Clone();
+                childBoard.Push(orderedMoves[i].From, orderedMoves[i].To);
+                childBoards[i] = childBoard;
+            }
+
+            object sync = new();
+            long totalNodes = 0;
+            Move bestMove = orderedMoves[0];
+            int bestScore = 0;
+            int bestDepth = 0;
+            List<Move> bestPv = new() { bestMove };
+            bool reachedMaxDepth = false;
+            int seedIndex = 0;
+
+            int Remaining() => limits.MoveTimeMs - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue - 1);
+
+            // 判定"我方此着直接将死/困毙对方":子局面无合法着法,任何深度下都成立。
+            static bool IsImmediateMate(SearchResult childResult) =>
+                childResult.Completed && childResult.Depth == 0 && childResult.PrincipalVariation.Count == 0;
+
+            // 根层同步迭代加深:一轮内全部根着法并行、全窗口算到同一子树深度,
+            // 整轮算完才采纳比较结果;没算完的轮次整轮作废,沿用上一轮结论,
+            // 杜绝拿浅层乐观评分压过深层真实评分的旧病。上一轮最佳着法排在
+            // 本轮首位。实测注:曾试过共享 α 收窄子树窗口(PVS/零窗试探两种),
+            // 均因本引擎 fail-hard 截断证伪昂贵+跨轮 TT 边界污染而净变慢,勿回退。
+            for (int depth = 2; depth <= limits.MaxDepth; depth++)
+            {
+                int childDepth = depth - 1;
+                bool roundAborted = false;
+                int roundBestScore = int.MinValue + 1;
+                int roundBestIndex = -1;
+                List<Move>? roundBestPv = null;
+
+                var roundOrder = new List<int>(orderedMoves.Count) { seedIndex };
+                for (int i = 0; i < orderedMoves.Count; i++)
+                {
+                    if (i != seedIndex)
+                        roundOrder.Add(i);
+                }
+
+                try
+                {
+                    // 故意不给 ParallelOptions 传 CancellationToken:协作取消会让
+                    // ForEach 在超时瞬间抛 OCE 并等待全部副本任务汇合,该汇合在
+                    // net10 上出现过挂死(2026-08-17 对局实测,线程卡在 EH.DispatchEx)。
+                    // 取消一律由委托入口自查 + 子树搜索内部 ShouldStop 快速退出。
+                    Parallel.ForEach(
+                        roundOrder,
+                        new ParallelOptions
                         {
+                            MaxDegreeOfParallelism = Math.Max(1, _options.RootParallelism)
+                        },
+                        i =>
+                        {
+                            if (Volatile.Read(ref roundAborted) || token.IsCancellationRequested)
+                            {
+                                Volatile.Write(ref roundAborted, true);
+                                return;
+                            }
+
+                            int remaining = Remaining();
+                            if (remaining <= 0)
+                            {
+                                Volatile.Write(ref roundAborted, true);
+                                return;
+                            }
+
+                            int a = Math.Max(Volatile.Read(ref roundBestScore), -_options.MateScore);
+                            var childLimits = new SearchLimits(childDepth, remaining, limits.QuiescenceDepth);
+                            var childResult = workers[i].SearchSubtree(childBoards[i], childLimits, null, null, token);
                             lock (sync)
                             {
-                                allCompleted = false;
+                                totalNodes += childResult.Nodes;
                             }
 
-                            return;
-                        }
-
-                        var childBoard = board.Clone();
-                        childBoard.Push(item.Move.From, item.Move.To);
-
-                        var worker = CreateWorkerWithoutBookMove();
-                        int childDepth = limits.MoveTimeMs < 10_000
-                            ? Math.Max(1, limits.MaxDepth - 2)
-                            : Math.Max(1, limits.MaxDepth - 1);
-                        var childLimits = new SearchLimits(
-                            childDepth,
-                            Math.Max(1, limits.MoveTimeMs - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue - 1)),
-                            limits.QuiescenceDepth);
-
-                        var childResult = worker.Search(childBoard, childLimits, token);
-                        int score;
-                        int depth;
-                        if (childResult.Depth <= 0 || Math.Abs(childResult.Score) > _options.MateScore)
-                        {
-                            score = -new TraditionalEvaluator().Evaluate(childBoard);
-                            depth = 1;
-                        }
-                        else
-                        {
-                            score = -childResult.Score;
-                            depth = childResult.Depth + 1;
-                        }
-                        var pv = new List<Move> { item.Move };
-                        pv.AddRange(childResult.PrincipalVariation);
-
-                        lock (sync)
-                        {
-                            totalNodes += childResult.Nodes;
-                            allCompleted &= childResult.Completed;
-                            if (score > bestScore || (score == bestScore && depth > bestDepth) || (score == bestScore && depth == bestDepth && item.Order < bestOrder))
+                            int score;
+                            List<Move> pv;
+                            if (IsImmediateMate(childResult))
                             {
-                                bestScore = score;
-                                bestDepth = depth;
-                                bestMove = item.Move;
-                                bestOrder = item.Order;
-                                bestPv = pv;
+                                score = -childResult.Score;
+                                pv = new List<Move> { orderedMoves[i] };
                             }
-                        }
-                    });
-            }
-            catch (OperationCanceledException)
-            {
-                allCompleted = false;
+                            else
+                            {
+                                if (!childResult.Completed || childResult.Depth < childDepth)
+                                {
+                                    Volatile.Write(ref roundAborted, true);
+                                    return;
+                                }
+
+                                score = -childResult.Score;
+                                if (score <= a)
+                                    return; // 确证不优于已知最佳,淘汰。
+
+                                pv = new List<Move> { orderedMoves[i] };
+                                pv.AddRange(childResult.PrincipalVariation);
+                            }
+
+                            lock (sync)
+                            {
+                                if (score > roundBestScore)
+                                {
+                                    roundBestScore = score;
+                                    roundBestIndex = i;
+                                    roundBestPv = pv;
+                                }
+                            }
+                        });
+                }
+                catch (Exception)
+                {
+                    // 任何并行执行期异常(含聚合异常)都只作废本轮,沿用上一轮结论,
+                    // 绝不让整个搜索调用挂掉或悬死。
+                    roundAborted = true;
+                }
+
+                if (roundAborted || roundBestIndex < 0)
+                    break;
+
+                bestMove = orderedMoves[roundBestIndex];
+                bestScore = roundBestScore;
+                bestDepth = depth;
+                bestPv = roundBestPv ?? new List<Move> { bestMove };
+                seedIndex = roundBestIndex;
+
+                if (depth == limits.MaxDepth)
+                    reachedMaxDepth = true;
+
+                // 已找到必胜杀着,继续加深无意义。
+                if (bestScore >= _options.MateScore - 1000)
+                    break;
             }
 
             stopwatch.Stop();
-            bool completed = allCompleted && !cancellationToken.IsCancellationRequested && stopwatch.ElapsedMilliseconds < limits.MoveTimeMs;
-            return new SearchResult(bestMove, bestScore, bestDepth, totalNodes, stopwatch.Elapsed, bestPv, completed);
+            bool completed = !cancellationToken.IsCancellationRequested
+                && (reachedMaxDepth || bestScore >= _options.MateScore - 1000);
+            return new SearchResult(bestMove, bestScore, Math.Max(1, bestDepth), totalNodes, stopwatch.Elapsed, bestPv, completed);
+        }
+
+        internal SearchResult SearchSubtree(Board board, SearchLimits limits, int? alpha, int? beta, CancellationToken cancellationToken)
+        {
+            return _search.Search(board, limits, cancellationToken, alpha, beta);
         }
 
         private TraditionalEngine CreateWorkerWithoutBookMove()

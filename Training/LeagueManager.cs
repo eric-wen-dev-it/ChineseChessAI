@@ -72,6 +72,10 @@ namespace ChineseChessAI.Training
         {
             get; init;
         }
+        public int NewbornProtected
+        {
+            get; init;
+        }
         public int DiverseKept
         {
             get; init;
@@ -326,7 +330,8 @@ namespace ChineseChessAI.Training
             int contenderKeepCount,
             int diverseKeepCount,
             int parentPoolSize,
-            int immigrantCount)
+            int immigrantCount,
+            int newbornProtectionGames = 0)
         {
             lock (_lock)
             {
@@ -382,6 +387,18 @@ namespace ChineseChessAI.Training
                 foreach (var keeper in diverseKeepers)
                     survivorIds.Add(keeper.Id);
 
+                // 新生儿保护:盘数不足者 Elo 未收敛(20 盘噪声 ±90,远大于梯队真实差距),
+                // 从 1500 起步爬分中途被杀等于按噪声淘汰;留到下轮打满再受检。
+                int newbornProtected = 0;
+                if (newbornProtectionGames > 0)
+                {
+                    foreach (var newborn in ranked.Where(a => a.GamesPlayed < newbornProtectionGames))
+                    {
+                        if (survivorIds.Add(newborn.Id))
+                            newbornProtected++;
+                    }
+                }
+
                 var replacements = ranked.Where(a => !survivorIds.Contains(a.Id)).ToList();
                 if (replacements.Count == 0)
                 {
@@ -389,7 +406,8 @@ namespace ChineseChessAI.Training
                     {
                         EliteKept = elites.Count,
                         ContenderKept = contenders.Count,
-                        DiverseKept = diverseKeepers.Count
+                        DiverseKept = diverseKeepers.Count,
+                        NewbornProtected = newbornProtected
                     };
                 }
 
@@ -450,6 +468,7 @@ namespace ChineseChessAI.Training
                     EliteKept = elites.Count,
                     ContenderKept = contenders.Count,
                     DiverseKept = diverseKeepers.Count,
+                    NewbornProtected = newbornProtected,
                     Replaced = replacements.Count,
                     OffspringCreated = actualOffspringCount,
                     ImmigrantsCreated = actualImmigrantCount,

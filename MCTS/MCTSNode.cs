@@ -36,7 +36,7 @@ namespace ChineseChessAI.MCTS
             get; private set;
         }
         private MCTSChild[] _children = Array.Empty<MCTSChild>();
-        public IReadOnlyList<MCTSChild> Children => _children;
+        public IReadOnlyList<MCTSChild> Children => Volatile.Read(ref _children);
         public Move LastMove
         {
             get;
@@ -55,8 +55,8 @@ namespace ChineseChessAI.MCTS
 
         public double GetPUCTValue(double cPuct, int parentN)
         {
-            // 【核心修复】：快照式读取，确保在计算过程中 vl, n, w 是一致的
-            int vl = VirtualLoss;
+            // Volatile reads are intentionally lightweight; PUCT tolerates minor concurrent drift.
+            int vl = Volatile.Read(ref VirtualLoss);
             int n_raw = Volatile.Read(ref _n);
             double w_raw = Volatile.Read(ref _w);
 

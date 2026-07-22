@@ -38,6 +38,13 @@ namespace ChineseChessAI.Traditional
 
         public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken = default)
         {
+            return Search(board, limits, cancellationToken, null, null);
+        }
+
+        // externalAlpha/externalBeta:根并行调用方传入的固定窗口(如零窗口试探)。
+        // 给定时每层迭代都用该窗口,不做吸入窗口重试;返回分数可能只是边界。
+        public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken, int? externalAlpha, int? externalBeta)
+        {
             _limits = limits;
             _nodes = 0;
             _completedDepth = 0;
@@ -58,13 +65,24 @@ namespace ChineseChessAI.Traditional
 
                 _bestMove = rootMoves[0];
                 int bestScore = int.MinValue + 1;
+                // 外部边界(根并行的共享 α 窗口)是硬约束;内部吸入窗口在其内收窄,
+                // 吸入失败最多放宽回外部边界,绝不越界。无外部边界时即 ±MateScore,
+                // 行为与原版一致。
+                int floorAlpha = externalAlpha ?? -_options.MateScore;
+                int ceilBeta = externalBeta ?? _options.MateScore;
                 for (int depth = 1; depth <= Math.Max(1, limits.MaxDepth); depth++)
                 {
                     if (ShouldStop(cancellationToken))
                         break;
 
-                    int alpha = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore - 80 : -_options.MateScore;
-                    int beta = depth >= 4 && bestScore > int.MinValue / 2 ? bestScore + 80 : _options.MateScore;
+                    bool useAspiration = depth >= 4 && bestScore > int.MinValue / 2;
+                    int alpha = useAspiration ? Math.Max(floorAlpha, bestScore - 80) : floorAlpha;
+                    int beta = useAspiration ? Math.Min(ceilBeta, bestScore + 80) : ceilBeta;
+                    if (alpha >= beta)
+                    {
+                        alpha = floorAlpha;
+                        beta = ceilBeta;
+                    }
                     int windowAlpha = alpha;
                     int windowBeta = beta;
                     Move depthBestMove = _bestMove;
@@ -104,10 +122,12 @@ namespace ChineseChessAI.Traditional
                     if (_stopRequested)
                         break;
 
-                    if (!retryFullWindow && (depthBestScore <= windowAlpha || depthBestScore >= windowBeta))
+                    if (!retryFullWindow
+                        && (depthBestScore <= windowAlpha || depthBestScore >= windowBeta)
+                        && (windowAlpha != floorAlpha || windowBeta != ceilBeta))
                     {
-                        alpha = -_options.MateScore;
-                        beta = _options.MateScore;
+                        alpha = floorAlpha;
+                        beta = ceilBeta;
                         windowAlpha = alpha;
                         windowBeta = beta;
                         depthBestScore = int.MinValue + 1;
@@ -197,14 +217,40 @@ namespace ChineseChessAI.Traditional
                 checkExtensionsLeft--;
             }
 
-            if (TryFindImmediateMate(board, moves, out var mateMove, cancellationToken))
+            // 一遍扫描同时完成:立杀检测(将军且对方无应着)+给强制杀搜索备好
+            // "哪些着法是将军"的标记,替代旧版的两遍逐着法 Push+IsChecking 加一次
+            // 重复着法生成。
+            bool[] givesCheckFlags = new bool[moves.Count];
+            bool anyCheckingMove = false;
+            for (int i = 0; i < moves.Count; i++)
             {
-                principalVariation.Add(mateMove);
-                _table.Store(board.CurrentHash, depth, _options.MateScore - ply, mateMove, TTBound.Exact, ply, _options.MateScore);
-                return _options.MateScore - ply;
+                var move = moves[i];
+                board.Push(move.From, move.To);
+                try
+                {
+                    if (!_generator.IsChecking(board, !board.IsRedTurn))
+                        continue;
+
+                    givesCheckFlags[i] = true;
+                    anyCheckingMove = true;
+                    var replies = _generator.GenerateLegalMoves(
+                        board,
+                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
+                    if (replies.Count == 0)
+                    {
+                        principalVariation.Add(move);
+                        _table.Store(board.CurrentHash, depth, _options.MateScore - ply, move, TTBound.Exact, ply, _options.MateScore);
+                        return _options.MateScore - ply;
+                    }
+                }
+                finally
+                {
+                    board.Pop();
+                }
             }
 
-            if (_options.MateSearchPly >= 3 && TryFindForcedCheckmate(board, Math.Min(_options.MateSearchPly, depth + 2), out var forcedMateMove, cancellationToken))
+            if (_options.MateSearchPly >= 3 && anyCheckingMove
+                && TryFindForcedCheckmateFromFlags(board, moves, givesCheckFlags, Math.Min(_options.MateSearchPly, depth + 2), out var forcedMateMove, cancellationToken))
             {
                 principalVariation.Add(forcedMateMove);
                 _table.Store(board.CurrentHash, depth, _options.MateScore - ply - 2, forcedMateMove, TTBound.Exact, ply, _options.MateScore);
@@ -364,11 +410,65 @@ namespace ChineseChessAI.Traditional
                 return alpha;
             }
 
-            if (TryFindImmediateMate(board, legalMoves, out _, cancellationToken))
-                return _options.MateScore - ply - 1;
+            // 一遍扫描同时完成立杀检测和战术着法(吃子或将军)筛选,
+            // 替代旧版"立杀一遍 Push+IsChecking、Where(GivesCheck) 再一遍"。
+            var tacticalMoves = new List<Move>();
+            foreach (var move in legalMoves)
+            {
+                bool isCapture = board.GetPiece(move.To) != 0;
+                board.Push(move.From, move.To);
+                try
+                {
+                    if (_generator.IsChecking(board, !board.IsRedTurn))
+                    {
+                        var replies = _generator.GenerateLegalMoves(
+                            board,
+                            skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
+                        if (replies.Count == 0)
+                            return _options.MateScore - ply - 1;
 
+                        tacticalMoves.Add(move);
+                    }
+                    else if (isCapture)
+                    {
+                        tacticalMoves.Add(move);
+                    }
+                }
+                finally
+                {
+                    board.Pop();
+                }
+            }
+
+            // 对方存在"立即将死"威胁时,旧逻辑直接返回我方被杀的杀分——但安静
+            // 防着(如退士解杀)在静态搜索里不可见,威胁≠必死,这是实战假杀根因
+            // (2026-08-17 俥8进9 事故,根局面可复现)。改为:禁止 stand-pat,像
+            // 应将一样遍历全部合法着法找解;静搜预算耗尽无法核实时返回重罚分
+            // (量级远超子力但不进杀分区间,不触发"找到必杀"早停)。
             if (OpponentHasImmediateMateAtLeaf(board, cancellationToken))
-                return -_options.MateScore + ply + 1;
+            {
+                if (depth <= 0)
+                    return -_options.MateScore / 4;
+
+                foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
+                {
+                    board.Push(move.From, move.To);
+                    try
+                    {
+                        int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, cancellationToken);
+                        if (score >= beta)
+                            return beta;
+                        if (score > alpha)
+                            alpha = score;
+                    }
+                    finally
+                    {
+                        board.Pop();
+                    }
+                }
+
+                return alpha;
+            }
 
             int standPat = _evaluator.Evaluate(board);
             if (standPat >= beta)
@@ -377,10 +477,6 @@ namespace ChineseChessAI.Traditional
                 alpha = standPat;
             if (depth <= 0)
                 return alpha;
-
-            var tacticalMoves = legalMoves
-                .Where(move => board.GetPiece(move.To) != 0 || GivesCheck(board, move))
-                .ToList();
 
             foreach (var move in _moveOrdering.OrderMoves(board, tacticalMoves))
             {
@@ -405,7 +501,8 @@ namespace ChineseChessAI.Traditional
         private bool TryFindImmediateMate(Board board, List<Move> legalMoves, out Move mateMove, CancellationToken cancellationToken)
         {
             mateMove = default;
-            foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
+            // 存在性检测,与着法顺序无关,不排序。
+            foreach (var move in legalMoves)
             {
                 if (ShouldStop(cancellationToken))
                     return false;
@@ -461,6 +558,67 @@ namespace ChineseChessAI.Traditional
             }
         }
 
+        // 顶层入口:调用方已算好哪些着法是将军(givesCheckFlags),只沿将军着法递归。
+        private bool TryFindForcedCheckmateFromFlags(Board board, List<Move> moves, bool[] givesCheckFlags, int remainingPly, out Move mateMove, CancellationToken cancellationToken)
+        {
+            mateMove = default;
+            if (remainingPly <= 0 || ShouldStop(cancellationToken))
+                return false;
+
+            for (int i = 0; i < moves.Count; i++)
+            {
+                if (!givesCheckFlags[i])
+                    continue;
+
+                var move = moves[i];
+                board.Push(move.From, move.To);
+                try
+                {
+                    var replies = _generator.GenerateLegalMoves(
+                        board,
+                        skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
+                    if (replies.Count == 0)
+                    {
+                        mateMove = move;
+                        return true;
+                    }
+
+                    if (remainingPly <= 1)
+                        continue;
+
+                    bool allRepliesLose = true;
+                    foreach (var reply in replies)
+                    {
+                        board.Push(reply.From, reply.To);
+                        try
+                        {
+                            if (!TryFindForcedCheckmate(board, remainingPly - 2, out _, cancellationToken))
+                            {
+                                allRepliesLose = false;
+                                break;
+                            }
+                        }
+                        finally
+                        {
+                            board.Pop();
+                        }
+                    }
+
+                    if (allRepliesLose)
+                    {
+                        mateMove = move;
+                        return true;
+                    }
+                }
+                finally
+                {
+                    board.Pop();
+                }
+            }
+
+            return false;
+        }
+
         private bool TryFindForcedCheckmate(Board board, int remainingPly, out Move mateMove, CancellationToken cancellationToken)
         {
             mateMove = default;
@@ -471,7 +629,7 @@ namespace ChineseChessAI.Traditional
                 board,
                 skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
 
-            foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
+            foreach (var move in legalMoves)
             {
                 if (board.GetPiece(move.To) == 0 && !GivesCheck(board, move))
                     continue;
@@ -495,7 +653,7 @@ namespace ChineseChessAI.Traditional
                         continue;
 
                     bool allRepliesLose = true;
-                    foreach (var reply in _moveOrdering.OrderMoves(board, replies))
+                    foreach (var reply in replies)
                     {
                         board.Push(reply.From, reply.To);
                         try

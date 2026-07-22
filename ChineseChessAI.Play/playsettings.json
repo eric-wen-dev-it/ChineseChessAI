@@ -1,8 +1,9 @@
 {
   "defaultSimulations": 400,
-  "traditionalDepth": 5,
-  "traditionalMoveTimeMs": 5000,
+  "traditionalDepth": 20,
+  "traditionalMoveTimeMs": 240000,
   "traditionalRootParallelism": 0,
+  "traditionalBookMode": "best",
   "pikafishPath": "",
   "pikafishMoveTimeMs": 3000,
   "batchSize": 64,

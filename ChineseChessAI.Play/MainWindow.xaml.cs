@@ -261,24 +261,9 @@ namespace ChineseChessAI.Play
 
             try
             {
-                var book = GetOrLoadOpeningBook();
-                var bookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off;
-                var redEngine = new TraditionalEngine(new TraditionalEngineOptions
-                {
-                    OpeningBook = book,
-                    OpeningBookMode = bookMode,
-                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
-                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
-                    RootParallelism = ResolveTraditionalRootParallelism()
-                });
-                var blackEngine = new TraditionalEngine(new TraditionalEngineOptions
-                {
-                    OpeningBook = book,
-                    OpeningBookMode = bookMode,
-                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
-                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
-                    RootParallelism = ResolveTraditionalRootParallelism()
-                });
+                var bookMode = ResolveTraditionalBookMode();
+                var redEngine = new TraditionalEngine(CreateTraditionalOptions(bookMode));
+                var blackEngine = new TraditionalEngine(CreateTraditionalOptions(bookMode));
                 const int demoMaxPly = 80;
                 const int demoMoveTimeMs = 5000;
                 int depth = 4;
@@ -308,7 +293,9 @@ namespace ChineseChessAI.Play
                         break;
                     }
 
-                    AppendLog($"{actor} search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms.");
+                    AppendLog(result.FromBook
+                        ? $"{actor} book move: {result.BestMove}."
+                        : $"{actor} search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms.");
                     bool irreversible = _session.Board.GetPiece(result.BestMove.To) != 0 || Math.Abs(_session.Board.GetPiece(result.BestMove.From)) == 7;
                     if (!await TryValidateAndApplyMoveAsync(result.BestMove, actor, token))
                         break;
@@ -654,7 +641,9 @@ namespace ChineseChessAI.Play
                         () => engine.Search(boardSnapshot, limits, token),
                         token);
                     move = result.BestMove;
-                    AppendLog($"{side} Traditional search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms, complete={result.Completed}.");
+                    AppendLog(result.FromBook
+                        ? $"{side} Traditional book move: {move}."
+                        : $"{side} Traditional search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms, complete={result.Completed}.");
                 }
                 else if (playerKind == PlayPlayerKind.Pikafish)
                 {
@@ -1156,18 +1145,14 @@ namespace ChineseChessAI.Play
 
             if (needsTraditional && _traditionalEngine == null)
             {
-                var book = GetOrLoadOpeningBook();
-                _traditionalEngine = new TraditionalEngine(new TraditionalEngineOptions
-                {
-                    OpeningBook = book,
-                    OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
-                    MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
-                    MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
-                    RootParallelism = ResolveTraditionalRootParallelism()
-                });
-                AppendLog(book.PositionCount > 0
-                    ? $"Traditional engine ready. Opening book positions: {book.PositionCount}."
-                    : "Traditional engine ready. Opening book not found.");
+                var bookMode = ResolveTraditionalBookMode();
+                var options = CreateTraditionalOptions(bookMode);
+                _traditionalEngine = new TraditionalEngine(options);
+                int knowledgePositions = options.MasterKnowledgeBook?.PositionCount ?? 0;
+                int openingPositions = options.OpeningBook?.PositionCount ?? 0;
+                AppendLog(knowledgePositions > 0 || openingPositions > 0
+                    ? $"Traditional engine ready. Book mode={bookMode}, knowledge positions={knowledgePositions}, opening positions={openingPositions}."
+                    : "Traditional engine ready. No usable book cache (stale or missing) - playing bookless.");
                 AppendLog($"Traditional settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.TraditionalMoveTimeMs}ms, root_parallelism={ResolveTraditionalRootParallelism()}.");
             }
 
@@ -1553,6 +1538,28 @@ namespace ChineseChessAI.Play
 
             yield return Path.Combine(baseDir, "playsettings.json");
             yield return Path.Combine(repoRoot, "ChineseChessAI.Play", "playsettings.json");
+        }
+
+        private OpeningBookMode ResolveTraditionalBookMode()
+        {
+            return _playSettings.TraditionalBookMode switch
+            {
+                "off" => OpeningBookMode.Off,
+                "weighted" => OpeningBookMode.Weighted,
+                _ => OpeningBookMode.Best
+            };
+        }
+
+        private TraditionalEngineOptions CreateTraditionalOptions(OpeningBookMode bookMode)
+        {
+            return new TraditionalEngineOptions
+            {
+                OpeningBook = GetOrLoadOpeningBook(),
+                OpeningBookMode = bookMode,
+                MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
+                RootParallelism = ResolveTraditionalRootParallelism()
+            };
         }
 
         private OpeningBook GetOrLoadOpeningBook()

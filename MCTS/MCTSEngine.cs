@@ -178,17 +178,22 @@ namespace ChineseChessAI.MCTS
             MCTSChild bestChild = SelectBestChild(node);
 
             Interlocked.Increment(ref bestChild.Node.VirtualLoss);
-            PushCounter.AddSample(1);
-            board.Push(bestChild.Move.From, bestChild.Move.To);
-
+            bool pushed = false;
             try
             {
+                PushCounter.AddSample(1);
+                board.Push(bestChild.Move.From, bestChild.Move.To);
+                pushed = true;
                 await SearchAsync(bestChild.Node, board, currentMoves, maxMoves, depth + 1, cancellationToken);
             }
             finally
             {
-                PopCounter.AddSample(1);
-                board.Pop();
+                if (pushed)
+                {
+                    PopCounter.AddSample(1);
+                    board.Pop();
+                }
+
                 Interlocked.Decrement(ref bestChild.Node.VirtualLoss);
             }
         }

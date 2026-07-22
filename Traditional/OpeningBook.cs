@@ -43,7 +43,7 @@ namespace ChineseChessAI.Traditional
             });
         }
 
-        public bool TryGetMove(Board board, OpeningBookMode mode, out Move move)
+        public bool TryGetMove(Board board, OpeningBookMode mode, out Move move, int minCount = 1)
         {
             move = default;
             if (mode == OpeningBookMode.Off)
@@ -54,7 +54,7 @@ namespace ChineseChessAI.Traditional
 
             var legalSet = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false).ToHashSet();
             var candidates = moves
-                .Where(kvp => legalSet.Contains(kvp.Key))
+                .Where(kvp => kvp.Value >= Math.Max(1, minCount) && legalSet.Contains(kvp.Key))
                 .OrderByDescending(kvp => kvp.Value)
                 .ToArray();
 
@@ -94,11 +94,20 @@ namespace ChineseChessAI.Traditional
 
         public int GetMoveOrderingBonus(Board board, Move move)
         {
-            int count = GetMoveFrequency(board, move);
+            return OrderingBonusForCount(GetMoveFrequency(board, move));
+        }
+
+        internal static int OrderingBonusForCount(int count)
+        {
             if (count <= 0)
                 return 0;
 
             return Math.Min(30_000, 3_000 + (int)(Math.Log2(count + 1) * 6_000));
+        }
+
+        internal bool TryGetPositionMoves(ulong hash, out Dictionary<Move, int>? moves)
+        {
+            return _entries.TryGetValue(hash, out moves);
         }
 
         private static int WeightedCount(int count)
@@ -207,6 +216,14 @@ namespace ChineseChessAI.Traditional
 
                 if (moves.Count > 0)
                     _entries[hash] = moves;
+            }
+
+            // 谱以整局棋从初始局面录入，起始局面必然在谱中。查不到说明缓存
+            // 是旧版 Zobrist 键生成的（哈希方案已变更），视为失效拒绝加载。
+            if (!_entries.ContainsKey(new Board().CurrentHash))
+            {
+                _entries.Clear();
+                return false;
             }
 
             return _entries.Count > 0;

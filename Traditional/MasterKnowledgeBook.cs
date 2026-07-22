@@ -40,6 +40,90 @@ namespace ChineseChessAI.Traditional
             });
         }
 
+        public bool TryGetBookMove(
+            Board board,
+            OpeningBookMode mode,
+            int minCount,
+            double minWinRate,
+            out MasterMoveKnowledge knowledge)
+        {
+            knowledge = default;
+            if (mode == OpeningBookMode.Off)
+                return false;
+
+            if (!_entries.TryGetValue(board.CurrentHash, out var moves) || moves.Count == 0)
+                return false;
+
+            var legalSet = _generator.GenerateLegalMoves(board, skipPerpetualCheck: false).ToHashSet();
+            bool redToMove = board.IsRedTurn;
+            minCount = Math.Max(1, minCount);
+
+            var candidates = new List<(MasterMoveKnowledge Knowledge, double LowerBound, int Count)>();
+            foreach (var kvp in moves)
+            {
+                if (!legalSet.Contains(kvp.Key))
+                    continue;
+
+                var entry = kvp.Value;
+                int decisive = entry.RedWins + entry.BlackWins + entry.Draws;
+                if (entry.Count < minCount || decisive == 0)
+                    continue;
+
+                int wins = redToMove ? entry.RedWins : entry.BlackWins;
+                double score = wins + 0.5 * entry.Draws;
+                double rate = score / decisive;
+                if (rate < minWinRate)
+                    continue;
+
+                candidates.Add((entry, WilsonLowerBound(score, decisive), entry.Count));
+            }
+
+            if (candidates.Count == 0)
+                return false;
+
+            candidates.Sort((a, b) =>
+            {
+                int byBound = b.LowerBound.CompareTo(a.LowerBound);
+                return byBound != 0 ? byBound : b.Count.CompareTo(a.Count);
+            });
+
+            if (mode == OpeningBookMode.Best || candidates.Count == 1)
+            {
+                knowledge = candidates[0].Knowledge;
+                return true;
+            }
+
+            // Weighted：只在与最优着法胜率下界接近的档位内按出现次数加权随机，
+            // 保持棋路多样性的同时不落入明显更差的分支。
+            double threshold = candidates[0].LowerBound - 0.05;
+            var tier = candidates.Where(c => c.LowerBound >= threshold).ToArray();
+            int total = tier.Sum(c => c.Count);
+            int roll = Random.Shared.Next(total);
+            int cumulative = 0;
+            foreach (var candidate in tier)
+            {
+                cumulative += candidate.Count;
+                if (roll < cumulative)
+                {
+                    knowledge = candidate.Knowledge;
+                    return true;
+                }
+            }
+
+            knowledge = tier[^1].Knowledge;
+            return true;
+        }
+
+        private static double WilsonLowerBound(double score, int n)
+        {
+            const double z = 1.0;
+            double p = score / n;
+            double denominator = 1 + z * z / n;
+            double center = p + z * z / (2 * n);
+            double margin = z * Math.Sqrt(p * (1 - p) / n + z * z / (4.0 * n * n));
+            return (center - margin) / denominator;
+        }
+
         public int GetMoveOrderingBonus(Board board, Move move)
         {
             if (!_entries.TryGetValue(board.CurrentHash, out var moves))
@@ -47,10 +131,12 @@ namespace ChineseChessAI.Traditional
             if (!moves.TryGetValue(move, out var knowledge))
                 return 0;
 
-            int countBonus = Math.Min(35_000, 4_000 + (int)(Math.Log2(knowledge.Count + 1) * 6_000));
-            int confidence = Math.Min(knowledge.Count, 40);
-            int scoreBonus = knowledge.ScoreFromSideToMove * confidence / 40;
-            return Math.Clamp(countBonus + scoreBonus, -30_000, 50_000);
+            return knowledge.OrderingBonus;
+        }
+
+        internal bool TryGetPositionMoves(ulong hash, out Dictionary<Move, MasterMoveKnowledge>? moves)
+        {
+            return _entries.TryGetValue(hash, out moves);
         }
 
         public IReadOnlyList<MasterMoveKnowledge> GetMoves(Board board, int limit = 16)
@@ -199,6 +285,14 @@ namespace ChineseChessAI.Traditional
 
                 if (moves.Count > 0)
                     _entries[hash] = moves;
+            }
+
+            // 谱以整局棋从初始局面录入，起始局面必然在谱中。查不到说明缓存
+            // 是旧版 Zobrist 键生成的（哈希方案已变更），视为失效拒绝加载。
+            if (!_entries.ContainsKey(new Board().CurrentHash))
+            {
+                _entries.Clear();
+                return false;
             }
 
             return _entries.Count > 0;
@@ -480,6 +574,17 @@ namespace ChineseChessAI.Traditional
                     int wins = SideToMove ? RedWins : BlackWins;
                     int losses = SideToMove ? BlackWins : RedWins;
                     return (wins - losses) * 2_000 / Math.Max(1, Count);
+                }
+            }
+
+            public int OrderingBonus
+            {
+                get
+                {
+                    int countBonus = Math.Min(35_000, 4_000 + (int)(Math.Log2(Count + 1) * 6_000));
+                    int confidence = Math.Min(Count, 40);
+                    int scoreBonus = ScoreFromSideToMove * confidence / 40;
+                    return Math.Clamp(countBonus + scoreBonus, -30_000, 50_000);
                 }
             }
 

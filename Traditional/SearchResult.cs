@@ -9,5 +9,6 @@ namespace ChineseChessAI.Traditional
         long Nodes,
         TimeSpan Elapsed,
         IReadOnlyList<Move> PrincipalVariation,
-        bool Completed);
+        bool Completed,
+        bool FromBook = false);
 }

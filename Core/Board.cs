@@ -3,7 +3,7 @@ namespace ChineseChessAI.Core
     /// <summary>
     /// 存储每一步的历史状态，用于撤销和长捉/长将检测
     /// </summary>
-    public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore, Dictionary<ulong, int>? HashCountsSnapshot = null);
+    public record GameState(int From, int To, sbyte Captured, ulong Hash, Move? LastMoveBefore, bool LastMoveWasIrreversibleBefore, Dictionary<ulong, int>? HashCountsSnapshot = null);
 
     public class Board
     {
@@ -185,6 +185,7 @@ namespace ChineseChessAI.Core
         {
             sbyte piece = _cells[from];
             sbyte captured = _cells[to];
+            bool wasIrreversibleBefore = LastMoveWasIrreversible;
 
             // 【BUG E 修复】：任何兵卒走动（包括横移）均视为不可逆
             bool isPawnMove = Math.Abs(piece) == 7;
@@ -197,7 +198,7 @@ namespace ChineseChessAI.Core
                 snapshot = new Dictionary<ulong, int>(_hashCounts);
             }
 
-            _history.Push(new GameState(from, to, captured, CurrentHash, LastMove, snapshot));
+            _history.Push(new GameState(from, to, captured, CurrentHash, LastMove, wasIrreversibleBefore, snapshot));
             LastMove = new Move(from, to);
 
             TogglePieceHash(from, piece);
@@ -259,7 +260,7 @@ namespace ChineseChessAI.Core
             IsRedTurn = !IsRedTurn;
             CurrentHash = last.Hash; // 恢复旧局面的 Hash
             LastMove = last.LastMoveBefore;
-            LastMoveWasIrreversible = false; // Pop 后无法简单反推，设为 false
+            LastMoveWasIrreversible = last.LastMoveWasIrreversibleBefore;
         }
 
         public int GetRepetitionCount()
