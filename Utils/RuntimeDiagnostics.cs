@@ -6,20 +6,23 @@ namespace ChineseChessAI.Utils
     internal static class RuntimeDiagnostics
     {
         private static readonly object LogLock = new object();
-        private static readonly string RuntimeLogPath = Path.Combine(
+        private static readonly string LogDir = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
-            "data",
-            "runtime.log");
+            "data");
+
+        /// <summary>当日日志文件路径(每天一个文件,跨天自动切换)。</summary>
+        internal static string CurrentLogPath =>
+            Path.Combine(LogDir, $"runtime_{DateTime.Now:yyyyMMdd}.log");
 
         public static void Log(string message)
         {
             try
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(RuntimeLogPath)!);
+                Directory.CreateDirectory(LogDir);
                 string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}";
                 lock (LogLock)
                 {
-                    File.AppendAllText(RuntimeLogPath, line, Encoding.UTF8);
+                    File.AppendAllText(CurrentLogPath, line, Encoding.UTF8);
                 }
             }
             catch

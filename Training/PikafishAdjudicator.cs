@@ -20,7 +20,8 @@ namespace ChineseChessAI.Training
     {
         private const int DefaultNodes = 10000;
         private const int WinThresholdCentipawns = 250;
-        private const int MaxClientCount = 4;
+        // 12 = 大师谱打分并发 8 + 对局裁决/联赛谱打分余量 4;每客户端 Threads=1/Hash=64M。
+        private const int MaxClientCount = 12;
         private static readonly SemaphoreSlim ClientSlots = new(MaxClientCount, MaxClientCount);
         private static readonly ConcurrentBag<PikafishEvaluationClient> Clients = new();
         private static readonly TimeSpan InitializationRetryDelay = TimeSpan.FromSeconds(30);

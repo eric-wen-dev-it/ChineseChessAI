@@ -12,4 +12,10 @@
     <ProjectReference Include="..\..\ChineseChessAI.csproj" />
   </ItemGroup>
 
+  <!-- Reference CUDA libtorch directly so its native DLLs (~5GB, reassembled
+       from split packages) copy into this exe's output for GPU inference. -->
+  <ItemGroup>
+    <PackageReference Include="TorchSharp-cuda-windows" Version="0.105.2" />
+  </ItemGroup>
+
 </Project>

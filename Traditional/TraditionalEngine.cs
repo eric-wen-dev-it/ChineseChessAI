@@ -9,6 +9,7 @@ namespace ChineseChessAI.Traditional
         private readonly TraditionalEngineOptions _options;
         private readonly MoveGenerator _generator;
         private readonly TraditionalMoveOrdering _moveOrdering;
+        private readonly TranspositionTable _table;
 
         public TraditionalEngine(TraditionalEngineOptions? options = null, MoveGenerator? generator = null)
         {
@@ -16,8 +17,8 @@ namespace ChineseChessAI.Traditional
             _generator = generator ?? new MoveGenerator();
             var evaluator = new TraditionalEvaluator();
             _moveOrdering = new TraditionalMoveOrdering(_generator, _options.MoveOrderingBook ?? _options.OpeningBook, _options.MasterKnowledgeBook);
-            var table = new TranspositionTable(_options.TranspositionTableEntries);
-            _search = new TraditionalSearch(_generator, evaluator, _moveOrdering, _options, table);
+            _table = new TranspositionTable(_options.TranspositionTableEntries);
+            _search = new TraditionalSearch(_generator, evaluator, _moveOrdering, _options, _table);
         }
 
         public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken = default)
@@ -40,202 +41,130 @@ namespace ChineseChessAI.Traditional
                 return new SearchResult(bookMove, 0, 0, 0, TimeSpan.Zero, new[] { bookMove }, true, FromBook: true);
             }
 
-            if (ShouldUseParallelRoot(limits))
-                return SearchParallelRoot(board, limits, cancellationToken);
+            if (ShouldUseLazySmp(limits))
+                return SearchLazySmp(board, limits, cancellationToken);
 
             return _search.Search(board, limits, cancellationToken);
         }
 
-        private bool ShouldUseParallelRoot(SearchLimits limits)
+        private bool ShouldUseLazySmp(SearchLimits limits)
         {
+            // 仅限时搜索(Play/FC 桥接)用多线程;联赛用 FixedDepth(MoveTimeMs=0),
+            // 走单线程,棋力不受此路径影响。
             return _options.RootParallelism > 1 && limits.MoveTimeMs > 0 && limits.MaxDepth >= 3;
         }
 
-        private SearchResult SearchParallelRoot(Board board, SearchLimits limits, CancellationToken cancellationToken)
+        // Lazy SMP:N 个搜索线程在同一局面上各自跑迭代加深,共享唯一一张无锁置换表。
+        // 相比旧"并行根"(每个根着法独立全窗口 + 各自置换表,实测 40s/6.1M 节点仅到
+        // depth4、且输出浅层乐观假分)——本方案让线程经共享 TT 交叉授粉,α-β 剪枝正常
+        // 生效,取完成深度最深的结果。奇偶线程关/开空着裁剪制造搜索多样性,避免多核
+        // 锁步重复同一棵树。
+        private SearchResult SearchLazySmp(Board board, SearchLimits limits, CancellationToken cancellationToken)
         {
-            var stopwatch = Stopwatch.StartNew();
-            var rootMoves = _generator.GenerateLegalMoves(board, skipPerpetualCheck: _options.SkipPerpetualCheckAtRoot);
-            if (rootMoves.Count == 0)
-                return new SearchResult(default, -_options.MateScore, 0, 0, stopwatch.Elapsed, Array.Empty<Move>(), true);
+            int threads = Math.Clamp(_options.RootParallelism, 1, 16);
+            if (threads <= 1)
+                return _search.Search(board, limits, cancellationToken);
 
-            var orderedMoves = _moveOrdering.OrderMoves(board, rootMoves);
-            if (orderedMoves.Count == 1)
-                return new SearchResult(orderedMoves[0], 0, 0, 0, stopwatch.Elapsed, new[] { orderedMoves[0] }, true);
-
-            using var timeCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeCts.CancelAfter(limits.MoveTimeMs);
-            var token = timeCts.Token;
-
-            // 每个根着法一个持久工人:置换表跨轮复用,重搜浅层几乎免费。
-            var workers = new TraditionalEngine[orderedMoves.Count];
-            var childBoards = new Board[orderedMoves.Count];
-            for (int i = 0; i < orderedMoves.Count; i++)
+            var searches = new TraditionalSearch[threads];
+            var boards = new Board[threads];
+            searches[0] = _search;
+            boards[0] = board.Clone();
+            for (int i = 1; i < threads; i++)
             {
-                workers[i] = CreateWorkerWithoutBookMove();
-                var childBoard = board.Clone();
-                childBoard.Push(orderedMoves[i].From, orderedMoves[i].To);
-                childBoards[i] = childBoard;
+                searches[i] = CreateSharedSearch(DiversifyOptions(i));
+                boards[i] = board.Clone();
             }
 
-            object sync = new();
+            var results = new SearchResult?[threads];
+            try
+            {
+                // 故意不给 ParallelOptions 传 CancellationToken:协作取消会让 Parallel
+                // 在超时瞬间抛 OCE 并等待全部副本汇合,该汇合在 net10 上出现过挂死
+                // (2026-08-17 实测)。取消一律由各线程 Search 内部 ShouldStop 处理,
+                // 其内部已捕获 OCE 并返回可用结果,不会向外抛。
+                Parallel.For(0, threads, new ParallelOptions { MaxDegreeOfParallelism = threads }, i =>
+                {
+                    try
+                    {
+                        // 主线程(0)恒从 depth1 起,保证任何时刻都有可用最佳着法;
+                        // 辅助线程错位起始深度(1/2/3 轮转),跳过浅层重复迭代,经共享
+                        // 置换表让主线程飞过浅层、整体更快抵达深层。
+                        int startDepth = i == 0 ? 1 : 1 + (i % 3);
+                        results[i] = searches[i].Search(boards[i], limits, cancellationToken, null, null, startDepth);
+                    }
+                    catch (Exception)
+                    {
+                        results[i] = null;
+                    }
+                });
+            }
+            catch (Exception)
+            {
+                // 任何并行执行期异常只作废多线程结果,退回主线程结论。
+            }
+
             long totalNodes = 0;
-            Move bestMove = orderedMoves[0];
-            int bestScore = 0;
-            int bestDepth = 0;
-            List<Move> bestPv = new() { bestMove };
-            bool reachedMaxDepth = false;
-            int seedIndex = 0;
-
-            int Remaining() => limits.MoveTimeMs - (int)Math.Min(stopwatch.ElapsedMilliseconds, int.MaxValue - 1);
-
-            // 判定"我方此着直接将死/困毙对方":子局面无合法着法,任何深度下都成立。
-            static bool IsImmediateMate(SearchResult childResult) =>
-                childResult.Completed && childResult.Depth == 0 && childResult.PrincipalVariation.Count == 0;
-
-            // 根层同步迭代加深:一轮内全部根着法并行、全窗口算到同一子树深度,
-            // 整轮算完才采纳比较结果;没算完的轮次整轮作废,沿用上一轮结论,
-            // 杜绝拿浅层乐观评分压过深层真实评分的旧病。上一轮最佳着法排在
-            // 本轮首位。实测注:曾试过共享 α 收窄子树窗口(PVS/零窗试探两种),
-            // 均因本引擎 fail-hard 截断证伪昂贵+跨轮 TT 边界污染而净变慢,勿回退。
-            for (int depth = 2; depth <= limits.MaxDepth; depth++)
+            SearchResult? best = null;
+            for (int i = 0; i < threads; i++)
             {
-                int childDepth = depth - 1;
-                bool roundAborted = false;
-                int roundBestScore = int.MinValue + 1;
-                int roundBestIndex = -1;
-                List<Move>? roundBestPv = null;
-
-                var roundOrder = new List<int>(orderedMoves.Count) { seedIndex };
-                for (int i = 0; i < orderedMoves.Count; i++)
+                var r = results[i];
+                if (r == null)
+                    continue;
+                totalNodes += r.Nodes;
+                if (best == null
+                    || r.Depth > best.Depth
+                    || (r.Depth == best.Depth && r.Completed && !best.Completed))
                 {
-                    if (i != seedIndex)
-                        roundOrder.Add(i);
+                    best = r;
                 }
-
-                try
-                {
-                    // 故意不给 ParallelOptions 传 CancellationToken:协作取消会让
-                    // ForEach 在超时瞬间抛 OCE 并等待全部副本任务汇合,该汇合在
-                    // net10 上出现过挂死(2026-08-17 对局实测,线程卡在 EH.DispatchEx)。
-                    // 取消一律由委托入口自查 + 子树搜索内部 ShouldStop 快速退出。
-                    Parallel.ForEach(
-                        roundOrder,
-                        new ParallelOptions
-                        {
-                            MaxDegreeOfParallelism = Math.Max(1, _options.RootParallelism)
-                        },
-                        i =>
-                        {
-                            if (Volatile.Read(ref roundAborted) || token.IsCancellationRequested)
-                            {
-                                Volatile.Write(ref roundAborted, true);
-                                return;
-                            }
-
-                            int remaining = Remaining();
-                            if (remaining <= 0)
-                            {
-                                Volatile.Write(ref roundAborted, true);
-                                return;
-                            }
-
-                            int a = Math.Max(Volatile.Read(ref roundBestScore), -_options.MateScore);
-                            var childLimits = new SearchLimits(childDepth, remaining, limits.QuiescenceDepth);
-                            var childResult = workers[i].SearchSubtree(childBoards[i], childLimits, null, null, token);
-                            lock (sync)
-                            {
-                                totalNodes += childResult.Nodes;
-                            }
-
-                            int score;
-                            List<Move> pv;
-                            if (IsImmediateMate(childResult))
-                            {
-                                score = -childResult.Score;
-                                pv = new List<Move> { orderedMoves[i] };
-                            }
-                            else
-                            {
-                                if (!childResult.Completed || childResult.Depth < childDepth)
-                                {
-                                    Volatile.Write(ref roundAborted, true);
-                                    return;
-                                }
-
-                                score = -childResult.Score;
-                                if (score <= a)
-                                    return; // 确证不优于已知最佳,淘汰。
-
-                                pv = new List<Move> { orderedMoves[i] };
-                                pv.AddRange(childResult.PrincipalVariation);
-                            }
-
-                            lock (sync)
-                            {
-                                if (score > roundBestScore)
-                                {
-                                    roundBestScore = score;
-                                    roundBestIndex = i;
-                                    roundBestPv = pv;
-                                }
-                            }
-                        });
-                }
-                catch (Exception)
-                {
-                    // 任何并行执行期异常(含聚合异常)都只作废本轮,沿用上一轮结论,
-                    // 绝不让整个搜索调用挂掉或悬死。
-                    roundAborted = true;
-                }
-
-                if (roundAborted || roundBestIndex < 0)
-                    break;
-
-                bestMove = orderedMoves[roundBestIndex];
-                bestScore = roundBestScore;
-                bestDepth = depth;
-                bestPv = roundBestPv ?? new List<Move> { bestMove };
-                seedIndex = roundBestIndex;
-
-                if (depth == limits.MaxDepth)
-                    reachedMaxDepth = true;
-
-                // 已找到必胜杀着,继续加深无意义。
-                if (bestScore >= _options.MateScore - 1000)
-                    break;
             }
 
-            stopwatch.Stop();
-            bool completed = !cancellationToken.IsCancellationRequested
-                && (reachedMaxDepth || bestScore >= _options.MateScore - 1000);
-            return new SearchResult(bestMove, bestScore, Math.Max(1, bestDepth), totalNodes, stopwatch.Elapsed, bestPv, completed);
+            if (best == null)
+                return _search.Search(board, limits, cancellationToken);
+
+            // 汇总全线程节点数供日志如实反映总工作量。
+            return best with { Nodes = totalNodes };
         }
 
-        internal SearchResult SearchSubtree(Board board, SearchLimits limits, int? alpha, int? beta, CancellationToken cancellationToken)
+        private TraditionalSearch CreateSharedSearch(TraditionalEngineOptions options)
         {
-            return _search.Search(board, limits, cancellationToken, alpha, beta);
+            var generator = new MoveGenerator();
+            var evaluator = new TraditionalEvaluator();
+            var moveOrdering = new TraditionalMoveOrdering(generator, options.MoveOrderingBook ?? options.OpeningBook, options.MasterKnowledgeBook);
+            return new TraditionalSearch(generator, evaluator, moveOrdering, options, _table);
         }
 
-        private TraditionalEngine CreateWorkerWithoutBookMove()
+        // 为 Lazy SMP 辅助线程派生一个仅微调裁剪档的选项副本(共享同一批只读谱)。
+        // 奇数号线程关空着裁剪 → 更保守、对战术更敏感,与主线程走不同的树;并列深度
+        // 时择优仍以主线程为先,故对最终选着安全。
+        private TraditionalEngineOptions DiversifyOptions(int threadIndex)
         {
-            return new TraditionalEngine(new TraditionalEngineOptions
+            bool useNullMove = (threadIndex % 2 == 0) && _options.UseNullMovePruning;
+            return new TraditionalEngineOptions
             {
                 MateScore = _options.MateScore,
                 UseQuiescenceSearch = _options.UseQuiescenceSearch,
                 SkipPerpetualCheckInsideSearch = _options.SkipPerpetualCheckInsideSearch,
                 SkipPerpetualCheckAtRoot = _options.SkipPerpetualCheckAtRoot,
-                TranspositionTableEntries = Math.Max(16_384, _options.TranspositionTableEntries / Math.Max(1, _options.RootParallelism)),
+                TranspositionTableEntries = _options.TranspositionTableEntries,
                 MateSearchPly = _options.MateSearchPly,
-                UseNullMovePruning = _options.UseNullMovePruning,
+                UseNullMovePruning = useNullMove,
                 UseFutilityPruning = _options.UseFutilityPruning,
                 UseRazoring = _options.UseRazoring,
                 UseSeePruning = _options.UseSeePruning,
+                UseQuiescenceTT = _options.UseQuiescenceTT,
+                UseQuiescenceDeltaPruning = _options.UseQuiescenceDeltaPruning,
+                QuiescenceDeltaMargin = _options.QuiescenceDeltaMargin,
+                UseQuiescenceSeePruning = _options.UseQuiescenceSeePruning,
+                QuiescenceCheckPlies = _options.QuiescenceCheckPlies,
                 OpeningBook = null,
                 OpeningBookMode = OpeningBookMode.Off,
                 MoveOrderingBook = _options.MoveOrderingBook,
                 MasterKnowledgeBook = _options.MasterKnowledgeBook,
+                MasterBookMinCount = _options.MasterBookMinCount,
+                MasterBookMinWinRate = _options.MasterBookMinWinRate,
                 RootParallelism = 1
-            });
+            };
         }
     }
 }

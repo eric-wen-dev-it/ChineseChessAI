@@ -8,11 +8,13 @@ namespace ChineseChessAI.Training
         private const float BestMoveProbability = 0.85f;
         private const int MoveTimeMs = 5000;
         private readonly TraditionalEngine _engine;
+        private readonly int _quiescenceDepth;
         private readonly ChineseChessRuleEngine _rules = new ChineseChessRuleEngine();
 
-        public TraditionalGameEngineAdapter(TraditionalEngine? engine = null)
+        public TraditionalGameEngineAdapter(TraditionalEngine? engine = null, int quiescenceDepth = 4)
         {
             _engine = engine ?? new TraditionalEngine();
+            _quiescenceDepth = quiescenceDepth;
         }
 
         public Task<(Move Move, float[] Policy)> GetMoveWithPolicyAsync(
@@ -34,7 +36,7 @@ namespace ChineseChessAI.Training
                 moveCts.CancelAfter(MoveTimeMs);
                 try
                 {
-                    result = _engine.Search(board, new SearchLimits(depth, MoveTimeMs, 4), moveCts.Token);
+                    result = _engine.Search(board, new SearchLimits(depth, MoveTimeMs, _quiescenceDepth), moveCts.Token);
                 }
                 catch (OperationCanceledException)
                 {

@@ -7,6 +7,7 @@ namespace ChineseChessAI.Play
         public int TraditionalMoveTimeMs { get; set; } = 5000;
         public int TraditionalRootParallelism { get; set; } = 0;
         public string TraditionalBookMode { get; set; } = "best";
+        public bool TraditionalEnhanced { get; set; } = true;
         public string PikafishPath { get; set; } = string.Empty;
         public int PikafishMoveTimeMs { get; set; } = 3000;
         public int BatchSize { get; set; } = 64;

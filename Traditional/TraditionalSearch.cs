@@ -21,6 +21,10 @@ namespace ChineseChessAI.Traditional
         private readonly Move?[] _killerOne = new Move?[128];
         private readonly Move?[] _killerTwo = new Move?[128];
         private readonly int[] _history = new int[8100];
+        // "对方有立即杀威胁"按局面哈希记忆化:静搜叶子高度重复,该检测又要
+        // 克隆棋盘+全量着法生成+逐着法找杀,是静搜每节点成本的大头之一。
+        // 纯加速,不改变任何着法选择。
+        private readonly Dictionary<ulong, bool> _mateThreatCache = new();
 
         public TraditionalSearch(
             MoveGenerator generator,
@@ -41,9 +45,10 @@ namespace ChineseChessAI.Traditional
             return Search(board, limits, cancellationToken, null, null);
         }
 
-        // externalAlpha/externalBeta:根并行调用方传入的固定窗口(如零窗口试探)。
-        // 给定时每层迭代都用该窗口,不做吸入窗口重试;返回分数可能只是边界。
-        public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken, int? externalAlpha, int? externalBeta)
+        // startDepth:迭代加深的起始深度(Lazy SMP 辅助线程错位用,主线程恒 1)。
+        // 大于 1 时跳过浅层迭代,直接从该深度起搜——首轮无浅层最佳着法播种,但在
+        // 共享置换表已被其它线程/上一手预热时反而更快抵达深层,给主线程回灌深条目。
+        public SearchResult Search(Board board, SearchLimits limits, CancellationToken cancellationToken, int? externalAlpha, int? externalBeta, int startDepth = 1)
         {
             _limits = limits;
             _nodes = 0;
@@ -53,6 +58,7 @@ namespace ChineseChessAI.Traditional
             Array.Clear(_killerOne);
             Array.Clear(_killerTwo);
             Array.Clear(_history);
+            _mateThreatCache.Clear();
             _stopwatch = Stopwatch.StartNew();
 
             try
@@ -70,7 +76,8 @@ namespace ChineseChessAI.Traditional
                 // 行为与原版一致。
                 int floorAlpha = externalAlpha ?? -_options.MateScore;
                 int ceilBeta = externalBeta ?? _options.MateScore;
-                for (int depth = 1; depth <= Math.Max(1, limits.MaxDepth); depth++)
+                int firstDepth = Math.Clamp(startDepth, 1, Math.Max(1, limits.MaxDepth));
+                for (int depth = firstDepth; depth <= Math.Max(1, limits.MaxDepth); depth++)
                 {
                     if (ShouldStop(cancellationToken))
                         break;
@@ -182,7 +189,7 @@ namespace ChineseChessAI.Traditional
             if (depth <= 0)
             {
                 return _options.UseQuiescenceSearch
-                    ? Quiescence(board, _limits.QuiescenceDepth, alpha, beta, ply, cancellationToken)
+                    ? Quiescence(board, _limits.QuiescenceDepth, alpha, beta, ply, 0, cancellationToken)
                     : _evaluator.Evaluate(board);
             }
 
@@ -191,7 +198,7 @@ namespace ChineseChessAI.Traditional
             {
                 int staticScore = _evaluator.Evaluate(board);
                 if (staticScore + 180 <= alpha)
-                    return Quiescence(board, _limits.QuiescenceDepth / 2, alpha, beta, ply, cancellationToken);
+                    return Quiescence(board, _limits.QuiescenceDepth / 2, alpha, beta, ply, 0, cancellationToken);
             }
 
             if (!inCheck && _options.UseNullMovePruning && allowNullMove && depth >= 3 && HasNonPawnMaterial(board, board.IsRedTurn))
@@ -371,11 +378,30 @@ namespace ChineseChessAI.Traditional
             return bestScore;
         }
 
-        private int Quiescence(Board board, int depth, int alpha, int beta, int ply, CancellationToken cancellationToken)
+        private int Quiescence(Board board, int depth, int alpha, int beta, int ply, int qPly, CancellationToken cancellationToken)
         {
             if (ShouldStop(cancellationToken))
                 return _evaluator.Evaluate(board);
             _nodes++;
+
+            // 静搜置换表:任何既有条目(静搜深度 0 或主搜索更深)对静搜节点都够用。
+            // 本节点哈希必须在此处捕获:着法循环里 Push 之后 board.CurrentHash 是
+            // 子局面的,拿它存分会张冠李戴毒化置换表(首版实弹教训,2:6 惨案)。
+            ulong nodeHash = board.CurrentHash;
+            Move? ttMove = null;
+            if (_options.UseQuiescenceTT && _table.TryGet(nodeHash, ply, _options.MateScore, out var qEntry))
+            {
+                ttMove = qEntry.BestMove;
+                if (qEntry.Bound == TTBound.Exact)
+                    return qEntry.Score;
+                if (qEntry.Bound == TTBound.Lower)
+                    alpha = Math.Max(alpha, qEntry.Score);
+                else if (qEntry.Bound == TTBound.Upper)
+                    beta = Math.Min(beta, qEntry.Score);
+
+                if (alpha >= beta)
+                    return qEntry.Score;
+            }
 
             bool inCheck = !_generator.IsKingSafe(board, board.IsRedTurn);
             var legalMoves = _generator.GenerateLegalMoves(
@@ -390,12 +416,12 @@ namespace ChineseChessAI.Traditional
                 if (depth <= 0)
                     return _evaluator.Evaluate(board);
 
-                foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
+                foreach (var move in _moveOrdering.OrderMoves(board, legalMoves, ttMove))
                 {
                     board.Push(move.From, move.To);
                     try
                     {
-                        int score = -Quiescence(board, Math.Max(0, depth - 1), -beta, -alpha, ply + 1, cancellationToken);
+                        int score = -Quiescence(board, Math.Max(0, depth - 1), -beta, -alpha, ply + 1, qPly + 1, cancellationToken);
                         if (score >= beta)
                             return beta;
                         if (score > alpha)
@@ -410,33 +436,46 @@ namespace ChineseChessAI.Traditional
                 return alpha;
             }
 
-            // 一遍扫描同时完成立杀检测和战术着法(吃子或将军)筛选,
-            // 替代旧版"立杀一遍 Push+IsChecking、Where(GivesCheck) 再一遍"。
+            // 战术着法筛选。前 QuiescenceCheckPlies 层沿用一遍扫描(吃子或将军
+            // 都算战术着法,顺带立杀检测);更深层退化为纯吃子延伸——省掉对全部
+            // 合法着法逐一 Push+IsChecking 的探测,这是静搜每节点成本的大头。
+            bool includeChecks = qPly < _options.QuiescenceCheckPlies;
             var tacticalMoves = new List<Move>();
-            foreach (var move in legalMoves)
+            if (includeChecks)
             {
-                bool isCapture = board.GetPiece(move.To) != 0;
-                board.Push(move.From, move.To);
-                try
+                foreach (var move in legalMoves)
                 {
-                    if (_generator.IsChecking(board, !board.IsRedTurn))
+                    bool isCapture = board.GetPiece(move.To) != 0;
+                    board.Push(move.From, move.To);
+                    try
                     {
-                        var replies = _generator.GenerateLegalMoves(
-                            board,
-                            skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
-                        if (replies.Count == 0)
-                            return _options.MateScore - ply - 1;
+                        if (_generator.IsChecking(board, !board.IsRedTurn))
+                        {
+                            var replies = _generator.GenerateLegalMoves(
+                                board,
+                                skipPerpetualCheck: _options.SkipPerpetualCheckInsideSearch);
+                            if (replies.Count == 0)
+                                return _options.MateScore - ply - 1;
 
-                        tacticalMoves.Add(move);
+                            tacticalMoves.Add(move);
+                        }
+                        else if (isCapture)
+                        {
+                            tacticalMoves.Add(move);
+                        }
                     }
-                    else if (isCapture)
+                    finally
                     {
-                        tacticalMoves.Add(move);
+                        board.Pop();
                     }
                 }
-                finally
+            }
+            else
+            {
+                foreach (var move in legalMoves)
                 {
-                    board.Pop();
+                    if (board.GetPiece(move.To) != 0)
+                        tacticalMoves.Add(move);
                 }
             }
 
@@ -445,17 +484,17 @@ namespace ChineseChessAI.Traditional
             // (2026-08-17 俥8进9 事故,根局面可复现)。改为:禁止 stand-pat,像
             // 应将一样遍历全部合法着法找解;静搜预算耗尽无法核实时返回重罚分
             // (量级远超子力但不进杀分区间,不触发"找到必杀"早停)。
-            if (OpponentHasImmediateMateAtLeaf(board, cancellationToken))
+            if (OpponentHasImmediateMateAtLeafCached(board, cancellationToken))
             {
                 if (depth <= 0)
                     return -_options.MateScore / 4;
 
-                foreach (var move in _moveOrdering.OrderMoves(board, legalMoves))
+                foreach (var move in _moveOrdering.OrderMoves(board, legalMoves, ttMove))
                 {
                     board.Push(move.From, move.To);
                     try
                     {
-                        int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, cancellationToken);
+                        int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, qPly + 1, cancellationToken);
                         if (score >= beta)
                             return beta;
                         if (score > alpha)
@@ -472,22 +511,53 @@ namespace ChineseChessAI.Traditional
 
             int standPat = _evaluator.Evaluate(board);
             if (standPat >= beta)
+            {
+                if (_options.UseQuiescenceTT)
+                    _table.StoreQuiescence(nodeHash, beta, ttMove ?? default, TTBound.Lower, ply, _options.MateScore);
                 return beta;
+            }
+
             if (standPat > alpha)
                 alpha = standPat;
             if (depth <= 0)
                 return alpha;
 
-            foreach (var move in _moveOrdering.OrderMoves(board, tacticalMoves))
+            // 以下 alpha 已含 stand-pat 抬升;searchAlpha 用于收尾时判定 Upper/Exact。
+            int searchAlpha = alpha;
+            Move bestTacticalMove = default;
+            foreach (var move in _moveOrdering.OrderMoves(board, tacticalMoves, ttMove))
             {
+                sbyte victim = board.GetPiece(move.To);
+                if (victim != 0)
+                {
+                    // Delta 剪枝:吃到这个子加上边际都追不上 alpha,搜了也白搜。
+                    if (_options.UseQuiescenceDeltaPruning
+                        && standPat + PieceValue(victim) + _options.QuiescenceDeltaMargin <= alpha)
+                        continue;
+
+                    // 静态交换明亏的吃子(小子换不回来)直接跳过。
+                    if (_options.UseQuiescenceSeePruning
+                        && IsPotentiallyBadCapture(board, move)
+                        && EstimateSee(board, move) < 0)
+                        continue;
+                }
+
                 board.Push(move.From, move.To);
                 try
                 {
-                    int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, cancellationToken);
+                    int score = -Quiescence(board, depth - 1, -beta, -alpha, ply + 1, qPly + 1, cancellationToken);
                     if (score >= beta)
+                    {
+                        if (_options.UseQuiescenceTT && !_stopRequested)
+                            _table.StoreQuiescence(nodeHash, beta, move, TTBound.Lower, ply, _options.MateScore);
                         return beta;
+                    }
+
                     if (score > alpha)
+                    {
                         alpha = score;
+                        bestTacticalMove = move;
+                    }
                 }
                 finally
                 {
@@ -495,7 +565,25 @@ namespace ChineseChessAI.Traditional
                 }
             }
 
+            if (_options.UseQuiescenceTT && !_stopRequested)
+            {
+                TTBound bound = alpha > searchAlpha ? TTBound.Exact : TTBound.Upper;
+                _table.StoreQuiescence(nodeHash, alpha, bestTacticalMove, bound, ply, _options.MateScore);
+            }
+
             return alpha;
+        }
+
+        private bool OpponentHasImmediateMateAtLeafCached(Board board, CancellationToken cancellationToken)
+        {
+            if (_mateThreatCache.TryGetValue(board.CurrentHash, out bool cached))
+                return cached;
+
+            bool result = OpponentHasImmediateMateAtLeaf(board, cancellationToken);
+            // 停表/取消途中算出的结果不可信,不入缓存(整层结果本来也会作废)。
+            if (!_stopRequested)
+                _mateThreatCache[board.CurrentHash] = result;
+            return result;
         }
 
         private bool TryFindImmediateMate(Board board, List<Move> legalMoves, out Move mateMove, CancellationToken cancellationToken)

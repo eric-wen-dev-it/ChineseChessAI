@@ -1153,7 +1153,7 @@ namespace ChineseChessAI.Play
                 AppendLog(knowledgePositions > 0 || openingPositions > 0
                     ? $"Traditional engine ready. Book mode={bookMode}, knowledge positions={knowledgePositions}, opening positions={openingPositions}."
                     : "Traditional engine ready. No usable book cache (stale or missing) - playing bookless.");
-                AppendLog($"Traditional settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.TraditionalMoveTimeMs}ms, root_parallelism={ResolveTraditionalRootParallelism()}.");
+                AppendLog($"Traditional settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.TraditionalMoveTimeMs}ms, root_parallelism={ResolveTraditionalRootParallelism()}, enhanced_quiescence={(_playSettings.TraditionalEnhanced ? "on" : "off")}.");
             }
 
             if (needsPikafish)
@@ -1392,9 +1392,11 @@ namespace ChineseChessAI.Play
 
         private int ResolveTraditionalRootParallelism()
         {
-            return _playSettings.TraditionalRootParallelism > 0
-                ? _playSettings.TraditionalRootParallelism
-                : Math.Clamp(Environment.ProcessorCount, 1, 16);
+            // 默认单线程:旧"并行根"及 Lazy SMP 均实测劣于单线程(见 TraditionalEngine
+            // 注释)。仅当用户显式配 traditionalRootParallelism>1 才启用多线程 Lazy SMP。
+            return _playSettings.TraditionalRootParallelism > 1
+                ? Math.Clamp(_playSettings.TraditionalRootParallelism, 1, 16)
+                : 1;
         }
 
         private void RefreshEngineTypeUi()
@@ -1552,7 +1554,7 @@ namespace ChineseChessAI.Play
 
         private TraditionalEngineOptions CreateTraditionalOptions(OpeningBookMode bookMode)
         {
-            return new TraditionalEngineOptions
+            var options = new TraditionalEngineOptions
             {
                 OpeningBook = GetOrLoadOpeningBook(),
                 OpeningBookMode = bookMode,
@@ -1560,6 +1562,7 @@ namespace ChineseChessAI.Play
                 MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
                 RootParallelism = ResolveTraditionalRootParallelism()
             };
+            return _playSettings.TraditionalEnhanced ? options.WithEnhancedQuiescence() : options;
         }
 
         private OpeningBook GetOrLoadOpeningBook()
