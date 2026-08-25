@@ -264,6 +264,25 @@ namespace ChineseChessAI.Core
         }
 
         /// <summary>
+        /// 判定一步"即将走的着法"是否将军 / 捉子(供重复局面长将/长捉裁决逐手采集)。
+        /// board 为走子前局面(走子方=board.IsRedTurn);内部 Push+Pop 复原,不改变外部局面。
+        /// 捉子判定复用 IsForbiddenPerpetualMove 的既得攻击快照语义(将士象及未过河兵卒不计入捉)。
+        /// </summary>
+        public (bool GivesCheck, bool IsChase) ClassifyRepetitionThreat(Board board, Move move)
+        {
+            bool isRedAttacker = board.IsRedTurn;
+            var preMoveAttacks = RentTlsPreAttacks();
+            FillAttackPairs(board, isRedAttacker, preMoveAttacks);
+
+            board.Push(move.From, move.To);
+            bool gaveCheck = IsChecking(board, !board.IsRedTurn);
+            bool isChase = !gaveCheck && IsChasing(board, move, preMoveAttacks);
+            board.Pop();
+
+            return (gaveCheck, isChase);
+        }
+
+        /// <summary>
         /// 判断走子是否构成"捉"的威胁。
         /// 仅当攻击 (attackerPos, targetPos) 在走子前不存在（新生攻击或抽吃）时才计入捉，
         /// 排除既得既存攻击导致的误判。同时过滤"假打"（被牵制子的虚假攻击）。

@@ -21,6 +21,14 @@ namespace ChineseChessAI.Core
             return _generator.GenerateLegalMoves(board, skipPerpetualCheck, cancellationToken);
         }
 
+        /// <summary>
+        /// 采集一步着法的将军/捉子标记,供 <see cref="PerpetualRepetitionTracker"/> 逐手记录以裁决长将/长捉。
+        /// </summary>
+        public (bool GivesCheck, bool IsChase) ClassifyRepetitionThreat(Board board, Move move)
+        {
+            return _generator.ClassifyRepetitionThreat(board, move);
+        }
+
         public string ValidateMove(Board board, Move move, bool skipPerpetualCheck = false, CancellationToken cancellationToken = default)
         {
             return _generator.GetMoveValidationResult(board, move, skipPerpetualCheck, cancellationToken);

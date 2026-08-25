@@ -174,7 +174,10 @@ namespace ChineseChessAI.Training
                 if (agent.Id >= firstTraditionalId)
                 {
                     agent.EngineKind = "Traditional";
-                    agent.TraditionalDepth = Math.Clamp(agent.TraditionalDepth, 4, 8);
+                    // 标尺按 Id 顺序拉成确定性深度阶梯 4/5/6/7(不足则续 8),配合按深度分档的每手时限
+                    // (5/10/20/40s),消除旧"双胞胎同深度冗余",使 4 台成为真正分层的 Elo 锚点。
+                    int anchorRank = agent.Id - firstTraditionalId;
+                    agent.TraditionalDepth = Math.Clamp(4 + anchorRank, 4, 8);
                     agent.MctsSimulations = 0;
                     agent.Cpuct = 1.6;
                     agent.Temperature = 0.05;

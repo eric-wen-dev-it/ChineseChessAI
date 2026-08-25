@@ -54,6 +54,7 @@ namespace ChineseChessAI.Play
         private readonly Button[] _cellButtons = new Button[90];
         private readonly GameRuleSession _session = new();
         private readonly ChineseChessRuleEngine _rules = new();
+        private readonly PerpetualRepetitionTracker _perpTracker = new();
         private readonly HashSet<int> _legalTargets = new();
         private readonly PlayStrengthSettings _playSettings = LoadPlaySettings();
 
@@ -62,6 +63,10 @@ namespace ChineseChessAI.Play
         private MCTSEngine? _redMctsEngine;
         private MCTSEngine? _blackMctsEngine;
         private TraditionalEngine? _traditionalEngine;
+        // Black gets its own engine (own TT) when BOTH sides are Traditional -
+        // a shared TT lets one side free-ride on the other's deeper analysis,
+        // which invalidates depth-vs-depth comparisons.
+        private TraditionalEngine? _blackTraditionalEngine;
         private PikafishEngineClient? _pikafishEngine;
         private OpeningBook? _openingBook;
         private CancellationTokenSource? _aiCts;
@@ -82,7 +87,6 @@ namespace ChineseChessAI.Play
             InitializeBoard();
             Loaded += (_, _) => DrawBoardLines();
 
-            SimulationsTextBox.Text = _playSettings.DefaultSimulations.ToString();
             RedMctsModelPathTextBox.Text = FindDefaultModelPath();
             BlackMctsModelPathTextBox.Text = FindDefaultModelPath();
             PikafishPathTextBox.Text = FindDefaultPikafishPath();
@@ -211,6 +215,7 @@ namespace ChineseChessAI.Play
                 return;
 
             _session.Reset();
+            _perpTracker.Reset();
             if (_pikafishEngine != null)
                 await _pikafishEngine.NewGameAsync(CancellationToken.None);
             _gameOver = false;
@@ -248,6 +253,7 @@ namespace ChineseChessAI.Play
 
             DisposeEngine();
             _session.Reset();
+            _perpTracker.Reset();
             _gameOver = false;
             ResetSelection();
             LogBox.Clear();
@@ -266,13 +272,14 @@ namespace ChineseChessAI.Play
                 var blackEngine = new TraditionalEngine(CreateTraditionalOptions(bookMode));
                 const int demoMaxPly = 80;
                 const int demoMoveTimeMs = 5000;
-                int depth = 4;
+                int redDepth = ParseTraditionalDepth(red: true);
+                int blackDepth = ParseTraditionalDepth(red: false);
                 int quietPly = 0;
                 var positionCounts = new Dictionary<ulong, int>
                 {
                     [_session.Board.CurrentHash] = 1
                 };
-                AppendLog($"Traditional demo: opening_book={bookMode}, depth={depth}, move_time={demoMoveTimeMs}ms, max_ply={demoMaxPly}.");
+                AppendLog($"Traditional demo: opening_book={bookMode}, red_depth={redDepth}, black_depth={blackDepth}, move_time={demoMoveTimeMs}ms, max_ply={demoMaxPly}.");
 
                 for (int ply = 0; ply < demoMaxPly && !_gameOver; ply++)
                 {
@@ -280,6 +287,7 @@ namespace ChineseChessAI.Play
 
                     var activeEngine = _session.Board.IsRedTurn ? redEngine : blackEngine;
                     string actor = _session.Board.IsRedTurn ? "Red Traditional" : "Black Traditional";
+                    int depth = _session.Board.IsRedTurn ? redDepth : blackDepth;
                     UpdateUiState($"{actor} thinking at depth {depth}...");
 
                     var result = await Task.Run(
@@ -295,7 +303,7 @@ namespace ChineseChessAI.Play
 
                     AppendLog(result.FromBook
                         ? $"{actor} book move: {result.BestMove}."
-                        : $"{actor} search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms.");
+                        : $"{actor} search: depth={result.Depth}/{depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms, complete={result.Completed}.");
                     bool irreversible = _session.Board.GetPiece(result.BestMove.To) != 0 || Math.Abs(_session.Board.GetPiece(result.BestMove.From)) == 7;
                     if (!await TryValidateAndApplyMoveAsync(result.BestMove, actor, token))
                         break;
@@ -374,7 +382,7 @@ namespace ChineseChessAI.Play
                 return;
             }
 
-            int simulations = ParsePositiveIntOrDefault(SimulationsTextBox.Text, _playSettings.DefaultSimulations);
+            int simulations = _playSettings.DefaultSimulations;
             _evaluationCts?.Cancel();
             _evaluationCts?.Dispose();
             _evaluationCts = new CancellationTokenSource();
@@ -615,7 +623,7 @@ namespace ChineseChessAI.Play
                 || (playerKind == PlayPlayerKind.Pikafish && _pikafishEngine == null))
                 return;
 
-            int searchBudget = ParseSearchBudget(playerKind);
+            int searchBudget = ParseSideBudget(_session.Board.IsRedTurn);
             var token = ResetAiToken();
 
             _isAiThinking = true;
@@ -634,7 +642,8 @@ namespace ChineseChessAI.Play
                 Move move;
                 if (playerKind == PlayPlayerKind.Traditional)
                 {
-                    var engine = _traditionalEngine ?? throw new InvalidOperationException("Traditional engine is not initialized.");
+                    var engine = (_session.Board.IsRedTurn ? _traditionalEngine : _blackTraditionalEngine ?? _traditionalEngine)
+                        ?? throw new InvalidOperationException("Traditional engine is not initialized.");
                     var boardSnapshot = _session.Board.Clone();
                     var limits = new SearchLimits(searchBudget, _playSettings.TraditionalMoveTimeMs, 4);
                     var result = await Task.Run(
@@ -643,7 +652,7 @@ namespace ChineseChessAI.Play
                     move = result.BestMove;
                     AppendLog(result.FromBook
                         ? $"{side} Traditional book move: {move}."
-                        : $"{side} Traditional search: depth={result.Depth}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms, complete={result.Completed}.");
+                        : $"{side} Traditional search: depth={result.Depth}/{searchBudget}, score={result.Score}, nodes={result.Nodes}, time={result.Elapsed.TotalMilliseconds:F0}ms, complete={result.Completed}.");
                 }
                 else if (playerKind == PlayPlayerKind.Pikafish)
                 {
@@ -693,7 +702,12 @@ namespace ChineseChessAI.Play
         private void ApplyMove(Move move, string actor)
         {
             string moveName = _session.Board.GetChineseMoveName(move.From, move.To);
+            bool moverRed = _session.Board.IsRedTurn;
+            var perpThreat = _rules.ClassifyRepetitionThreat(_session.Board, move);
             _session.ApplyMove(move);
+            if (_session.Board.LastMoveWasIrreversible)
+                _perpTracker.Reset();
+            _perpTracker.Record(moverRed, perpThreat.GivesCheck, perpThreat.IsChase, _session.Board.CurrentHash);
             _redMctsEngine?.NotifyMovePlayed(_session.Board, move);
             if (!ReferenceEquals(_redMctsEngine, _blackMctsEngine))
             {
@@ -773,6 +787,20 @@ namespace ChineseChessAI.Play
 
             if (_session.CurrentRepetitionCount >= 3)
             {
+                // 三次重复:先判长将/长捉禁手(禁手方判负),非单方面禁手才判和。
+                var perpVerdict = _perpTracker.Classify();
+                if (perpVerdict != PerpetualVerdict.None)
+                {
+                    _gameOver = true;
+                    string offender = perpVerdict == PerpetualVerdict.RedLoses ? "Red" : "Black";
+                    string winner = perpVerdict == PerpetualVerdict.RedLoses ? "Black" : "Red";
+                    UpdateUiState($"{winner} wins ({offender} 长将/长捉 禁手).");
+                    AppendLog($"Game over: {winner} wins by {offender} 长将/长捉禁手判负.");
+                    ReleaseEnginesAfterGame();
+                    ShowGameOverDialog(winner, "长将/长捉禁手判负");
+                    return true;
+                }
+
                 FinishDraw("threefold repetition");
                 return true;
             }
@@ -1124,7 +1152,10 @@ namespace ChineseChessAI.Play
             bool needsPikafish = GetPlayerKind(true) == PlayPlayerKind.Pikafish || GetPlayerKind(false) == PlayPlayerKind.Pikafish;
 
             if (!needsTraditional)
+            {
                 _traditionalEngine = null;
+                _blackTraditionalEngine = null;
+            }
             if (!needsPikafish)
             {
                 _pikafishEngine?.Dispose();
@@ -1153,7 +1184,19 @@ namespace ChineseChessAI.Play
                 AppendLog(knowledgePositions > 0 || openingPositions > 0
                     ? $"Traditional engine ready. Book mode={bookMode}, knowledge positions={knowledgePositions}, opening positions={openingPositions}."
                     : "Traditional engine ready. No usable book cache (stale or missing) - playing bookless.");
-                AppendLog($"Traditional settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.TraditionalMoveTimeMs}ms, root_parallelism={ResolveTraditionalRootParallelism()}, enhanced_quiescence={(_playSettings.TraditionalEnhanced ? "on" : "off")}.");
+                AppendLog($"Traditional settings: depth(red/black)={ParseTraditionalDepth(true)}/{ParseTraditionalDepth(false)}, move_time={_playSettings.TraditionalMoveTimeMs}ms, root_parallelism={ResolveTraditionalRootParallelism()}, enhanced_quiescence={(_playSettings.TraditionalEnhanced ? "on" : "off")}.");
+            }
+
+            bool bothTraditional = GetPlayerKind(true) == PlayPlayerKind.Traditional
+                && GetPlayerKind(false) == PlayPlayerKind.Traditional;
+            if (!bothTraditional)
+            {
+                _blackTraditionalEngine = null;
+            }
+            else if (_blackTraditionalEngine == null)
+            {
+                _blackTraditionalEngine = new TraditionalEngine(CreateTraditionalOptions(ResolveTraditionalBookMode()));
+                AppendLog("Second Traditional engine ready for Black (independent transposition table).");
             }
 
             if (needsPikafish)
@@ -1188,7 +1231,7 @@ namespace ChineseChessAI.Play
                         await _pikafishEngine.NewGameAsync(CancellationToken.None);
                         _loadedPikafishPath = pikafishFullPath;
                         AppendLog($"Loaded Pikafish: {Path.GetFileName(pikafishFullPath)}");
-                        AppendLog($"Pikafish settings: depth={_playSettings.TraditionalDepth}, move_time={_playSettings.PikafishMoveTimeMs}ms.");
+                        AppendLog($"Pikafish settings: move_time={_playSettings.PikafishMoveTimeMs}ms (depth from the side budget box per move).");
                     }
                     catch (Exception ex)
                     {
@@ -1360,13 +1403,69 @@ namespace ChineseChessAI.Play
             return false;
         }
 
-        private int ParseSearchBudget(PlayPlayerKind playerKind)
+        private int ParseTraditionalDepth(bool red)
         {
-            if (int.TryParse(SimulationsTextBox.Text, out int value) && value > 0)
-                return playerKind is PlayPlayerKind.Traditional or PlayPlayerKind.Pikafish ? Math.Clamp(value, 1, 64) : value;
+            var box = red ? RedTraditionalDepthTextBox : BlackTraditionalDepthTextBox;
+            if (box != null && int.TryParse(box.Text, out int value) && value > 0)
+                return Math.Clamp(value, 1, 12);
 
-            int fallback = playerKind is PlayPlayerKind.Traditional or PlayPlayerKind.Pikafish ? _playSettings.TraditionalDepth : _playSettings.DefaultSimulations;
-            SimulationsTextBox.Text = fallback.ToString();
+            int fallback = Math.Clamp(_playSettings.TraditionalDepth, 1, 12);
+            if (box != null)
+                box.Text = fallback.ToString();
+            return fallback;
+        }
+
+        private PlayPlayerKind? _lastRedBudgetKind;
+        private PlayPlayerKind? _lastBlackBudgetKind;
+
+        /// <summary>预算框按该侧引擎换装:标签与默认值跟随引擎类型,Human 禁用。</summary>
+        private void RefreshSideBudgetUi(bool red)
+        {
+            var kind = GetPlayerKind(red);
+            var panel = red ? RedTraditionalDepthPanel : BlackTraditionalDepthPanel;
+            var label = red ? RedBudgetLabel : BlackBudgetLabel;
+            var box = red ? RedTraditionalDepthTextBox : BlackTraditionalDepthTextBox;
+            if (panel == null || label == null || box == null)
+                return;
+
+            panel.IsEnabled = kind != PlayPlayerKind.Human;
+            label.Text = kind switch
+            {
+                PlayPlayerKind.Mcts => "模拟次数",
+                PlayPlayerKind.Pikafish => "搜索深度(1-64)",
+                _ => "搜索深度(1-12)"
+            };
+
+            var last = red ? _lastRedBudgetKind : _lastBlackBudgetKind;
+            if (last != kind || string.IsNullOrWhiteSpace(box.Text))
+            {
+                box.Text = kind == PlayPlayerKind.Mcts
+                    ? _playSettings.DefaultSimulations.ToString()
+                    : _playSettings.TraditionalDepth.ToString();
+            }
+            if (red)
+                _lastRedBudgetKind = kind;
+            else
+                _lastBlackBudgetKind = kind;
+        }
+
+        /// <summary>该侧引擎的搜索预算,统一从该侧的预算框取:MCTS=模拟次数、
+        /// Traditional=深度(1-12)、Pikafish=深度(1-64)。</summary>
+        private int ParseSideBudget(bool red)
+        {
+            var kind = GetPlayerKind(red);
+            if (kind == PlayPlayerKind.Traditional)
+                return ParseTraditionalDepth(red);
+
+            var box = red ? RedTraditionalDepthTextBox : BlackTraditionalDepthTextBox;
+            if (box != null && int.TryParse(box.Text, out int value) && value > 0)
+                return kind == PlayPlayerKind.Pikafish ? Math.Clamp(value, 1, 64) : value;
+
+            int fallback = kind == PlayPlayerKind.Pikafish
+                ? Math.Clamp(_playSettings.TraditionalDepth, 1, 64)
+                : _playSettings.DefaultSimulations;
+            if (box != null)
+                box.Text = fallback.ToString();
             return fallback;
         }
 
@@ -1406,6 +1505,8 @@ namespace ChineseChessAI.Play
             bool mcts = NeedsMcts();
             bool redMcts = GetPlayerKind(true) == PlayPlayerKind.Mcts;
             bool blackMcts = GetPlayerKind(false) == PlayPlayerKind.Mcts;
+            RefreshSideBudgetUi(red: true);
+            RefreshSideBudgetUi(red: false);
             if (RedMctsModelFileLabel != null)
                 RedMctsModelFileLabel.IsEnabled = redMcts;
             if (RedMctsModelFilePanel != null)
@@ -1418,14 +1519,6 @@ namespace ChineseChessAI.Play
                 PikafishFileLabel.IsEnabled = pikafish;
             if (PikafishFilePanel != null)
                 PikafishFilePanel.IsEnabled = pikafish;
-            if (SearchBudgetLabel != null)
-                SearchBudgetLabel.Text = mcts && !traditional && !pikafish ? "模拟次数" : "搜索深度";
-
-            if (SimulationsTextBox != null)
-                SimulationsTextBox.Text = traditional || pikafish
-                    ? _playSettings.TraditionalDepth.ToString()
-                    : _playSettings.DefaultSimulations.ToString();
-
             if (RedMctsModelPathTextBox != null && string.IsNullOrWhiteSpace(RedMctsModelPathTextBox.Text))
                 RedMctsModelPathTextBox.Text = FindDefaultModelPath();
             if (BlackMctsModelPathTextBox != null && string.IsNullOrWhiteSpace(BlackMctsModelPathTextBox.Text))
@@ -1666,6 +1759,7 @@ namespace ChineseChessAI.Play
             DisposeMctsEngine(red: true);
             DisposeMctsEngine(red: false);
             _traditionalEngine = null;
+            _blackTraditionalEngine = null;
             _pikafishEngine?.Dispose();
             _pikafishEngine = null;
             _loadedPikafishPath = string.Empty;

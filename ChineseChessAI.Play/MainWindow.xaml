@@ -124,6 +124,19 @@
                         <ComboBoxItem Content="Traditional（传统搜索）" />
                         <ComboBoxItem Content="Pikafish" />
                     </ComboBox>
+                    <StackPanel x:Name="RedTraditionalDepthPanel"
+                                Orientation="Horizontal"
+                                Margin="0,6,0,0"
+                                IsEnabled="False">
+                        <TextBlock x:Name="RedBudgetLabel"
+                                   Text="搜索深度(1-12)"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,6,0" />
+                        <TextBox x:Name="RedTraditionalDepthTextBox"
+                                 Width="64"
+                                 Height="26"
+                                 VerticalContentAlignment="Center" />
+                    </StackPanel>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2">
@@ -139,6 +152,19 @@
                         <ComboBoxItem Content="Traditional（传统搜索）" />
                         <ComboBoxItem Content="Pikafish" />
                     </ComboBox>
+                    <StackPanel x:Name="BlackTraditionalDepthPanel"
+                                Orientation="Horizontal"
+                                Margin="0,6,0,0"
+                                IsEnabled="False">
+                        <TextBlock x:Name="BlackBudgetLabel"
+                                   Text="搜索深度(1-12)"
+                                   VerticalAlignment="Center"
+                                   Margin="0,0,6,0" />
+                        <TextBox x:Name="BlackTraditionalDepthTextBox"
+                                 Width="64"
+                                 Height="26"
+                                 VerticalContentAlignment="Center" />
+                    </StackPanel>
                 </StackPanel>
             </Grid>
 
@@ -211,16 +237,6 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Column="2">
-                    <TextBlock x:Name="SearchBudgetLabel"
-                               Margin="0,0,0,6"
-                               FontWeight="SemiBold"
-                               Text="模拟次数 / 深度" />
-                    <TextBox x:Name="SimulationsTextBox"
-                             Height="30"
-                             VerticalContentAlignment="Center"
-                             Text="2400" />
-                </StackPanel>
             </Grid>
 
             <WrapPanel Margin="0,16,0,0">

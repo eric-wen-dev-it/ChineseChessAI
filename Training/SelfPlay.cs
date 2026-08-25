@@ -109,6 +109,7 @@ namespace ChineseChessAI.Training
             {
                 [board.CurrentHash] = 1
             };
+            var perpTracker = new PerpetualRepetitionTracker();
             int noProgressCount = 0;
 
             while (true)
@@ -235,6 +236,7 @@ namespace ChineseChessAI.Training
 
                     moveHistory.Add(move);
                     moveHistoryUcci.Add(NotationConverter.MoveToUcci(move));
+                    var perpThreat = _rules.ClassifyRepetitionThreat(board, move);
                     board.Push(move.From, move.To);
                     NotifyEnginesMovePlayed(board, move);
 
@@ -248,6 +250,7 @@ namespace ChineseChessAI.Training
                     {
                         noProgressCount = 0;
                         positionHistory.Clear();
+                        perpTracker.Reset();
                     }
                     else
                     {
@@ -257,11 +260,23 @@ namespace ChineseChessAI.Training
                     if (!positionHistory.ContainsKey(currentHash))
                         positionHistory[currentHash] = 0;
                     positionHistory[currentHash]++;
+                    perpTracker.Record(isRed, perpThreat.GivesCheck, perpThreat.IsChase, currentHash);
 
                     _plyMsCounter.AddSample(plyStopwatch.ElapsedMilliseconds);
 
                     if (positionHistory[currentHash] >= 3)
                     {
+                        // 三次重复:先判长将/长捉禁手,禁手方判负;非单方面禁手才落普通裁决。
+                        var perpVerdict = perpTracker.Classify();
+                        if (perpVerdict != PerpetualVerdict.None)
+                        {
+                            finalResult = perpVerdict == PerpetualVerdict.RedLoses ? -1.0f : 1.0f;
+                            endReason = perpVerdict == PerpetualVerdict.RedLoses
+                                ? "红方长将/长捉禁手判负"
+                                : "黑方长将/长捉禁手判负";
+                            break;
+                        }
+
                         (finalResult, endReason) = await AdjudicateQuietEndAsync(board, moveHistory, "三次重复局面", cancellationToken);
                         break;
                     }

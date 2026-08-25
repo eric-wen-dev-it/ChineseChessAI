@@ -39,9 +39,64 @@ switch (command)
     case "engine-mcts":
         await RunMctsRepl(args);
         break;
+    case "perp-verify":
+        RunPerpVerify(args);
+        break;
     default:
         PrintHelp();
         break;
+}
+
+// 重放一整局 UCCI 谱,复刻 SelfPlay 的重复计数+长将/长捉逐手采集,在首个三次重复处打印裁决。
+static void RunPerpVerify(string[] args)
+{
+    string moves = GetStringArg(args, "--moves", "");
+    if (string.IsNullOrWhiteSpace(moves))
+    {
+        Console.WriteLine("usage: perp-verify --moves \"<ucci> <ucci> ...\"");
+        return;
+    }
+
+    var rules = new ChineseChessRuleEngine();
+    var board = new Board();
+    board.Reset();
+    var positionHistory = new Dictionary<ulong, int> { [board.CurrentHash] = 1 };
+    var tracker = new PerpetualRepetitionTracker();
+    int ply = 0;
+    foreach (string ucci in moves.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+    {
+        Move? parsed = ChineseChessAI.Utils.NotationConverter.UcciToMove(ucci);
+        if (parsed == null)
+        {
+            Console.WriteLine($"bad ucci: {ucci}");
+            return;
+        }
+        Move move = parsed.Value;
+        bool moverRed = board.IsRedTurn;
+        var threat = rules.ClassifyRepetitionThreat(board, move);
+        board.Push(move.From, move.To);
+        ply++;
+        ulong h = board.CurrentHash;
+        if (board.LastMoveWasIrreversible)
+        {
+            positionHistory.Clear();
+            tracker.Reset();
+        }
+        if (!positionHistory.ContainsKey(h))
+            positionHistory[h] = 0;
+        positionHistory[h]++;
+        tracker.Record(moverRed, threat.GivesCheck, threat.IsChase, h);
+
+        Console.WriteLine($"ply {ply,3} {ucci} mover={(moverRed ? "R" : "B")} check={threat.GivesCheck,-5} chase={threat.IsChase,-5} rep={positionHistory[h]}");
+
+        if (positionHistory[h] >= 3)
+        {
+            var verdict = tracker.Classify();
+            Console.WriteLine($"=> THREEFOLD at ply {ply}; verdict = {verdict}");
+            return;
+        }
+    }
+    Console.WriteLine("no threefold reached");
 }
 
 static void BuildBook(string repoRoot, string[] args)

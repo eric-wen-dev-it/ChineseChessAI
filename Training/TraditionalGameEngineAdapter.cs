@@ -6,7 +6,6 @@ namespace ChineseChessAI.Training
     public sealed class TraditionalGameEngineAdapter : IGameEngine
     {
         private const float BestMoveProbability = 0.85f;
-        private const int MoveTimeMs = 5000;
         private readonly TraditionalEngine _engine;
         private readonly int _quiescenceDepth;
         private readonly ChineseChessRuleEngine _rules = new ChineseChessRuleEngine();
@@ -25,6 +24,7 @@ namespace ChineseChessAI.Training
             CancellationToken cancellationToken)
         {
             int depth = Math.Clamp(searchBudget, 1, 12);
+            int moveTimeMs = ComputeMoveTimeMs(depth);
             var policy = new float[8100];
             var legalMoves = _rules.GetLegalMoves(board, skipPerpetualCheck: false, cancellationToken: cancellationToken);
             if (legalMoves.Count == 0)
@@ -33,10 +33,10 @@ namespace ChineseChessAI.Training
             SearchResult result;
             using (var moveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
-                moveCts.CancelAfter(MoveTimeMs);
+                moveCts.CancelAfter(moveTimeMs + 2000);
                 try
                 {
-                    result = _engine.Search(board, new SearchLimits(depth, MoveTimeMs, _quiescenceDepth), moveCts.Token);
+                    result = _engine.Search(board, new SearchLimits(depth, moveTimeMs, _quiescenceDepth), moveCts.Token);
                 }
                 catch (OperationCanceledException)
                 {
@@ -71,6 +71,18 @@ namespace ChineseChessAI.Training
 
         public void NotifyMovePlayed(Board boardAfterMove, Move move)
         {
+        }
+
+        /// <summary>
+        /// 标尺每手时限=目标深度的安全帽,按深度分档:depth≤4→5s、5→10s、6→20s、7→40s、≥8 封顶 40s
+        /// (5000 × 2^(depth-4),夹在 [5s, 40s])。给足时限让高深度标尺能可靠跑到名义深度、输出真实评分,
+        /// 而非卡在名义深度以下的浅层乐观分。
+        /// </summary>
+        private static int ComputeMoveTimeMs(int depth)
+        {
+            int shift = Math.Clamp(depth - 4, 0, 8);
+            long ms = 5000L * (1L << shift);
+            return (int)Math.Clamp(ms, 5000L, 40000L);
         }
 
         private static (Move Move, float[] Policy) CreateFallbackPolicy(List<Move> legalMoves, float[] policy)
