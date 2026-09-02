@@ -375,6 +375,7 @@ namespace ChineseChessAI.Training
                             step.UcciHistoryBefore,
                             step.IsRedTurn,
                             PikafishTeacherNodes,
+                            multiPv: 1,
                             analysisCts.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)

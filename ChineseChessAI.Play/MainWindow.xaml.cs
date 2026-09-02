@@ -374,10 +374,10 @@ namespace ChineseChessAI.Play
             if (_isEvaluationRunning || _isAiThinking)
                 return;
 
-            string candidatePath = RedMctsModelPathTextBox.Text.Trim();
-            string baselinePath = BlackMctsModelPathTextBox.Text.Trim();
-            if (!TryResolveModelPath(candidatePath, "Candidate/new model", out candidatePath)
-                || !TryResolveModelPath(baselinePath, "Baseline/old model", out baselinePath))
+            string candidateRaw = RedMctsModelPathTextBox.Text.Trim();
+            string baselineRaw = BlackMctsModelPathTextBox.Text.Trim();
+            if (!TryResolveEvalSpec(candidateRaw, "Candidate/new engine", out var candidateSpec)
+                || !TryResolveEvalSpec(baselineRaw, "Baseline/old engine", out var baselineSpec))
             {
                 return;
             }
@@ -395,13 +395,13 @@ namespace ChineseChessAI.Play
             _gameOver = false;
             RefreshBoard();
             UpdateUiState("Evaluation running...");
-            AppendLog($"Evaluation started: candidate={Path.GetFileName(candidatePath)}, baseline={Path.GetFileName(baselinePath)}, games={EvaluationGameCount}, sims={simulations}, c_puct={_playSettings.CPuct:F2}, root_noise=false.");
-            AppendLog("Candidate/new uses the red model box. Baseline/old uses the black model box. Colors alternate every game.");
+            AppendLog($"Evaluation started: candidate={candidateSpec.Describe()}, baseline={baselineSpec.Describe()}, games={EvaluationGameCount}, sims={simulations}, c_puct={_playSettings.CPuct:F2}, root_noise=false.");
+            AppendLog("Candidate uses the red box, baseline the black box. Put 'traditional:N' (e.g. traditional:4) in a box to face the depth-N traditional engine. Colors alternate every game.");
 
             try
             {
                 EvaluationSummary summary = await Task.Run(
-                    () => RunModelEvaluationAsync(candidatePath, baselinePath, simulations, token),
+                    () => RunModelEvaluationAsync(candidateSpec, baselineSpec, simulations, token),
                     token);
 
                 SaveEvaluationSummary(summary);
@@ -881,9 +881,151 @@ namespace ChineseChessAI.Play
                 humanWon ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
 
+        // 一方测评引擎的规格:MCTS 模型(.pt)或深度 N 传统引擎。
+        private readonly record struct EvalEngineSpec(bool IsTraditional, string ModelPath, int TraditionalDepth)
+        {
+            public string Describe() => IsTraditional ? $"Traditional(D{TraditionalDepth})" : Path.GetFileName(ModelPath);
+        }
+
+        // 模型框既可填 .pt 路径,也可填 "traditional:N"/"trad:N"(缺省深度 4)以对战传统引擎。
+        private bool TryResolveEvalSpec(string rawText, string label, out EvalEngineSpec spec)
+        {
+            spec = default;
+            string raw = (rawText ?? string.Empty).Trim();
+            if (TryParseTraditionalToken(raw, out int depth))
+            {
+                spec = new EvalEngineSpec(true, string.Empty, depth);
+                return true;
+            }
+
+            if (!TryResolveModelPath(raw, label, out string full))
+                return false;
+
+            spec = new EvalEngineSpec(false, full, 0);
+            return true;
+        }
+
+        private static bool TryParseTraditionalToken(string raw, out int depth)
+        {
+            depth = 4;
+            string s = raw.Trim().ToLowerInvariant();
+            if (!s.StartsWith("trad"))
+                return false;
+
+            int i = 0;
+            while (i < s.Length && char.IsLetter(s[i]))
+                i++;
+            while (i < s.Length && (s[i] is ':' or '=' or ' ' or '-'))
+                i++;
+
+            if (i < s.Length && int.TryParse(s.Substring(i), out int d))
+                depth = Math.Clamp(d, 1, 12);
+            return true;
+        }
+
+        // 与联赛锚点(TrainingOrchestrator.CreateLeagueGameEngine 传统档)完全一致的配置,保证测评胜率可对照。
+        private static TraditionalEngineOptions CreateAnchorTraditionalOptions()
+        {
+            var book = OpeningBook.LoadDefaultCache(maxPly: 24);
+            return new TraditionalEngineOptions
+            {
+                OpeningBook = book,
+                OpeningBookMode = book.PositionCount > 0 ? OpeningBookMode.Weighted : OpeningBookMode.Off,
+                MoveOrderingBook = OpeningBook.LoadDefaultCache(maxPly: 80, fileName: "master_move_ordering.json"),
+                MasterKnowledgeBook = MasterKnowledgeBook.LoadDefaultCache(maxPly: 120),
+                SkipPerpetualCheckAtRoot = true,
+                MateSearchPly = 3
+            }.WithEnhancedQuiescence();
+        }
+
+        // 与 TraditionalGameEngineAdapter.ComputeMoveTimeMs 同一阶梯:75000 x 2^(depth-4),夹 [75s,600s]。
+        private static int AnchorMoveTimeMs(int depth)
+        {
+            int shift = Math.Clamp(depth - 4, 0, 8);
+            long ms = 75000L * (1L << shift);
+            return (int)Math.Clamp(ms, 75000L, 600000L);
+        }
+
+        private EvalParticipant BuildEvalParticipant(EvalEngineSpec spec, string role, int simulations)
+        {
+            if (spec.IsTraditional)
+            {
+                int moveTimeMs = AnchorMoveTimeMs(spec.TraditionalDepth);
+                var engine = new TraditionalEngine(CreateAnchorTraditionalOptions());
+                return EvalParticipant.CreateTraditional(
+                    $"{role}:Traditional(D{spec.TraditionalDepth})", engine, spec.TraditionalDepth, moveTimeMs, quiescenceDepth: 12);
+            }
+
+            return EvalParticipant.CreateMcts(
+                $"{role}:{Path.GetFileName(spec.ModelPath)}", spec.ModelPath, simulations, _playSettings.BatchSize, _playSettings.CPuct);
+        }
+
+        // 测评一方:封装 MCTS(神经)或传统引擎,统一 PickMoveAsync 取招。MCTS 侧强制 addRootNoise:false 保持确定性。
+        private sealed class EvalParticipant : IDisposable
+        {
+            private readonly CChessNet? _model;
+            private readonly MCTSEngine? _mcts;
+            private readonly int _simulations;
+            private readonly TraditionalEngine? _traditional;
+            private readonly int _depth;
+            private readonly int _moveTimeMs;
+            private readonly int _quiescenceDepth;
+
+            public string Label { get; }
+
+            private EvalParticipant(string label, CChessNet? model, MCTSEngine? mcts, int simulations,
+                TraditionalEngine? traditional, int depth, int moveTimeMs, int quiescenceDepth)
+            {
+                Label = label;
+                _model = model;
+                _mcts = mcts;
+                _simulations = simulations;
+                _traditional = traditional;
+                _depth = depth;
+                _moveTimeMs = moveTimeMs;
+                _quiescenceDepth = quiescenceDepth;
+            }
+
+            public static EvalParticipant CreateMcts(string label, string modelPath, int simulations, int batchSize, double cPuct)
+            {
+                var model = new CChessNet();
+                ModelManager.LoadModel(model, modelPath);
+                var mcts = new MCTSEngine(model, batchSize, cPuct);
+                return new EvalParticipant(label, model, mcts, simulations, null, 0, 0, 0);
+            }
+
+            public static EvalParticipant CreateTraditional(string label, TraditionalEngine engine, int depth, int moveTimeMs, int quiescenceDepth)
+                => new EvalParticipant(label, null, null, 0, engine, depth, moveTimeMs, quiescenceDepth);
+
+            public async Task<Move> PickMoveAsync(Board board, int ply, int maxMoves, CancellationToken token)
+            {
+                if (_traditional != null)
+                {
+                    var snapshot = board.Clone();
+                    var result = await Task.Run(
+                        () => _traditional.Search(snapshot, new SearchLimits(_depth, _moveTimeMs, _quiescenceDepth), token),
+                        token).ConfigureAwait(false);
+                    return result.BestMove;
+                }
+
+                var (move, _) = await _mcts!.GetMoveWithProbabilitiesAsArrayAsync(
+                    board, _simulations, ply, maxMoves, token, addRootNoise: false).ConfigureAwait(false);
+                return move;
+            }
+
+            // 传统引擎无对局内部状态需要跟随;MCTS 需要每手推进搜索树。
+            public void Notify(Board boardAfterMove, Move move) => _mcts?.NotifyMovePlayed(boardAfterMove, move);
+
+            public void Dispose()
+            {
+                _mcts?.Dispose();
+                _model?.Dispose();
+            }
+        }
+
         private async Task<EvaluationSummary> RunModelEvaluationAsync(
-            string candidatePath,
-            string baselinePath,
+            EvalEngineSpec candidateSpec,
+            EvalEngineSpec baselineSpec,
             int simulations,
             CancellationToken token)
         {
@@ -893,12 +1035,8 @@ namespace ChineseChessAI.Play
             int draws = 0;
             double candidateScore = 0;
 
-            using var candidateModel = new CChessNet();
-            ModelManager.LoadModel(candidateModel, candidatePath);
-            using var baselineModel = new CChessNet();
-            ModelManager.LoadModel(baselineModel, baselinePath);
-            using var candidateEngine = new MCTSEngine(candidateModel, _playSettings.BatchSize, _playSettings.CPuct);
-            using var baselineEngine = new MCTSEngine(baselineModel, _playSettings.BatchSize, _playSettings.CPuct);
+            using EvalParticipant candidate = BuildEvalParticipant(candidateSpec, "Candidate", simulations);
+            using EvalParticipant baseline = BuildEvalParticipant(baselineSpec, "Baseline", simulations);
 
             for (int game = 1; game <= EvaluationGameCount; game++)
             {
@@ -910,9 +1048,8 @@ namespace ChineseChessAI.Play
                 EvaluationGameResult gameResult = await RunSingleEvaluationGameAsync(
                     game,
                     candidateIsRed,
-                    candidateEngine,
-                    baselineEngine,
-                    simulations,
+                    candidate,
+                    baseline,
                     token).ConfigureAwait(false);
 
                 stopwatch.Stop();
@@ -943,8 +1080,8 @@ namespace ChineseChessAI.Play
             return new EvaluationSummary(
                 startedAt,
                 endedAt,
-                candidatePath,
-                baselinePath,
+                candidateSpec.Describe(),
+                baselineSpec.Describe(),
                 EvaluationGameCount,
                 candidateWins,
                 baselineWins,
@@ -960,9 +1097,8 @@ namespace ChineseChessAI.Play
         private async Task<EvaluationGameResult> RunSingleEvaluationGameAsync(
             int gameNumber,
             bool candidateIsRed,
-            MCTSEngine candidateEngine,
-            MCTSEngine baselineEngine,
-            int simulations,
+            EvalParticipant candidate,
+            EvalParticipant baseline,
             CancellationToken token)
         {
             var rules = new ChineseChessRuleEngine();
@@ -994,14 +1130,8 @@ namespace ChineseChessAI.Play
                 }
 
                 bool candidateTurn = board.IsRedTurn == candidateIsRed;
-                var activeEngine = candidateTurn ? candidateEngine : baselineEngine;
-                var (move, _) = await activeEngine.GetMoveWithProbabilitiesAsArrayAsync(
-                    board,
-                    simulations,
-                    ply,
-                    DefaultMaxMoves,
-                    token,
-                    addRootNoise: false).ConfigureAwait(false);
+                var activePlayer = candidateTurn ? candidate : baseline;
+                Move move = await activePlayer.PickMoveAsync(board, ply, DefaultMaxMoves, token).ConfigureAwait(false);
 
                 if (!legalMoves.Any(m => m.From == move.From && m.To == move.To))
                 {
@@ -1017,11 +1147,8 @@ namespace ChineseChessAI.Play
                 }
 
                 board.Push(move.From, move.To);
-                candidateEngine.NotifyMovePlayed(board, move);
-                if (!ReferenceEquals(candidateEngine, baselineEngine))
-                {
-                    baselineEngine.NotifyMovePlayed(board, move);
-                }
+                candidate.Notify(board, move);
+                baseline.Notify(board, move);
 
                 if (board.LastMoveWasIrreversible)
                 {

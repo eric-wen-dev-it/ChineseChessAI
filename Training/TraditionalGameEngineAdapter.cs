@@ -74,15 +74,15 @@ namespace ChineseChessAI.Training
         }
 
         /// <summary>
-        /// 标尺每手时限=目标深度的安全帽,按深度分档:depth≤4→5s、5→10s、6→20s、7→40s、≥8 封顶 40s
-        /// (5000 × 2^(depth-4),夹在 [5s, 40s])。给足时限让高深度标尺能可靠跑到名义深度、输出真实评分,
+        /// 标尺每手时限=目标深度的安全帽,按深度分档:depth≤4→75s、5→150s、6→300s、7→600s、≥8 封顶 600s
+        /// (75000 × 2^(depth-4),夹在 [75s, 600s])。给足时限让高深度标尺能可靠跑到名义深度、输出真实评分,
         /// 而非卡在名义深度以下的浅层乐观分。
         /// </summary>
-        private static int ComputeMoveTimeMs(int depth)
+        public static int ComputeMoveTimeMs(int depth)
         {
             int shift = Math.Clamp(depth - 4, 0, 8);
-            long ms = 5000L * (1L << shift);
-            return (int)Math.Clamp(ms, 5000L, 40000L);
+            long ms = 75000L * (1L << shift);
+            return (int)Math.Clamp(ms, 75000L, 600000L);
         }
 
         private static (Move Move, float[] Policy) CreateFallbackPolicy(List<Move> legalMoves, float[] policy)

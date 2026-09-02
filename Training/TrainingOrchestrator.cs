@@ -96,6 +96,11 @@ namespace ChineseChessAI.Training
         private const int MaxLeagueTrainingGames = 5000;
         private const int TeacherBackfillNodes = 10000;
         private const int MasterTeacherBackfillNodes = 10000;
+        // MultiPV 软策略打分:取前 N 手候选,按分数 softmax 成教师策略分布(替代原单一最佳手 one-hot)。
+        // node 预算不变,故打分耗时基本不变——同样节点摊到 N 条线,牺牲的是每条线深度而非墙钟。
+        private const int TeacherMultiPv = 10;
+        // softmax 温度(厘兵)。越大分布越软;≈100cp 时相差一个兵的着法权重约为最佳手的 1/e。
+        private const float TeacherPolicyTemperatureCp = 100f;
         // 大师谱打分的样本级并发度,须小于 PikafishAdjudicator.MaxClientCount(12),
         // 留余量给对局裁决和联赛谱打分抢槽。
         private const int MasterTeacherBackfillConcurrency = 8;
@@ -745,13 +750,15 @@ namespace ChineseChessAI.Training
                                                 $"VS Agent_{agentMetaB.Id}(ELO:{agentMetaB.Elo:F0} {FormatEngineDna(agentMetaB)})");
 
                                             bool aIsRed = Random.Shared.Next(2) == 0;
+                                            TimeSpan gameTimeout = ComputeGameTimeout(agentMetaA, agentMetaB);
                                             using var gameTimeoutCts = CancellationTokenSource.CreateLinkedTokenSource(runCts.Token);
-                                            gameTimeoutCts.CancelAfter(LeagueGameTimeout);
+                                            gameTimeoutCts.CancelAfter(gameTimeout);
                                             using var timeoutNoticeCts = CancellationTokenSource.CreateLinkedTokenSource(runCts.Token);
                                             _ = LogGameTimeoutRequestAsync(
                                                 currentId,
                                                 agentMetaA.Id,
                                                 agentMetaB.Id,
+                                                gameTimeout,
                                                 gameTimeoutCts.Token,
                                                 timeoutNoticeCts.Token);
                                             var result = await selfPlay.RunGameAsync(aIsRed, null, gameTimeoutCts.Token);
@@ -800,7 +807,7 @@ namespace ChineseChessAI.Training
                                             {
                                                 string? savedRecordPath = SaveTimedOutLeagueRecord(currentId, agentMetaA, agentMetaB, result);
                                                 string savedSuffix = savedRecordPath == null ? string.Empty : $" | 记录: {Path.GetFileName(savedRecordPath)}";
-                                                Log($"[对局 #{currentId} 超时] Agent_{agentMetaA.Id} VS Agent_{agentMetaB.Id} | 超过 {LeagueGameTimeout.TotalMinutes:F0} 分钟终止 | 已走 {result.MoveCount} 步{savedSuffix}");
+                                                Log($"[对局 #{currentId} 超时] Agent_{agentMetaA.Id} VS Agent_{agentMetaB.Id} | 超过 {gameTimeout.TotalMinutes:F0} 分钟终止 | 已走 {result.MoveCount} 步{savedSuffix}");
 
                                                 if (result.MoveHistory.Count > 0)
                                                 {
@@ -1220,6 +1227,23 @@ namespace ChineseChessAI.Training
             return string.Equals(meta.EngineKind, "Traditional", StringComparison.OrdinalIgnoreCase);
         }
 
+        // 每局开始时按参与的传统引擎动态定单局超时=200 步 × 该引擎每步时限(取双方传统档中较大者)。
+        // 让深档标尺(d6=300s、d7=600s)的长局跑到理论上限也不会被固定 30min 截断/丢弃;纯 MCTS 局无
+        // 传统档,退回固定 LeagueGameTimeout。真正卡死的兜底交给看门狗静默重启。
+        private const int LeagueTimeoutPlies = 200;
+
+        private static TimeSpan ComputeGameTimeout(AgentMetadata a, AgentMetadata b)
+        {
+            int perMoveMs = 0;
+            if (IsTraditionalAgent(a))
+                perMoveMs = Math.Max(perMoveMs, TraditionalGameEngineAdapter.ComputeMoveTimeMs(Math.Clamp(a.TraditionalDepth, 1, 12)));
+            if (IsTraditionalAgent(b))
+                perMoveMs = Math.Max(perMoveMs, TraditionalGameEngineAdapter.ComputeMoveTimeMs(Math.Clamp(b.TraditionalDepth, 1, 12)));
+            if (perMoveMs <= 0)
+                return LeagueGameTimeout;
+            return TimeSpan.FromMilliseconds((long)LeagueTimeoutPlies * perMoveMs);
+        }
+
         private static int GetSearchBudget(AgentMetadata meta)
         {
             return IsTraditionalAgent(meta)
@@ -1367,6 +1391,7 @@ namespace ChineseChessAI.Training
                     example.UcciHistoryBefore,
                     redToMove,
                     TeacherBackfillNodes,
+                    TeacherMultiPv,
                     token).ConfigureAwait(false);
 
                 if (analysis == null)
@@ -1377,7 +1402,7 @@ namespace ChineseChessAI.Training
                     continue;
                 }
 
-                ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.BestMove, redToMove);
+                ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.TopMoves, analysis.BestMove, redToMove);
                 if (teacherPolicy != null)
                     policyLabels++;
 
@@ -1411,32 +1436,90 @@ namespace ChineseChessAI.Training
             }
         }
 
-        private static ActionProb[]? BuildTeacherSparsePolicy(string bestMove, bool redToMove)
+        // 由 Pikafish MultiPV 候选着法构造软教师策略:各候选按其评分(当前走子方视角)做 softmax,
+        // 归一化成概率分布。若 MultiPV 数据缺失(如旧路径 multiPv=1),回退为单一最佳手 one-hot。
+        // 输出统一为网络(红方)视角:黑方走子时翻转。
+        private static ActionProb[]? BuildTeacherSparsePolicy(
+            IReadOnlyList<PikafishCandidateMove> topMoves, string bestMove, bool redToMove)
         {
-            if (string.IsNullOrWhiteSpace(bestMove)
-                || bestMove == "0000"
-                || bestMove.Equals("(none)", StringComparison.OrdinalIgnoreCase))
+            var scored = new List<(int idx, float scoreCp)>();
+            if (topMoves != null)
             {
-                return null;
+                foreach (var cand in topMoves)
+                {
+                    int? idx = ToValidNetworkIndex(cand.Move);
+                    if (idx.HasValue)
+                        scored.Add((idx.Value, CandidateScoreCp(cand)));
+                }
             }
 
-            Move? move = NotationConverter.UcciToMove(bestMove);
+            // 保险:权威 bestmove 必须在分布内。若它那条线只以 bound 形式出现过、未进候选,
+            // 补入并赋当前最高分(它就是引擎选定的最佳手),避免软策略漏掉真正的最佳着。
+            int? bestIdx = ToValidNetworkIndex(bestMove);
+            if (bestIdx.HasValue && !scored.Any(s => s.idx == bestIdx.Value))
+            {
+                float topCp = scored.Count > 0 ? scored.Max(s => s.scoreCp) : 0f;
+                scored.Add((bestIdx.Value, topCp));
+            }
+
+            if (scored.Count == 0)
+                return null;
+
+            float maxCp = scored.Max(s => s.scoreCp);
+            float[] policy = new float[8100];
+            double sum = 0;
+            foreach (var (idx, scoreCp) in scored)
+            {
+                double weight = Math.Exp((scoreCp - maxCp) / TeacherPolicyTemperatureCp);
+                policy[idx] += (float)weight;
+                sum += weight;
+            }
+
+            if (sum <= 0 || !double.IsFinite(sum))
+                return null;
+
+            for (int i = 0; i < policy.Length; i++)
+                if (policy[i] > 0)
+                    policy[i] /= (float)sum;
+
+            if (!redToMove)
+                policy = StateEncoder.FlipPolicy(policy);
+
+            return policy
+                .Select((p, i) => new ActionProb(i, p))
+                .Where(x => x.Prob > 0)
+                .ToArray();
+        }
+
+        private static int? ToValidNetworkIndex(string ucci)
+        {
+            if (string.IsNullOrWhiteSpace(ucci)
+                || ucci == "0000"
+                || ucci.Equals("(none)", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            Move? move = NotationConverter.UcciToMove(ucci);
             if (!move.HasValue)
                 return null;
 
             int idx = move.Value.ToNetworkIndex();
-            if (idx < 0 || idx >= 8100)
-                return null;
+            return (idx >= 0 && idx < 8100) ? idx : null;
+        }
 
-            if (redToMove)
-                return new[] { new ActionProb(idx, 1.0f) };
+        // 将候选评分统一折算成厘兵分(当前走子方视角),供 softmax 使用。
+        // 杀棋映射为大额分值,越快的杀分越高;被杀对称取负——保证杀着永远压过普通着法。
+        private static float CandidateScoreCp(PikafishCandidateMove cand)
+        {
+            if (cand.MatePly.HasValue)
+            {
+                const float MateBaseCp = 30000f;
+                const float MateStepCp = 100f;
+                int m = cand.MatePly.Value;
+                float magnitude = MateBaseCp - Math.Min(Math.Abs(m), 200) * MateStepCp;
+                return m >= 0 ? magnitude : -magnitude;
+            }
 
-            float[] policy = new float[8100];
-            policy[idx] = 1.0f;
-            return StateEncoder.FlipPolicy(policy)
-                .Select((p, i) => new ActionProb(i, p))
-                .Where(x => x.Prob > 0)
-                .ToArray();
+            return cand.Centipawns ?? 0f;
         }
 
         private static TrainingExample StripTeacherHistory(TrainingExample example)
@@ -1590,6 +1673,7 @@ namespace ChineseChessAI.Training
                         historyBefore,
                         redToMove,
                         MasterTeacherBackfillNodes,
+                        TeacherMultiPv,
                         ct).ConfigureAwait(false);
 
                     if (analysis == null)
@@ -1599,7 +1683,7 @@ namespace ChineseChessAI.Training
                         return;
                     }
 
-                    ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.BestMove, redToMove);
+                    ActionProb[]? teacherPolicy = BuildTeacherSparsePolicy(analysis.TopMoves, analysis.BestMove, redToMove);
                     if (teacherPolicy != null)
                         Interlocked.Increment(ref policyLabels);
                     Interlocked.Increment(ref valueLabels);
@@ -1649,6 +1733,7 @@ namespace ChineseChessAI.Training
             int gameId,
             int agentIdA,
             int agentIdB,
+            TimeSpan gameTimeout,
             CancellationToken gameTimeoutToken,
             CancellationToken completionToken)
         {
@@ -1659,7 +1744,7 @@ namespace ChineseChessAI.Training
                 Task completedTask = await Task.WhenAny(timeoutTask, completionTask).ConfigureAwait(false);
                 if (completedTask == timeoutTask && gameTimeoutToken.IsCancellationRequested && !completionToken.IsCancellationRequested)
                 {
-                    Log($"[对局 #{gameId} 超时请求] Agent_{agentIdA} VS Agent_{agentIdB} | 已达到 {LeagueGameTimeout.TotalMinutes:F0} 分钟，已请求取消，等待对局任务退出。");
+                    Log($"[对局 #{gameId} 超时请求] Agent_{agentIdA} VS Agent_{agentIdB} | 已达到 {gameTimeout.TotalMinutes:F0} 分钟，已请求取消，等待对局任务退出。");
                 }
             }
             catch

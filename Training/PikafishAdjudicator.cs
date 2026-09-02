@@ -8,13 +8,17 @@ namespace ChineseChessAI.Training
 {
     public sealed record PikafishAdjudication(float ResultForRed, string ScoreText, int? Depth, string BestMove, bool IsMate);
 
+    // 一个候选着法及其 Pikafish 评分（cp 或 mate，均为当前走子方视角）。MultiPV 软策略打分用。
+    public sealed record PikafishCandidateMove(string Move, int? Centipawns, int? MatePly);
+
     public sealed record PikafishTeacherAnalysis(
         float ValueForCurrentPlayer,
         float ValueForRed,
         string BestMove,
         string ScoreText,
         int? Depth,
-        bool IsMate);
+        bool IsMate,
+        IReadOnlyList<PikafishCandidateMove> TopMoves);
 
     public static class PikafishAdjudicator
     {
@@ -38,6 +42,7 @@ namespace ChineseChessAI.Training
                 ucciHistory,
                 redToMove,
                 DefaultNodes,
+                multiPv: 1,
                 cancellationToken).ConfigureAwait(false);
 
             if (analysis == null)
@@ -72,6 +77,7 @@ namespace ChineseChessAI.Training
             IReadOnlyList<string> ucciHistory,
             bool redToMove,
             int nodes,
+            int multiPv,
             CancellationToken cancellationToken)
         {
             if (!CanAttemptInitialization())
@@ -90,11 +96,14 @@ namespace ChineseChessAI.Training
                     ucciHistory,
                     redToMove,
                     nodes,
+                    multiPv,
                     cancellationToken).ConfigureAwait(false);
                 returnClientToPool = true;
 
                 if (score == null)
                     return null;
+
+                IReadOnlyList<PikafishCandidateMove> topMoves = score.Candidates;
 
                 if (score.BestMove == "0000" || score.BestMove == "(none)")
                 {
@@ -106,7 +115,8 @@ namespace ChineseChessAI.Training
                         score.BestMove,
                         "bestmove none",
                         score.Depth,
-                        IsMate: true);
+                        IsMate: true,
+                        topMoves);
                 }
 
                 if (score.MatePly.HasValue)
@@ -120,7 +130,8 @@ namespace ChineseChessAI.Training
                         score.BestMove,
                         $"mate {score.MatePly.Value}",
                         score.Depth,
-                        IsMate: true);
+                        IsMate: true,
+                        topMoves);
                 }
 
                 if (!score.Centipawns.HasValue)
@@ -135,7 +146,8 @@ namespace ChineseChessAI.Training
                     score.BestMove,
                     $"cp {redCentipawns}",
                     score.Depth,
-                    IsMate: false);
+                    IsMate: false,
+                    topMoves);
             }
             catch (OperationCanceledException)
             {
@@ -257,12 +269,19 @@ namespace ChineseChessAI.Training
         }
     }
 
-    internal sealed record PikafishSearchScore(int? Centipawns, int? MatePly, int? Depth, string BestMove);
+    internal sealed record PikafishSearchScore(
+        int? Centipawns,
+        int? MatePly,
+        int? Depth,
+        string BestMove,
+        IReadOnlyList<PikafishCandidateMove> Candidates);
 
     internal sealed class PikafishEvaluationClient : IDisposable
     {
         private static readonly Regex ScoreRegex = new(@"score\s+(cp|mate)\s+(-?\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex DepthRegex = new(@"depth\s+(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex MultiPvRegex = new(@"multipv\s+(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex PvMoveRegex = new(@"\bpv\s+(\S+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private readonly Process _process;
         private readonly ConcurrentQueue<string> _lines = new();
         private readonly SemaphoreSlim _lineSignal = new(0);
@@ -307,18 +326,20 @@ namespace ChineseChessAI.Training
             IReadOnlyList<string> ucciHistory,
             bool redToMove,
             int nodes,
+            int multiPv,
             CancellationToken cancellationToken)
         {
             ClearPendingLines();
             SendLine("ucinewgame");
+            SendLine($"setoption name MultiPV value {Math.Max(1, multiPv)}");
             await WaitReadyAsync(cancellationToken).ConfigureAwait(false);
 
             string moves = ucciHistory.Count == 0 ? string.Empty : " moves " + string.Join(' ', ucciHistory);
             SendLine("position startpos" + moves);
             SendLine($"go nodes {Math.Max(1, nodes)}");
 
-            int? centipawns = null;
-            int? matePly = null;
+            // 每个 multipv 序号保留其最新（最深）一行的评分与首着；深层迭代覆盖浅层。
+            var candidateLines = new Dictionary<int, (int? cp, int? mate, string move)>();
             int? depth = null;
             string bestMove = string.Empty;
 
@@ -340,24 +361,31 @@ namespace ChineseChessAI.Training
 
                 if (line.StartsWith("info ", StringComparison.OrdinalIgnoreCase))
                 {
-                    var scoreMatch = ScoreRegex.Match(line);
-                    if (scoreMatch.Success && int.TryParse(scoreMatch.Groups[2].Value, out int scoreValue))
-                    {
-                        if (scoreMatch.Groups[1].Value.Equals("cp", StringComparison.OrdinalIgnoreCase))
-                        {
-                            centipawns = scoreValue;
-                            matePly = null;
-                        }
-                        else
-                        {
-                            matePly = scoreValue;
-                            centipawns = null;
-                        }
-                    }
-
                     var depthMatch = DepthRegex.Match(line);
                     if (depthMatch.Success && int.TryParse(depthMatch.Groups[1].Value, out int depthValue))
                         depth = depthValue;
+
+                    // 忽略未定型的下/上界评分，避免污染候选分。
+                    if (line.Contains("lowerbound", StringComparison.OrdinalIgnoreCase)
+                        || line.Contains("upperbound", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var scoreMatch = ScoreRegex.Match(line);
+                    var pvMatch = PvMoveRegex.Match(line);
+                    if (!scoreMatch.Success || !pvMatch.Success)
+                        continue;
+                    if (!int.TryParse(scoreMatch.Groups[2].Value, out int scoreValue))
+                        continue;
+
+                    int pvIndex = 1;
+                    var multiPvMatch = MultiPvRegex.Match(line);
+                    if (multiPvMatch.Success)
+                        int.TryParse(multiPvMatch.Groups[1].Value, out pvIndex);
+
+                    bool isMate = scoreMatch.Groups[1].Value.Equals("mate", StringComparison.OrdinalIgnoreCase);
+                    candidateLines[pvIndex] = isMate
+                        ? ((int?)null, (int?)scoreValue, pvMatch.Groups[1].Value)
+                        : ((int?)scoreValue, (int?)null, pvMatch.Groups[1].Value);
                 }
                 else if (line.StartsWith("bestmove ", StringComparison.OrdinalIgnoreCase))
                 {
@@ -365,7 +393,19 @@ namespace ChineseChessAI.Training
                     if (parts.Length >= 2)
                         bestMove = parts[1];
 
-                    return new PikafishSearchScore(centipawns, matePly, depth, bestMove);
+                    var candidates = candidateLines
+                        .OrderBy(kvp => kvp.Key)
+                        .Select(kvp => new PikafishCandidateMove(kvp.Value.move, kvp.Value.cp, kvp.Value.mate))
+                        .ToList();
+
+                    // 价值标签取最佳线（multipv 1）的评分；缺失则回退到任一候选，均无则空。
+                    (int? cp, int? mate, string _) best = candidateLines.TryGetValue(1, out var top)
+                        ? top
+                        : candidateLines.Count > 0
+                            ? candidateLines.OrderBy(kvp => kvp.Key).First().Value
+                            : (null, null, string.Empty);
+
+                    return new PikafishSearchScore(best.cp, best.mate, depth, bestMove, candidates);
                 }
             }
         }
